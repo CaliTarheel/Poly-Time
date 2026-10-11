@@ -5,6 +5,8 @@ Launch with --port 8768. A separate parent process enforces the same absolute
 Windows Job Object containment prevents orphan workers. A timeout recovers only
 the saved-run viewer; it never resumes the simulation automatically. --workers
 is a performance control forwarded to the server (whose default is up to two workers).
+--no-step-deadline lifts both the cooperative budget and the parent's termination of a
+slow interval; a step then runs until it finishes. The default keeps the 1800 s/Myr guard.
 """
 import argparse
 import copy
@@ -22,6 +24,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 MARKER = ROOT / 'output' / 'portable-controller-active.json'
 FAILURE = ROOT / 'output' / 'portable-controller-failure.json'
+STEP_SECONDS_PER_MYR = 1800.
+# Budget snapshots must stay finite, so "no deadline" is a horizon no run reaches (~32 years/Myr).
+UNLIMITED_SECONDS_PER_MYR = 1e9
+
+
+def step_seconds_per_myr(step_deadline=True):
+    return STEP_SECONDS_PER_MYR if step_deadline else UNLIMITED_SECONDS_PER_MYR
+
+
+def deadline_passed(marker, now, step_deadline=True):
+    """Whether the parent must terminate the owned tree for this active interval."""
+    return bool(step_deadline and marker.get('active') and now >= marker['deadline'])
 
 
 def write_control_json(path, value):
@@ -162,12 +176,14 @@ class WindowsOwnedServer:
         self.handle = self.job = None
 
 
-def launch_server(port, workers=None):
+def launch_server(port, workers=None, step_deadline=True):
     if os.name != 'nt':
         raise RuntimeError('This local controller requires Windows process-tree containment.')
     command = [sys.executable, '-B', str(Path(__file__).resolve()), '--child', '--port', str(port)]
     if workers is not None:
         command += ['--workers', str(workers)]
+    if not step_deadline:
+        command += ['--no-step-deadline']
     return WindowsOwnedServer(command)
 
 
@@ -225,8 +241,9 @@ def recover_view(child, marker, port, workers=None, *, launch=launch_server,
         raise RuntimeError(receipt['blocker']) from error
 
 
-def serve(port, workers=None):
+def serve(port, workers=None, step_deadline=True):
     import budget
+    seconds_per_myr = step_seconds_per_myr(step_deadline)
     import coarse_history
     import server
 
@@ -269,7 +286,7 @@ def serve(port, workers=None):
             self.current['controller'] = 'portable_fresh_v1'
             durable = copy.deepcopy(self.current)
             try:
-                server.write_json(MARKER, dict(active=True, deadline=time.perf_counter()+1800,
+                server.write_json(MARKER, dict(active=True, deadline=time.perf_counter()+seconds_per_myr,
                                               run_id=self.current['run_id'], phase='initialization'))
                 if resuming:
                     simulation, saved = server.read_checkpoint(self.path()/self._resume_checkpoint_name,
@@ -295,7 +312,7 @@ def serve(port, workers=None):
                 stop = float(config['duration_myr'])
                 while simulation.t < stop-1e-8 and not self.stop.is_set() and not self.pause_requested.is_set():
                     dt = min(1., config['dt_myr'], next_output-simulation.t, stop-simulation.t)
-                    with budget.step_budget(dt) as clock:
+                    with budget.step_budget(dt, seconds_per_myr=seconds_per_myr) as clock:
                         server.write_json(MARKER, dict(active=True, deadline=clock.deadline,
                             run_id=self.current['run_id'], source_time_myr=float(simulation.t)))
                         source = float(simulation.t)
@@ -336,18 +353,21 @@ def main():
     parser.add_argument('--port', type=int, default=8768)
     parser.add_argument('--child', action='store_true')
     parser.add_argument('--workers', type=int, help='Concurrent workers; defaults to the server default.')
+    parser.add_argument('--no-step-deadline', action='store_true',
+        help='Never terminate or abort an interval for exceeding 1800 s/Myr; it runs until it finishes.')
     args = parser.parse_args()
+    step_deadline = not args.no_step_deadline
     if args.child:
-        serve(args.port, args.workers)
+        serve(args.port, args.workers, step_deadline)
         return
     MARKER.parent.mkdir(exist_ok=True)
     write_control_json(MARKER, dict(active=False))
-    child = launch_server(args.port, args.workers)
+    child = launch_server(args.port, args.workers, step_deadline)
     try:
         while child.poll() is None:
             try:
                 marker = json.loads(MARKER.read_text(encoding='utf-8'))
-                if marker.get('active') and time.perf_counter() >= marker['deadline']:
+                if deadline_passed(marker, time.perf_counter(), step_deadline):
                     child = recover_view(child, marker, args.port, args.workers)
                     print('Interval deadline exceeded; saved-run viewer recovered without resuming.', flush=True)
             except (FileNotFoundError, json.JSONDecodeError):
