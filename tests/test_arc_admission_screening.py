@@ -215,7 +215,8 @@ class ScreenedAdmissionTests(unittest.TestCase):
         self.assertGreater(evaluations,10)
         self.assertLessEqual(full,3)   # the first trial, the last one, and nothing in between
         for name in ('requested_footprint','last_examined_footprint'):
-            self.assertNotEqual(result['diagnostics'][name].get('reason'),'exact_material_obstruction')
+            self.assertNotEqual(result['diagnostics'][name].get('reason'),geometry._SCREENED)
+            self.assertIn('material_obstruction_km2',result['diagnostics'][name])
 
     def test_unobstructed_birth_is_one_full_measurement(self):
         result,full=self.both(lambda:beside_existing_footprint(400.,140.))

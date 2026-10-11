@@ -280,6 +280,7 @@ def _material_contexts(context, old_indices):
 
 
 _UNEXAMINED=object()
+_SCREENED='screened_exact_material_obstruction'
 
 
 def _exact_obstruction(context, vertices, faces, *, old_vertices=None, old_faces=None, old_indices=None,
@@ -389,16 +390,16 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
             # modifying the original plan or normalizing growth a second time.
             vertices=np.asarray(plan['vertices'],float)
             if old_vertices is None:vertices=vertices/np.linalg.norm(vertices,axis=1)[:,None]
-            geometry=dict(old_vertices=old_vertices,old_faces=old_faces,old_indices=old_indices,
-                          _old_cache=old_cache)
+            growth=dict(old_vertices=old_vertices,old_faces=old_faces,old_indices=old_indices,
+                        _old_cache=old_cache)
             exact=_UNEXAMINED
             if screening and not reported and first is not None:
-                exact=_exact_obstruction(context,vertices,plan['faces'],**geometry)
+                exact=_exact_obstruction(context,vertices,plan['faces'],**growth)
             if exact is not _UNEXAMINED and exact is not None:
                 # Never reported: a later trial replaces `last` before this function returns.
-                value=dict(admissible=False, reason='exact_material_obstruction')
+                value=dict(admissible=False, reason=_SCREENED)
             else:
-                value=inspect(context,vertices,plan['faces'],owner,_exact=exact,**geometry)
+                value=inspect(context,vertices,plan['faces'],owner,_exact=exact,**growth)
                 if exact is None and not value['admissible']:
                     # Blocked by something the exact material test cannot see (an owner
                     # boundary, lost old footprint): screening further trials only adds cost.
@@ -428,6 +429,8 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
             if measurement['admissible']:
                 lower=middle; best=(middle,plan,measurement)
             else: upper=middle
+    if any(value is not None and value.get('reason')==_SCREENED for value in (first,last)):
+        raise ValueError('Arc admission would report a trial it never measured.')
     accepted=0. if best is None else best[0]
     return dict(accepted_area_km2=accepted,pending_area_km2=requested-accepted,
         plan=None if best is None else best[1],
