@@ -235,9 +235,7 @@ def _owner_area(polygons, context, owner):
     return math.fsum(result)
 
 
-def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=None, old_indices=None,
-            _old_cache=None):
-    """Measure candidate-minus-old area and its independent material/owner losses."""
+def _candidate_triangles(vertices, faces):
     vertices=np.asarray(vertices,float); faces=np.asarray(faces)
     if (vertices.ndim!=2 or vertices.shape[1:]!=(3,) or not np.isfinite(vertices).all()
             or faces.ndim!=2 or faces.shape[1:]!=(3,) or faces.dtype.kind not in 'iu'
@@ -246,21 +244,69 @@ def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=Non
     triangles=vertices[faces]
     if np.any(np.einsum('ij,ij->i',triangles[:,0],np.cross(triangles[:,1],triangles[:,2]))<=0):
         raise ValueError('Arc admission requires outward material triangles.')
+    return triangles
+
+
+def _old_footprint(context, old_vertices, old_faces, _old_cache):
+    if old_vertices is None: return None
+    if old_faces is None: raise ValueError('An old growth footprint requires faces.')
+    if _old_cache is None:
+        return _context(old_vertices,old_faces,context['radius_km'])
+    # The factory may mutate its inputs. Reuse only byte-identical old
+    # geometry, with the same radius; never freeze a changed footprint.
+    v=np.asarray(old_vertices,float); f=np.asarray(old_faces,np.int64)
+    key=(v.shape,v.tobytes(),f.shape,f.tobytes(),context['radius_km'])
+    if _old_cache.get('key')!=key:
+        _old_cache.clear()
+        _old_cache.update(key=key,context=_context(v,f,context['radius_km']))
+    return _old_cache['context']
+
+
+def _material_contexts(context, old_indices):
+    base=context['material']
+    if old_indices is not None:
+        # Prime the caps on the shared lookup before copying it, so a growth
+        # shell inherits them instead of rebuilding them for every candidate.
+        _face_caps(base)
+        # Indices are in the current surface. Same-batch births are represented
+        # by updates below, so only original-context indices belong in base.
+        indices=np.asarray(old_indices,int)
+        base=dict(base,exclude=indices[indices<len(base['triangles'])])
+    material_contexts=[base]
+    for row in context['updates']:
+        if old_indices is not None and np.all(np.isin(row['indices'],old_indices)): continue
+        material_contexts.append(row['context'])
+    return material_contexts
+
+
+_UNEXAMINED=object()
+
+
+def _exact_obstruction(context, vertices, faces, *, old_vertices=None, old_faces=None, old_indices=None,
+                       _old_cache=None):
+    """The exact new-footprint/material test that ends `inspect`, run on its own.
+
+    A witness makes the candidate inadmissible whatever its areas measure, so a
+    caller that needs only that verdict can stop there. None is the test finding
+    nothing; `inspect` may be given it instead of repeating the test. If the test
+    cannot be evaluated the answer is _UNEXAMINED, and `inspect` decides (and
+    raises, where it would have) exactly as before.
+    """
+    triangles=_candidate_triangles(vertices,faces)
+    old=_old_footprint(context,old_vertices,old_faces,_old_cache)
+    import arc_material_exclusion
+    try:
+        return arc_material_exclusion.obstruction(triangles,_material_contexts(context,old_indices),old)
+    except ValueError:
+        return _UNEXAMINED
+
+
+def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=None, old_indices=None,
+            _old_cache=None, _exact=_UNEXAMINED):
+    """Measure candidate-minus-old area and its independent material/owner losses."""
+    triangles=_candidate_triangles(vertices,faces)
     candidate_area=math.fsum(clipping._area(p,context) for p in triangles)
-    old=None
-    if old_vertices is not None:
-        if old_faces is None: raise ValueError('An old growth footprint requires faces.')
-        if _old_cache is None:
-            old=_context(old_vertices,old_faces,context['radius_km'])
-        else:
-            # The factory may mutate its inputs. Reuse only byte-identical old
-            # geometry, with the same radius; never freeze a changed footprint.
-            v=np.asarray(old_vertices,float); f=np.asarray(old_faces,np.int64)
-            key=(v.shape,v.tobytes(),f.shape,f.tobytes(),context['radius_km'])
-            if _old_cache.get('key')!=key:
-                _old_cache.clear()
-                _old_cache.update(key=key,context=_context(v,f,context['radius_km']))
-            old=_old_cache['context']
+    old=_old_footprint(context,old_vertices,old_faces,_old_cache)
     shell=[]
     for polygon in triangles:
         shell.extend(_remaining(polygon,[old]) if old is not None else [polygon])
@@ -275,19 +321,7 @@ def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=Non
     # outer footprint. Signed area gain alone could conceal lost old terrain.
     lost=max(0.,old_area+new_area-candidate_area)
     water=[]
-    base=context['material']
-    if old_indices is not None:
-        # Prime the caps on the shared lookup before copying it, so a growth
-        # shell inherits them instead of rebuilding them for every candidate.
-        _face_caps(base)
-        # Indices are in the current surface. Same-batch births are represented
-        # by updates below, so only original-context indices belong in base.
-        indices=np.asarray(old_indices,int)
-        base=dict(base,exclude=indices[indices<len(base['triangles'])])
-    material_contexts=[base]
-    for row in context['updates']:
-        if old_indices is not None and np.all(np.isin(row['indices'],old_indices)): continue
-        material_contexts.append(row['context'])
+    material_contexts=_material_contexts(context,old_indices)
     for polygon in shell: water.extend(_remaining(polygon,material_contexts))
     water_area=math.fsum(clipping._area(p,context) for p in water)
     own_area=_owner_area(water,context,owner)
@@ -310,8 +344,12 @@ def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=Non
                     and foreign_vertices==0)
     exact_obstruction=None
     if admissible:
-        import arc_material_exclusion
-        exact_obstruction=arc_material_exclusion.obstruction(triangles,material_contexts,old)
+        if _exact is _UNEXAMINED:
+            import arc_material_exclusion
+            exact_obstruction=arc_material_exclusion.obstruction(triangles,material_contexts,old)
+        else:
+            # Already evaluated for this very candidate by _exact_obstruction.
+            exact_obstruction=_exact
         admissible=exact_obstruction is None
     return dict(candidate_area_km2=candidate_area,old_area_km2=old_area,new_footprint_area_km2=new_area,
         lost_old_footprint_area_km2=lost,material_obstruction_km2=material_loss,
@@ -328,12 +366,20 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
     Coarse backtracking finds a feasible lower amount. Subsequent bisection
     improves utilization but claims no global optimum for deformed footprints.
     Every returned positive amount has itself passed the exact geometry test.
+
+    Only three measurements leave this function: the first trial, the last one,
+    and the accepted one. A blocked source is typically rejected at twenty or so
+    amounts in between, where nothing but the verdict is used. Those trials are
+    screened with the exact material test alone: a witness is the same rejection
+    `inspect` would reach, without measuring areas nobody reads. The amounts tried,
+    their verdicts and every reported measurement are unchanged.
     """
     requested=float(requested_area_km2)
     if not np.isfinite(requested) or requested<0.: raise ValueError('Arc source area must be finite and nonnegative.')
-    count=0; first=None; best=None; last=None; old_cache={}
-    def evaluate(amount):
-        nonlocal count, first, last
+    count=0; first=None; best=None; last=None; old_cache={}; screening=True
+    def evaluate(amount, reported=True):
+        """`reported` is False when a rejection here cannot be the last trial."""
+        nonlocal count, first, last, screening
         count+=1; plan=factory(amount)
         if plan is None:
             value=dict(admissible=False, reason='unrepresentable_shared_mesh')
@@ -343,9 +389,20 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
             # modifying the original plan or normalizing growth a second time.
             vertices=np.asarray(plan['vertices'],float)
             if old_vertices is None:vertices=vertices/np.linalg.norm(vertices,axis=1)[:,None]
-            value=inspect(context,vertices,plan['faces'],owner,
-                          old_vertices=old_vertices,old_faces=old_faces,old_indices=old_indices,
+            geometry=dict(old_vertices=old_vertices,old_faces=old_faces,old_indices=old_indices,
                           _old_cache=old_cache)
+            exact=_UNEXAMINED
+            if screening and not reported and first is not None:
+                exact=_exact_obstruction(context,vertices,plan['faces'],**geometry)
+            if exact is not _UNEXAMINED and exact is not None:
+                # Never reported: a later trial replaces `last` before this function returns.
+                value=dict(admissible=False, reason='exact_material_obstruction')
+            else:
+                value=inspect(context,vertices,plan['faces'],owner,_exact=exact,**geometry)
+                if exact is None and not value['admissible']:
+                    # Blocked by something the exact material test cannot see (an owner
+                    # boundary, lost old footprint): screening further trials only adds cost.
+                    screening=False
             if value['admissible'] and old_vertices is None:
                 plan=dict(plan)
                 plan['_emplacement_stored_triangle_sha256']=hashlib.sha256(
@@ -355,15 +412,19 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
         return plan,value
     amount=requested; rejected=requested
     while amount>=minimum_area_km2 and count<32:
-        plan,measurement=evaluate(amount)
+        # A rejection is the last trial exactly when the loop cannot run again.
+        plan,measurement=evaluate(amount,reported=not (amount*.5>=minimum_area_km2 and count+1<32))
         if measurement['admissible']:
             best=(amount,plan,measurement); break
         rejected=amount; amount*=.5
     if best is not None and best[0]<requested:
         lower=best[0]; upper=rejected
-        for _ in range(20):
-            if upper-lower<=max(minimum_area_km2*1e-3,requested*1e-6): break
-            middle=(lower+upper)*.5; plan,measurement=evaluate(middle)
+        for step in range(20):
+            resolution=max(minimum_area_km2*1e-3,requested*1e-6)
+            if upper-lower<=resolution: break
+            middle=(lower+upper)*.5
+            # A rejection makes `middle` the upper end; it is the last trial if that closes the bracket.
+            plan,measurement=evaluate(middle,reported=step==19 or middle-lower<=resolution)
             if measurement['admissible']:
                 lower=middle; best=(middle,plan,measurement)
             else: upper=middle
