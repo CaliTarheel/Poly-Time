@@ -15,6 +15,7 @@ import numpy as np
 import mesh_geometry
 import native_boundary_geometry
 import convex_partition
+import vector_norm
 import native_spreading as clipping
 
 VERSION = 1
@@ -102,7 +103,7 @@ def _candidates(polygon, context):
 
 def _cap(vertices):
     center=clipping._unit(np.sum(vertices,axis=0))
-    if not len(vertices) or np.linalg.norm(center)<.5: return center,2.
+    if not len(vertices) or vector_norm.length(center)<.5: return center,2.
     angle=np.arccos(np.clip(vertices@center,-1.,1.)).max(initial=0.)
     # A sub-hemisphere spherical cap contains the minor arcs and all convex
     # face interiors, not just their vertices. Otherwise use the whole sphere.
@@ -140,7 +141,7 @@ def _remaining(polygon, contexts):
     parts=[polygon]
     center,chord_radius=_cap(polygon)
     for context in contexts:
-        if np.linalg.norm(center-context['cap_center'])>chord_radius+context['cap_chord_radius']+1e-11:
+        if vector_norm.length(center-context['cap_center'])>chord_radius+context['cap_chord_radius']+1e-11:
             continue
         candidates=_candidates(polygon, context)
         if 'active' in context:

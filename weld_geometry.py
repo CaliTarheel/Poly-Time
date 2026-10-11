@@ -9,6 +9,7 @@ import math
 import numpy as np
 
 import collision_fronts as fronts
+import vector_norm
 
 VERSION = 1
 
@@ -146,7 +147,7 @@ def integrate(operator, x, start, end, delta, *, velocity=None):
     velocity = operator@x if velocity is None else np.asarray(velocity, float)
     if velocity.shape != (2,) or not np.isfinite(velocity).all():
         raise ValueError('Weld integration requires two finite velocity modes.')
-    amplitude = float(np.linalg.norm(velocity))
+    amplitude = vector_norm.length(velocity)
     cuts = [start, end]
     if amplitude:
         phase = math.atan2(float(velocity[1]), float(velocity[0]))
