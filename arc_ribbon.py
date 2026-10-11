@@ -44,7 +44,7 @@ POLICY = dict(version=VERSION, source_column_km=SOURCE_COLUMN_KM, ridge_top_m=-1
               constructive_slope_deg=20., rim_km=5., band_km=50., maximum_column_km=75.,
               maximum_thickening_km_per_myr=1., foundation_column_km=8.,
               foundation_minimum_radius_km=11., foundation_maximum_radius_km=25.,
-              foundation_clearance_km=2., foundation_births_per_myr=8, foundation_attempts_per_myr=24,
+              foundation_clearance_km=2., foundation_births_per_myr=8, foundation_attempts_per_myr=16,
               routing='same_owner_arc_crust_within_band_of_origin_arc_front_span',
               order='oldest_origin_first_lowest_surface_first',
               widening='flat_foundation_in_free_owner_water_within_band',
@@ -472,10 +472,13 @@ def _thicken(s, faces, thickness_km, trace, trace_face):
 
 
 def _candidates(order, owners, arcs):
-    """One trial site per lattice cell of every overflowing origin's band, in origin order."""
+    """One trial site per lattice cell of every overflowing origin's band, in origin order.
+
+    Each site keeps how far it lies from the nearest arc-front span that proposed it.
+    """
     band, step = POLICY['band_km'], LATTICE_KM
     offsets = np.arange(-int(band//step), int(band//step)+1)*step/RADIUS_KM
-    sites, site_owner = [], []
+    sites, site_owner, site_offset = [], [], []
     for i in order:
         start, end = arcs[i]
         for a, b in zip(start, end):
@@ -494,13 +497,21 @@ def _candidates(order, owners, arcs):
                          + across[None, None, :]*np.sin(offsets)[None, :, None]).reshape(-1, 3)
             sites.append(site)
             site_owner.append(np.full(len(site), owners[i], np.int64))
+            site_offset.append(np.tile(np.abs(offsets)*RADIUS_KM, len(along)))
     if not sites:
-        return np.empty((0, 3)), np.empty(0, np.int64)
-    sites, site_owner = np.vstack(sites), np.concatenate(site_owner)
+        return np.empty((0, 3)), np.empty(0, np.int64), np.empty(0)
+    sites, site_owner, site_offset = np.vstack(sites), np.concatenate(site_owner), np.concatenate(site_offset)
     cell = np.floor(sites*(RADIUS_KM/step)).astype(np.int64)
-    _, first = np.unique(np.column_stack((site_owner, cell)), axis=0, return_index=True)
+    _, inverse = np.unique(np.column_stack((site_owner, cell)), axis=0, return_inverse=True)
+    inverse = inverse.ravel()
+    nearest = np.full(int(inverse.max())+1, np.inf)
+    np.minimum.at(nearest, inverse, site_offset)
+    # Of the proposals for one cell keep the first that lies closest to its arc front.
+    closest = np.flatnonzero(site_offset == nearest[inverse])
+    first = np.full(len(nearest), len(sites), np.int64)
+    np.minimum.at(first, inverse[closest], closest)
     first.sort()
-    return sites[first], site_owner[first]
+    return sites[first], site_owner[first], site_offset[first]
 
 
 def _found(s, ground, order, points, owners, provenance, arcs, overflow, interval_myr):
@@ -520,13 +531,13 @@ def _found(s, ground, order, points, owners, provenance, arcs, overflow, interva
 
     spent = np.zeros(len(points))
     born = []
-    result = dict(spent=spent, born=born, attempts=0, candidates=0)
+    result = dict(spent=spent, born=born, attempts=0, candidates=0, refused={})
     births = int(np.floor(POLICY['foundation_births_per_myr']*interval_myr+1e-9))
     attempts = int(np.floor(POLICY['foundation_attempts_per_myr']*interval_myr+1e-9))
     funders = np.array([i for i in order if overflow[i] > 0.], np.int64)
     if births < 1 or not len(funders) or float(overflow[funders].sum()) < source_area(minimum_radius):
         return result
-    sites, site_owner = _candidates(funders, owners, arcs)
+    sites, site_owner, site_offset = _candidates(funders, owners, arcs)
     if not len(sites):
         return result
     surface = s.material_surface
@@ -534,11 +545,11 @@ def _found(s, ground, order, points, owners, provenance, arcs, overflow, interva
     covered, _ = mesh_geometry.locate_points(sites, locator)
     placement = emplacement.prepare(s)
     keep = (covered < 0) & (native_boundary_geometry.sample_owners(sites, placement['owner']) == site_owner)
-    sites, site_owner = sites[keep], site_owner[keep]
+    sites, site_owner, site_offset = sites[keep], site_owner[keep], site_offset[keep]
     clearance = ground['coast'].nearest(sites)
     radius = np.minimum(maximum_radius, clearance-POLICY['foundation_clearance_km'])
     keep = radius >= minimum_radius
-    sites, site_owner, radius = sites[keep], site_owner[keep], radius[keep]
+    sites, site_owner, site_offset, radius = sites[keep], site_owner[keep], site_offset[keep], radius[keep]
     result['candidates'] = int(len(sites))
     if not len(sites):
         return result
@@ -552,9 +563,28 @@ def _found(s, ground, order, points, owners, provenance, arcs, overflow, interva
         np.minimum.at(nearest, segment_funder, funder_spans.each(site))
         return funders[(nearest <= POLICY['band_km']) & (owners[funders] == owner) & (left[funders] > 0.)]
 
+    bearing = np.arange(8)*np.pi/4.
+
+    def owned_radius(site, owner, allowed):
+        """Largest of a few radii whose rim lies wholly in the owner's own water; zero if none."""
+        east = _unit(np.cross([0., 0., 1.] if abs(site[2]) < .9 else [0., 1., 0.], site))
+        north = np.cross(site, east)
+        around = np.cos(bearing)[:, None]*east+np.sin(bearing)[:, None]*north
+        for trial in sorted({allowed, .5*(allowed+minimum_radius), minimum_radius}, reverse=True):
+            angle = (trial+POLICY['foundation_clearance_km'])/RADIUS_KM
+            rim = _unit(site*np.cos(angle)+around*np.sin(angle))
+            if np.all(native_boundary_geometry.sample_owners(rim, placement['owner']) == owner):
+                return trial
+        return 0.
+
+    def refuse(reason):
+        result['refused'][reason] = result['refused'].get(reason, 0)+1
+
     centres = np.empty((0, 3))
     reserved = np.empty(0)
-    for index in np.argsort(-np.floor(radius), kind='stable'):
+    # Widest first, because a wide foundation holds far more than a narrow one; among equals the
+    # one nearest its arc front, so that new ground widens the belt before it scatters.
+    for index in np.lexsort((np.arange(len(sites)), site_offset, -np.floor(radius))):
         if len(born) >= births or result['attempts'] >= attempts:
             break
         site, owner, allowed = sites[index], int(site_owner[index]), float(radius[index])
@@ -563,6 +593,9 @@ def _found(s, ground, order, points, owners, provenance, arcs, overflow, interva
             allowed = min(allowed, float(gap.min()))
             if allowed < minimum_radius:
                 continue
+        allowed = owned_radius(site, owner, allowed)
+        if allowed < minimum_radius:
+            continue
         paying = funding(site, owner)
         request = min(float(left[paying].sum()), source_area(allowed))
         if request < source_area(minimum_radius):
@@ -580,9 +613,15 @@ def _found(s, ground, order, points, owners, provenance, arcs, overflow, interva
                                       minimum_area_km2=source_area(minimum_radius))
         accepted = float(admission['accepted_area_km2'])
         if accepted <= 0.:
+            last = admission['diagnostics']['last_examined_footprint'] or {}
+            refuse(last.get('reason') or ('foreign_owner' if last.get('foreign_owner_vertices')
+                   or last.get('foreign_owner_obstruction_km2', 0.) > last.get('admission_tolerance_km2', 0.)
+                   else 'material' if last.get('material_obstruction_km2', 0.) > last.get('admission_tolerance_km2', 0.)
+                   else 'exact_material' if last.get('exact_material_obstruction') is not None else 'other'))
             continue
         plan = admission['plan']
         if not arc_birth_profile.birth(plan, accepted, basal)['diagnostics']['admissible']:
+            refuse('constructive_profile')
             continue
         first = len(s.mass)
         birth = native_arc_material._birth(s, cell, owner, accepted, position=site, basal_m=basal,
@@ -752,6 +791,7 @@ def transaction(s, cells, additions, *, positions=None, owners=None, source_prov
         foundation_source_area_km2=float(founded.sum()), foundation_volume_km3=SOURCE_COLUMN_KM*float(founded.sum()),
         foundations_born=len(foundations['born']), foundation_attempts=int(foundations['attempts']),
         foundation_candidates=int(foundations['candidates']),
+        foundation_refusals=dict(sorted(foundations['refused'].items())),
         foundations=[{name: row[name] for name in ('arc_id', 'owner', 'source_area_km2', 'volume_km3',
                                                    'footprint_area_km2', 'radius_km', 'new_faces')}
                      for row in foundations['born']],
