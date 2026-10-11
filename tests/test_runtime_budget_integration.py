@@ -1,5 +1,5 @@
 """Stdlib-only lifecycle checks: fake states, no real world/solver execution."""
-import ast,copy,importlib.util,math,sys,threading,types,unittest
+import ast,contextlib,copy,importlib.util,io,math,sys,threading,types,unittest
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 HERE=Path(__file__).resolve().parents[1]
@@ -64,6 +64,13 @@ class RuntimeBudgetTests(unittest.TestCase):
             with self.assertRaises(IncompleteContactStepError) as caught:fn((work,0,budget.snapshot()))
             self.assertEqual(caught.exception.runtime_budget_evidence['deadline'],1900.)
     def server_fixture(self,fail=False):
+        """A fake manager for the guarded `_run_owned`: one supplied interval clock, no guardian.
+
+        The controller hands the server its first interval budget and token, and the
+        accepted/terminal status is closed by `_finish_numerical_budget` (a guardian
+        handshake, not exercised here). An incomplete interval is published through
+        `write_json`. These fakes record exactly those two hand-offs.
+        """
         sim=types.SimpleNamespace(t=121.)
         def step(dt):
             self.assertIsNotNone(budget.current());self.now+=10
@@ -76,24 +83,43 @@ class RuntimeBudgetTests(unittest.TestCase):
             def update(self,t):return {}
             def finish(self):return {}
             def pause(self):return {}
-        m=types.SimpleNamespace(lock=threading.RLock(),stop=Flag(),pause_requested=Flag(),current={'frame_count':1,'frames':[{'time_myr':120.}], 'time_myr':120.},timing=Timing(),recovery_interval_myr=1.,_resume_checkpoint_name='checkpoint.npz',worker=None)
-        m._open_numerical_budget=lambda source,dt:None
-        m.path=lambda:Path('.');m.persist=lambda:None;m.frame=lambda i:{'index':i};m.snapshots=[];m.final=[];m.reports=[]
+        with budget.step_budget(1.):supplied=budget.snapshot()
+        m=types.SimpleNamespace(lock=threading.RLock(),stop=Flag(),pause_requested=Flag(),current={'frame_count':1,'frames':[{'time_myr':120.}], 'time_myr':120.},timing=Timing(),recovery_interval_myr=1.,_resume_checkpoint_name='checkpoint.npz',worker=None,
+            _initial_numerical_budget=supplied,_initial_numerical_token='fixture-interval')
+        m._open_numerical_budget=lambda source,dt:m.events.append('open')
+        m.path=lambda:Path('.');m.persist=lambda:None;m.frame=lambda i:{'index':i};m.snapshots=[];m.final=[];m.reports=[];m.incomplete=[];m.events=[]
         def snapshot(world,*a,**k):
-            self.assertIsNotNone(budget.current());m.snapshots.append(world.t);m.current['frame_count']+=1;m.current['time_myr']=world.t
+            self.assertIsNotNone(budget.current());m.snapshots.append(world.t);m.current['frame_count']+=1;m.current['time_myr']=world.t;m.events.append('snapshot')
         m._append_snapshot=snapshot
-        def final(frame):self.assertIsNotNone(budget.current());m.final.append(frame)
-        m.save_final=final;m._commit_checkpoint=lambda *a,**k:None
-        m._record_numerical_budget=lambda start,dt,done,error:m.reports.append((start,dt,done,error,budget.evidence()))
-        fn=extracted('server.py','_run_owned',{'budget':budget,'math':math,'Simulation':object,'read_checkpoint':lambda *a:(sim,{'next_output_myr':122.})})
+        def final(frame):self.assertIsNotNone(budget.current());m.final.append(frame);m.events.append('final')
+        m.save_final=final;m._commit_checkpoint=lambda *a,**k:m.events.append('checkpoint')
+        def finish(start,dt,world):
+            self.assertIsNotNone(budget.current());m.reports.append((start,dt,world.t,budget.evidence()));m.events.append('finish')
+        m._finish_numerical_budget=finish
+        def write_json(path,value):m.incomplete.append((Path(path).name,copy.deepcopy(value)))
+        fn=extracted('server.py','_run_owned',{'budget':budget,'math':math,'Simulation':object,'write_json':write_json,'read_checkpoint':lambda *a:(sim,{'next_output_myr':122.})})
         m.compatibility=lambda:{}
         return fn,m
     def test_server_budget_contains_step_snapshot_and_final_output(self):
         fn,m=self.server_fixture();fn(m,{'duration_myr':122.,'snapshot_myr':2.,'dt_myr':1.},None,True)
-        self.assertEqual(m.snapshots,[122.]);self.assertEqual(len(m.final),1);self.assertEqual(m.current['state'],'complete')
-        self.assertTrue(m.reports[0][2]);self.assertEqual(m.reports[0][4]['deadline'],1900.)
+        self.assertEqual(m.snapshots,[122.]);self.assertEqual(len(m.final),1)
+        # Required output is written before the interval is handed over, all on the supplied clock.
+        self.assertEqual(m.events,['open','snapshot','checkpoint','final','finish'])
+        start,dt,finished,evidence=m.reports[0]
+        self.assertEqual((start,dt,finished),(121.,1.,122.));self.assertEqual(evidence['deadline'],1900.)
+        self.assertEqual(evidence['events'][0]['stage'],'server_interval')
+        # Terminal status belongs to the accepted hand-off; nothing was published as incomplete.
+        self.assertEqual(m.current['state'],'running');self.assertEqual(m.incomplete,[])
     def test_server_records_exhaustion_without_fake_public_time(self):
-        fn,m=self.server_fixture(True);fn(m,{'duration_myr':122.,'snapshot_myr':2.,'dt_myr':1.},None,True)
+        fn,m=self.server_fixture(True)
+        with contextlib.redirect_stderr(io.StringIO()) as printed:fn(m,{'duration_myr':122.,'snapshot_myr':2.,'dt_myr':1.},None,True)
+        self.assertIn('BudgetExhausted: fixture deadline',printed.getvalue())
         self.assertEqual(m.current['state'],'error');self.assertEqual(m.current['time_myr'],120.);self.assertEqual(m.snapshots,[])
-        self.assertFalse(m.reports[0][2]);self.assertEqual(m.reports[0][3]['type'],'BudgetExhausted')
+        self.assertFalse(m.current['can_resume']);self.assertEqual(m.current['error'],'fixture deadline')
+        # The interval is never handed over as complete; its failure is published instead.
+        self.assertEqual(m.reports,[]);self.assertEqual(m.events,['open'])
+        (name,record),=m.incomplete
+        self.assertEqual(name,'numerical-budget-active.json')
+        self.assertFalse(record['active']);self.assertFalse(record['interval_and_required_output_completed'])
+        self.assertEqual(record['phase'],'incomplete');self.assertEqual(record['error'],{'type':'BudgetExhausted','message':'fixture deadline'})
 if __name__=='__main__':unittest.main()
