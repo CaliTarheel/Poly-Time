@@ -44,7 +44,7 @@ POLICY = dict(version=VERSION, source_column_km=SOURCE_COLUMN_KM, ridge_top_m=-1
               constructive_slope_deg=20., rim_km=5., band_km=50., maximum_column_km=75.,
               maximum_thickening_km_per_myr=1., foundation_column_km=8.,
               foundation_minimum_radius_km=11., foundation_maximum_radius_km=25.,
-              foundation_clearance_km=2., foundation_boundary_km=100., foundation_births_per_myr=8,
+              foundation_clearance_km=2., foundation_underthrust_margin_km=100., foundation_births_per_myr=8,
               foundation_attempts_per_myr=16,
               routing='same_owner_arc_crust_within_band_of_origin_arc_front_span',
               order='oldest_origin_first_lowest_surface_first',
@@ -515,6 +515,27 @@ def _candidates(order, owners, arcs):
     return sites[first], site_owner[first], site_offset[first]
 
 
+def underthrust_traces(s, owner, cutoff_km=None):
+    """Boundary traces along which this plate is being carried beneath a neighbour.
+
+    These are the trenches where it is the downgoing plate and its collision fronts. Ground founded
+    beside one is overridden within a few Myr and ends as one more buried sheet. A trench where the
+    plate is the overriding one is not among them: that is where an arc belongs.
+    """
+    import normal_partition
+    geometry = getattr(s, 'native_boundary_geometry', None) or {}
+    contact = np.asarray(geometry.get('contact_index', []), np.int64)
+    start = np.asarray(geometry.get('segments_start', []), float).reshape(-1, 3)
+    end = np.asarray(geometry.get('segments_end', []), float).reshape(-1, 3)
+    if not len(contact) or not hasattr(s, 'bcode'):
+        return Arcs(np.empty((0, 3)), np.empty((0, 3)), cutoff_km)
+    beside = (np.asarray(s.bp) == owner) | (np.asarray(s.bq) == owner)
+    carried = ((normal_partition.subduction(s) & (np.asarray(s.down) == owner))
+               | (normal_partition.collision(s) & beside))
+    take = carried[contact]
+    return Arcs(start[take], end[take], cutoff_km)
+
+
 def _found(s, ground, order, points, owners, provenance, arcs, overflow, interval_myr):
     """Found flat foundations in free owner water for magma the belt can never hold."""
     import arc_birth_profile
@@ -564,23 +585,24 @@ def _found(s, ground, order, points, owners, provenance, arcs, overflow, interva
         np.minimum.at(nearest, segment_funder, funder_spans.each(site))
         return funders[(nearest <= POLICY['band_km']) & (owners[funders] == owner) & (left[funders] > 0.)]
 
-    bearing = np.arange(16)*np.pi/8.
+    bearing = np.arange(8)*np.pi/4.
+    margin = POLICY['foundation_underthrust_margin_km']
+    hazards = {}
 
     def owned_radius(site, owner, allowed):
-        """Largest of a few radii that keeps the plate's own water all round; zero if none.
-
-        The rim must be the owner's, and so must a ring a boundary margin beyond it: ground founded
-        beside a plate boundary is overridden by the neighbour within a few Myr and ends its life
-        as one more buried sheet.
-        """
+        """Largest of a few radii with its rim in the plate's own water and clear of underthrusting."""
+        if owner not in hazards:
+            hazards[owner] = underthrust_traces(s, owner, maximum_radius+margin+1.)
+        allowed = min(allowed, float(hazards[owner].nearest(site[None])[0])-margin)
+        if allowed < minimum_radius:
+            return 0.
         east = _unit(np.cross([0., 0., 1.] if abs(site[2]) < .9 else [0., 1., 0.], site))
         north = np.cross(site, east)
         around = np.cos(bearing)[:, None]*east+np.sin(bearing)[:, None]*north
         for trial in sorted({allowed, .5*(allowed+minimum_radius), minimum_radius}, reverse=True):
-            rings = [_unit(site*np.cos(angle)+around*np.sin(angle)) for angle in (
-                (trial+POLICY['foundation_clearance_km'])/RADIUS_KM,
-                (trial+POLICY['foundation_boundary_km'])/RADIUS_KM)]
-            if np.all(native_boundary_geometry.sample_owners(np.vstack(rings), placement['owner']) == owner):
+            angle = (trial+POLICY['foundation_clearance_km'])/RADIUS_KM
+            rim = _unit(site*np.cos(angle)+around*np.sin(angle))
+            if np.all(native_boundary_geometry.sample_owners(rim, placement['owner']) == owner):
                 return trial
         return 0.
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -16,6 +17,7 @@ import crustal_structure as columns
 import mesh_history
 import native_arc_material as arcs
 import native_boundary_geometry as boundary
+import normal_partition
 from test_arc_birth_footprint import world
 from test_native_processes import ocean_fixture
 from test_arc_source_geometry import add, positions_in_cell
@@ -196,32 +198,61 @@ class ArcRibbonTransactionTests(unittest.TestCase):
         self.assertGreater(later['thickened_source_area_km2'], 0.)
         self.assertTrue(np.all(state.structure['thickness_km'][born] <= thickness+1.+1e-9))
 
-    def test_new_ground_keeps_a_margin_from_every_plate_boundary(self):
-        margin = ribbon.POLICY['foundation_boundary_km']
-        radius = ribbon.POLICY['foundation_maximum_radius_km']
-        results = {}
-        for inside in (60., margin+radius+15.):                    # km inside plate 1; plate 0 begins at y = 0
-            state = ocean_fixture(two=True)
-            state.native_arc_birth_profile_version = state.native_arc_footprint_version = 1
-            ribbon.activate(state)
-            point = unit([[1., inside/ribbon.RADIUS_KM, 0.]])
-            prepared = boundary.prepare_owner_sampling(state.native_mesh, state.plate, state.support,
-                                                       locator=state.native_locator)
-            self.assertEqual(boundary.sample_owners(point, prepared).tolist(), [1])
-            cells = state._indices(point)
+    def boundary_world(self, downgoing):
+        """Two ocean plates meeting at y = 0, every shared edge a trench with `downgoing` going under."""
+        state = ocean_fixture(two=True)
+        state.native_arc_birth_profile_version = state.native_arc_footprint_version = 1
+        state._boundaries()
+        state.down = np.full(len(state.bp), downgoing, dtype=state.down.dtype)
+        ribbon.activate(state)
+        prepared = boundary.prepare_owner_sampling(state.native_mesh, state.plate, state.support,
+                                                   locator=state.native_locator)
+        return state, prepared
+
+    def found_beside_boundary(self, downgoing, inside_km):
+        state, prepared = self.boundary_world(downgoing)
+        point = unit([[1., inside_km/ribbon.RADIUS_KM, 0.]])        # inside plate 1; plate 0 begins at y = 0
+        self.assertEqual(boundary.sample_owners(point, prepared).tolist(), [1])
+        cells = state._indices(point)
+        trench = np.ones(len(state.bp), bool)
+        with patch.object(normal_partition, 'subduction', return_value=trench), \
+                patch.object(normal_partition, 'collision', return_value=~trench):
             account = arcs.add_arc_crust(state, cells, np.array([600.]), positions=point,
                                          owners=np.array([1]), dt=1.)['ribbon']
-            results[inside] = account, state, prepared
-        near, state, _ = results[60.]
-        # Too close to the neighbouring plate: nothing is founded and nothing is spent trying.
-        self.assertEqual((near['foundations_born'], near['foundation_attempts'], len(state.mass)), (0, 0, 0))
-        self.assertAlmostEqual(near['pending_area_km2'], 600., places=9)
-        far, state, prepared = results[margin+radius+15.]
-        self.assertEqual((far['foundations_born'], far['foundation_refusals']), (1, {}))
+        return account, state, prepared
+
+    def test_no_ground_is_founded_where_its_plate_is_being_carried_under_a_neighbour(self):
+        margin = ribbon.POLICY['foundation_underthrust_margin_km']
+        account, state, _ = self.found_beside_boundary(1, 60.)
+        # Nothing is founded and no admission is spent on it; the magma waits.
+        self.assertEqual((account['foundations_born'], account['foundation_attempts'], len(state.mass)), (0, 0, 0))
+        self.assertAlmostEqual(account['pending_area_km2'], 600., places=9)
+        radius = ribbon.POLICY['foundation_maximum_radius_km']
+        account, state, _ = self.found_beside_boundary(1, margin+radius+15.)
+        self.assertEqual(account['foundations_born'], 1)
+        self.assertGreaterEqual(ribbon.RADIUS_KM*np.arcsin(state.material_surface['vertices'][:, 1]).min(), margin)
+
+    def test_ground_beside_a_trench_of_the_overriding_plate_keeps_its_footprint_in_that_plate(self):
+        account, state, prepared = self.found_beside_boundary(0, 60.)
+        self.assertGreaterEqual(account['foundations_born'], 1)
+        self.assertEqual(account['foundation_refusals'], {})
         vertices = state.material_surface['vertices']
         self.assertTrue(np.all(boundary.sample_owners(vertices, prepared) == 1))
         self.assertTrue(np.all(state.parcel_plate == 1))
-        self.assertGreaterEqual(ribbon.RADIUS_KM*np.arcsin(vertices[:, 1]).min(), margin-1.)
+        # 60 km from the trench leaves room for the widest foundation and its clearance.
+        self.assertGreater(max(row['radius_km'] for row in account['foundations']), 20.)
+
+    def test_underthrust_traces_are_only_the_fronts_where_the_plate_goes_under(self):
+        state, _ = self.boundary_world(1)
+        trench = np.ones(len(state.bp), bool)
+        with patch.object(normal_partition, 'subduction', return_value=trench), \
+                patch.object(normal_partition, 'collision', return_value=~trench):
+            under, over = ribbon.underthrust_traces(state, 1), ribbon.underthrust_traces(state, 0)
+        self.assertGreater(len(under.start), 0)
+        self.assertEqual(len(over.start), 0)
+        with patch.object(normal_partition, 'subduction', return_value=~trench), \
+                patch.object(normal_partition, 'collision', return_value=trench):
+            self.assertEqual(len(ribbon.underthrust_traces(state, 0).start), len(under.start))
 
     def test_candidate_sites_remember_their_distance_from_the_arc_front(self):
         a, b = unit([1., -.004, 0.]), unit([1., .004, 0.])
