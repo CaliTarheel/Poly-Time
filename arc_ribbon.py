@@ -44,7 +44,8 @@ POLICY = dict(version=VERSION, source_column_km=SOURCE_COLUMN_KM, ridge_top_m=-1
               constructive_slope_deg=20., rim_km=5., band_km=50., maximum_column_km=75.,
               maximum_thickening_km_per_myr=1., foundation_column_km=8.,
               foundation_minimum_radius_km=11., foundation_maximum_radius_km=25.,
-              foundation_clearance_km=2., foundation_births_per_myr=8, foundation_attempts_per_myr=16,
+              foundation_clearance_km=2., foundation_boundary_km=100., foundation_births_per_myr=8,
+              foundation_attempts_per_myr=16,
               routing='same_owner_arc_crust_within_band_of_origin_arc_front_span',
               order='oldest_origin_first_lowest_surface_first',
               widening='flat_foundation_in_free_owner_water_within_band',
@@ -563,17 +564,23 @@ def _found(s, ground, order, points, owners, provenance, arcs, overflow, interva
         np.minimum.at(nearest, segment_funder, funder_spans.each(site))
         return funders[(nearest <= POLICY['band_km']) & (owners[funders] == owner) & (left[funders] > 0.)]
 
-    bearing = np.arange(8)*np.pi/4.
+    bearing = np.arange(16)*np.pi/8.
 
     def owned_radius(site, owner, allowed):
-        """Largest of a few radii whose rim lies wholly in the owner's own water; zero if none."""
+        """Largest of a few radii that keeps the plate's own water all round; zero if none.
+
+        The rim must be the owner's, and so must a ring a boundary margin beyond it: ground founded
+        beside a plate boundary is overridden by the neighbour within a few Myr and ends its life
+        as one more buried sheet.
+        """
         east = _unit(np.cross([0., 0., 1.] if abs(site[2]) < .9 else [0., 1., 0.], site))
         north = np.cross(site, east)
         around = np.cos(bearing)[:, None]*east+np.sin(bearing)[:, None]*north
         for trial in sorted({allowed, .5*(allowed+minimum_radius), minimum_radius}, reverse=True):
-            angle = (trial+POLICY['foundation_clearance_km'])/RADIUS_KM
-            rim = _unit(site*np.cos(angle)+around*np.sin(angle))
-            if np.all(native_boundary_geometry.sample_owners(rim, placement['owner']) == owner):
+            rings = [_unit(site*np.cos(angle)+around*np.sin(angle)) for angle in (
+                (trial+POLICY['foundation_clearance_km'])/RADIUS_KM,
+                (trial+POLICY['foundation_boundary_km'])/RADIUS_KM)]
+            if np.all(native_boundary_geometry.sample_owners(np.vstack(rings), placement['owner']) == owner):
                 return trial
         return 0.
 

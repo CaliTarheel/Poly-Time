@@ -196,25 +196,32 @@ class ArcRibbonTransactionTests(unittest.TestCase):
         self.assertGreater(later['thickened_source_area_km2'], 0.)
         self.assertTrue(np.all(state.structure['thickness_km'][born] <= thickness+1.+1e-9))
 
-    def test_a_foundation_beside_a_plate_boundary_keeps_its_whole_footprint_in_its_own_plate(self):
-        state = ocean_fixture(two=True)
-        state.native_arc_birth_profile_version = state.native_arc_footprint_version = 1
-        ribbon.activate(state)
-        point = unit([[1., 15./ribbon.RADIUS_KM, 0.]])             # 15 km inside plate 1; plate 0 begins at y = 0
-        prepared = boundary.prepare_owner_sampling(state.native_mesh, state.plate, state.support,
-                                                   locator=state.native_locator)
-        self.assertEqual(boundary.sample_owners(point, prepared).tolist(), [1])
-        cells = state._indices(point)
-        account = arcs.add_arc_crust(state, cells, np.array([600.]), positions=point,
-                                     owners=np.array([1]), dt=1.)['ribbon']
-        self.assertGreaterEqual(account['foundations_born'], 1)
-        self.assertEqual(account['foundation_refusals'], {})
+    def test_new_ground_keeps_a_margin_from_every_plate_boundary(self):
+        margin = ribbon.POLICY['foundation_boundary_km']
+        radius = ribbon.POLICY['foundation_maximum_radius_km']
+        results = {}
+        for inside in (60., margin+radius+15.):                    # km inside plate 1; plate 0 begins at y = 0
+            state = ocean_fixture(two=True)
+            state.native_arc_birth_profile_version = state.native_arc_footprint_version = 1
+            ribbon.activate(state)
+            point = unit([[1., inside/ribbon.RADIUS_KM, 0.]])
+            prepared = boundary.prepare_owner_sampling(state.native_mesh, state.plate, state.support,
+                                                       locator=state.native_locator)
+            self.assertEqual(boundary.sample_owners(point, prepared).tolist(), [1])
+            cells = state._indices(point)
+            account = arcs.add_arc_crust(state, cells, np.array([600.]), positions=point,
+                                         owners=np.array([1]), dt=1.)['ribbon']
+            results[inside] = account, state, prepared
+        near, state, _ = results[60.]
+        # Too close to the neighbouring plate: nothing is founded and nothing is spent trying.
+        self.assertEqual((near['foundations_born'], near['foundation_attempts'], len(state.mass)), (0, 0, 0))
+        self.assertAlmostEqual(near['pending_area_km2'], 600., places=9)
+        far, state, prepared = results[margin+radius+15.]
+        self.assertEqual((far['foundations_born'], far['foundation_refusals']), (1, {}))
         vertices = state.material_surface['vertices']
         self.assertTrue(np.all(boundary.sample_owners(vertices, prepared) == 1))
         self.assertTrue(np.all(state.parcel_plate == 1))
-        # The widest radius that keeps the rim clear of the boundary is the smallest one here.
-        self.assertLess(max(row['radius_km'] for row in account['foundations']),
-                        ribbon.POLICY['foundation_minimum_radius_km'])
+        self.assertGreaterEqual(ribbon.RADIUS_KM*np.arcsin(vertices[:, 1]).min(), margin-1.)
 
     def test_candidate_sites_remember_their_distance_from_the_arc_front(self):
         a, b = unit([1., -.004, 0.]), unit([1., .004, 0.])
