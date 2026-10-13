@@ -41,7 +41,11 @@ def owner_frame(*, overlap=False, complete=False):
             # be fabricated without their explicit version metadata.
             if name in (set(mesh_history.TRANSPORT_DTYPES) | set(mesh_history.DEFORMATION_DTYPES)
                         | set(mesh_history.ARC_DTYPES) | set(mesh_history.collision_contacts.ARRAY_FIELDS)
-                        | set(mesh_history.collision_surface.ARRAY_FIELDS)):
+                        | set(mesh_history.collision_surface.ARRAY_FIELDS)
+                        | set(mesh_history.COAST_DTYPES) | set(mesh_history.localized_accretion.ARRAY_FIELDS)
+                        | set(mesh_history.lip_events.ARRAY_FIELDS) | set(mesh_history.eclogite_sink.ARRAY_FIELDS)
+                        | set(mesh_history.ENHANCED_RIFT_DTYPES)
+                        | set(mesh_history.numerical_accuracy.ARRAY_FIELDS)):
                 continue
             if name == 'native_boundary_edges':
                 source[name] = np.empty((0, 2), dtype)
