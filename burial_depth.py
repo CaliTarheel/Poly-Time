@@ -29,6 +29,11 @@ VERSION = 1
 MIN_PARALLEL_PARTITION_FACES = 16
 # Below this many regions one predicate call per region costs less than a shared one.
 MIN_SHARED_SIGN_REGIONS = 4
+# Binary64 regions stand when every cover's regions add up to that cover's own clip against
+# the lower face. The consumers allow a pair 2e-11 of the lower face against its cached overlap
+# area: half of it bounds the regions' sum, half the rounding of the clip they are summed to.
+COVER_CLOSURE = 1e-11
+FOOTPRINT_ROUNDING = 1e-11
 
 # Process-local pure geometry only. No Simulation/native-locator field is added.
 # These limits bound retained represented payload; entry/root counts also bound
@@ -713,6 +718,79 @@ def _clipped_regions(triangles, face, selected, upper, radius):
     return list(zip(polygons, covers))
 
 
+def _convex_represented(polygon):
+    """The polygon without the vertices rounding left on or inside its own hull, or None.
+
+    Two cuts along nearly the same line leave vertices a few ulps apart, and a fan through
+    them can turn the wrong way although the region is large and sound. Signs are exact on
+    the binary64 coordinates and no distance threshold is used. What is returned turns left
+    at every vertex; a region with no such polygon has no represented interior.
+    """
+    points = [_homogeneous(point) for point in polygon]
+    keep = list(range(len(points)))
+    while len(keep) >= 3:
+        flat = next((slot for slot in range(len(keep))
+                     if _homogeneous_det(points[keep[slot-1]], points[keep[slot]],
+                                         points[keep[(slot+1) % len(keep)]]) <= 0), None)
+        if flat is None:
+            break
+        del keep[flat]
+    if len(keep) < 3:
+        return None
+    convex = polygon if len(keep) == len(polygon) else polygon[keep]
+    return convex if _positive_binary64_winding(convex) else None
+
+
+def _rounding_sweep(polygon, radius):
+    """Area that rounded cuts can sweep along a polygon's perimeter (as _sensitive_region_area)."""
+    perimeter = np.linalg.norm(polygon-np.roll(polygon, 1, axis=0), axis=1).sum()
+    return 32*np.finfo(float).eps*perimeter*radius**2
+
+
+def _standing_regions(triangles, face, selected, upper, regions, areas, reference_area, radius):
+    """(regions, areas, error) when the binary64 regions can be used as they are, else None.
+
+    Called when a region's own conditioning is in doubt. A region's area relative to itself is
+    not what the consumers read: they read each cover's area on the lower face, and whole-face
+    closure cannot see area moved between covered and uncovered regions. So each cover is
+    clipped against the lower face once, that clip must be resolved to FOOTPRINT_ROUNDING of
+    the lower face, and the cover's regions must add up to it within COVER_CLOSURE. Before those
+    sums are taken, a region whose fan is in doubt is reduced to its exactly convex vertices,
+    and a region no larger than rounding can sweep along its own perimeter is left out: binary64
+    cannot tell it from the zero-width strip two cuts along one line leave behind, and exact
+    clipping would not have made that strip. Anything else is left to exact clipping.
+    """
+    lower = triangles[face]
+    if any(_uncertain_winding(triangles[index]) for index in np.r_[face, upper[selected]]):
+        return None
+    footprints = {}
+    for pair in selected:
+        triangle = triangles[upper[pair]]
+        inside, _ = _split(lower, geometry._triangle_planes(triangle), radius, triangle)
+        footprints[int(pair)] = geometry._polygon_area(inside, radius)
+        if footprints[int(pair)] > 0. and _rounding_sweep(inside, radius) > FOOTPRINT_ROUNDING*reference_area:
+            return None
+    kept, values = [], []
+    held = dict.fromkeys(footprints, 0.)
+    for (polygon, covering), area in zip(regions, areas):
+        if _uncertain_winding(polygon):
+            polygon = _convex_represented(polygon)
+            if polygon is None:
+                continue
+            area = geometry._polygon_area(polygon, radius)
+        if area <= _rounding_sweep(polygon, radius):
+            continue
+        kept.append((polygon, covering))
+        values.append(area)
+        for pair in covering:
+            held[pair] += area
+    values = np.array(values, float)
+    error = abs(float(values.sum())-reference_area)/reference_area
+    if error > 2e-10 or any(abs(held[pair]-footprints[pair]) > COVER_CLOSURE*reference_area for pair in held):
+        return None
+    return kept, values, error
+
+
 def _partition_face_uncached(triangles, face, selected, upper, reference_area, radius):
     """Disjoint local stack geometry shared by depth and interface mechanics."""
     if len(np.unique(upper[selected])) != len(selected):
@@ -724,9 +802,15 @@ def _partition_face_uncached(triangles, face, selected, upper, reference_area, r
     # Inspect their conditioning as well as every surviving regional area.
     sensitive_source=bool(len(selected) and np.any(geometry._triangle_area_condition(
         triangles[np.r_[face,upper[selected]]])))
-    if (error > 2e-10 or sensitive_source
-            or any(_uncertain_winding(polygon) or _sensitive_region_area(polygon,area,radius)
-                   for (polygon,_),area in zip(regions,areas))):
+    standing = None
+    if error <= 2e-10 and not sensitive_source:
+        standing = regions, areas, error
+        if any(_uncertain_winding(polygon) or _sensitive_region_area(polygon,area,radius)
+               for (polygon,_),area in zip(regions,areas)):
+            standing = _standing_regions(triangles, face, selected, upper, regions, areas, reference_area, radius)
+    if standing is not None:
+        regions, areas, error = standing
+    else:
         regions,areas=_precise_partition(triangles,face,selected,upper,radius=radius,reference_area=reference_area)
         # Unrepresentable regions carry exact rays shared by area and moments.
         # Safe binary64 projections still pass the unchanged regional contract;

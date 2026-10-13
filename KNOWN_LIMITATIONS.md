@@ -49,6 +49,8 @@ The retained backup design is **seeded point volcanic centers** along the overri
 
 Automatic fine refinement is disabled in the recorded coarse mode, but physical arc birth and topology changes can add geometry. This is not a fixed bound on mesh size or interval cost. Conservative merging or history compaction needs its own checks for ownership, sheet identity, material inventories, and provenance.
 
+Burial stack regions are no longer reclipped in exact arithmetic whenever one region's own conditioning is in doubt. Binary64 regions are kept when each covering face's regions add up to that face's single clip against the lower face within 1e-11 of the lower face, and that clip's rounding is bounded to the same share; a region no larger than rounding can sweep along its own perimeter is left out; exact clipping remains for thin source triangles, small or narrow lower faces, and any face that does not close. This holds each cover's area on a face to the 2e-11 the consumers already demand, far inside the 0.1% asked of model results, but an individual sliver region can carry a larger error relative to its own area than before, and a genuine region thinner than about a tenth of a micron is not represented.
+
 The 1800-second production cutoff is distinct from measured completed-step time. Small geometry tests, a fast individual phase, and a healthy browser interface do not prove that a whole interval, including required output, finishes within that limit.
 
 ## Validation and reproducibility remain limited
