@@ -82,7 +82,6 @@
   "tests.test_recovery_checkpoints.RecoveryTests.test_failed_atomic_replacement_keeps_latest_and_previous_complete": "guarded_manager",
   "tests.test_recovery_checkpoints.RecoveryTests.test_recovery_between_outputs_preserves_fractional_scheduler_and_adds_no_frames": "guarded_manager",
   "tests.test_reduced_collision_trajectory::import": "experiments",
-  "tests.test_rift_review.RiftReviewTests.test_new_mechanical_state_checkpoint_resumes_exactly_and_sources_are_captured": "undiagnosed",
   "tests.test_simulation_timing.SimulationTimingTests.test_eta_uses_integration_steps_even_when_no_new_frame_is_saved": "guarded_manager",
   "tests.test_simulation_timing.SimulationTimingTests.test_initialization_and_final_files_count_as_live_processing": "guarded_manager",
   "tests.test_simulation_timing.SimulationTimingTests.test_pause_serialization_and_resume_after_restart_keep_only_active_seconds": "guarded_manager",
