@@ -9,8 +9,6 @@
  "tests": {
   "tests.test_arc_pipeline.ArcPipelineTests.test_live_snapshot_and_native_sampling_agree_including_submerged_aprons": "undiagnosed",
   "tests.test_automatic_entry.AutomaticEntryTests.test_finite_front_native_source_path_consumes_the_endpoint_without_a_sliver": "experiments",
-  "tests.test_automatic_entry.AutomaticEntryTests.test_native_rupture_with_registered_entry_rolls_back_without_handoff": "undiagnosed",
-  "tests.test_automatic_entry.AutomaticEntryTests.test_registered_coupled_entry_requires_attached_source_slab": "undiagnosed",
   "tests.test_channel_admissible_native_contact::import": "experiments",
   "tests.test_channel_contact_line_quadrature::import": "experiments",
   "tests.test_channel_contact_line_union::import": "experiments",
@@ -58,7 +56,6 @@
   "tests.test_lite_geometry_acceleration_transition.GeometryAccelerationTransitionTests.test_deep_windows_history_short_stage_exact_copy_and_public_path_refusal": "undiagnosed",
   "tests.test_load_history_reuse.LoadHistoryReuseTests::setUpClass": "guarded_manager",
   "tests.test_native_collision_watch::import": "experiments",
-  "tests.test_native_continental_margin.NativeContinentalMarginTests.test_snapshot_sampler_schema_and_checkpoint_preserve_margin_version": "undiagnosed",
   "tests.test_native_entry_approach::import": "experiments",
   "tests.test_native_topology_accounting.NativeTopologyAccountingTests.test_signed_ocean_ledger_separates_removal_normalization_and_newborn_reset": "undiagnosed",
   "tests.test_native_two_continent_fixture::import": "experiments",
