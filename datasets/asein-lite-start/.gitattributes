@@ -1,0 +1,5 @@
+# Preserve the four archived files' exact bytes, even when moved to another repo.
+initial.json -text
+config.json -text
+original-artwork.json -text
+requested-config.json -text whitespace=cr-at-eol

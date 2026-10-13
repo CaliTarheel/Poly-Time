@@ -21,6 +21,11 @@ Inherited Lite configuration defaults and the included historical launchers do n
 
 ## What is included
 
+The original map and configuration for the Asein Lite history are archived in
+[Asein Lite starting conditions](datasets/asein-lite-start/README.md), with
+checksums and retrieval instructions. These are the 0 Myr inputs, not an evolved
+checkpoint or a portable production launcher.
+
 | Location | Contents |
 | --- | --- |
 | Root Python modules and `web/` | The simulation runtime and browser assets copied from the recorded runtime snapshot. |
