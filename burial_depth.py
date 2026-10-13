@@ -27,6 +27,8 @@ from exact_polygon import ExactPolygon
 VERSION = 1
 # Below this many uncached faces the process dispatch costs more than it saves.
 MIN_PARALLEL_PARTITION_FACES = 16
+# Below this many regions one predicate call per region costs less than a shared one.
+MIN_SHARED_SIGN_REGIONS = 4
 
 # Process-local pure geometry only. No Simulation/native-locator field is added.
 # These limits bound retained represented payload; entry/root counts also bound
@@ -606,24 +608,26 @@ def _precise_partition(triangles,face,selected,upper,*,radius=None,reference_are
         return result if radius is None else (result,np.asarray(areas))
 
 
-def _split(polygon, planes, radius, clipper=None):
+def _split(polygon, planes, radius, clipper=None, *, crossed=False):
     """Disjoint intersection/complement of a convex spherical clipping triangle.
 
     A complement piece violates the first clipping plane it fails. The
     remainder satisfies all earlier planes, so later pieces cannot overlap it.
     Every retained polygon is convex and can use the same great-circle kernel.
+    crossed=True states that the caller has already ruled out both early exits.
     """
     inside = polygon
     outside = []
-    # Most regions in a refined cover are wholly outside the next triangle.
-    # Avoid allocating clipped polygons when a separating plane proves that.
-    distances=(plane_distances(polygon[:,None,:],np.asarray(planes)[None,:,:])
-               if clipper is None else edge_distances(
-                   polygon[:,None,:],clipper[None,:,:],np.roll(clipper,-1,axis=0)[None,:,:]))
-    if np.any(np.max(distances, axis=0) < 0.):
-        return np.empty((0, 3)), [polygon]
-    if np.all(distances >= 0.):
-        return polygon, []
+    if not crossed:
+        # Most regions in a refined cover are wholly outside the next triangle.
+        # Avoid allocating clipped polygons when a separating plane proves that.
+        distances=(plane_distances(polygon[:,None,:],np.asarray(planes)[None,:,:])
+                   if clipper is None else edge_distances(
+                       polygon[:,None,:],clipper[None,:,:],np.roll(clipper,-1,axis=0)[None,:,:]))
+        if np.any(np.max(distances, axis=0) < 0.):
+            return np.empty((0, 3)), [polygon]
+        if np.all(distances >= 0.):
+            return polygon, []
     for index,plane in enumerate(planes):
         d=(plane_distances(inside,plane) if clipper is None else
            edge_distances(inside,clipper[index],clipper[(index+1)%len(clipper)]))
@@ -649,21 +653,71 @@ def _split(polygon, planes, radius, clipper=None):
     return inside, outside
 
 
+def _cover_signs(polygons, triangle):
+    """For each region: whether one edge of the cover excludes it, and whether the cover holds it.
+
+    These are the two early exits of _split, decided for every region by one predicate call.
+    The signs are the same exact-filtered ones, so neither answer can differ from _split's own.
+    """
+    sizes = np.fromiter((len(polygon) for polygon in polygons), int, len(polygons))
+    points = np.empty((len(polygons), int(sizes.max()), 3))
+    for size in np.unique(sizes):
+        rows = np.flatnonzero(sizes == size)
+        block = np.stack([polygons[row] for row in rows])
+        points[rows, :size] = block
+        # Padding repeats a vertex of the same region and cannot change either answer.
+        points[rows, size:] = block[:, :1]
+    # Neighbouring regions share their vertices: each distinct point is decided once.
+    _, first, place = np.unique(points.reshape(-1, 3).view(np.dtype((np.void, 24))).ravel(),
+                                return_index=True, return_inverse=True)
+    distances = edge_distances(points.reshape(-1, 3)[first][:, None, :], triangle[None, :, :],
+                               np.roll(triangle, -1, axis=0)[None, :, :])[place].reshape(points.shape)
+    excluded = np.any(distances.max(axis=1) < 0., axis=1)
+    return excluded, np.all(distances >= 0., axis=(1, 2)) & ~excluded
+
+
+def _clipped_regions(triangles, face, selected, upper, radius):
+    """Binary64 stack regions of one lower face, cover by cover.
+
+    Every region meets every cover, and nearly all of those meetings end in one of _split's
+    early exits. Only regions that a cover's edges cross are clipped; the regions, their order
+    and their coordinates are those of clipping every region against every cover.
+    """
+    polygons, covers = [triangles[face]], [()]
+    for pair in selected:
+        triangle = triangles[upper[pair]]
+        planes = geometry._triangle_planes(triangle)
+        # Several regions exist only once the lower face has been cut, and every region cut
+        # from it entered this list with positive area.
+        shared = len(polygons) >= MIN_SHARED_SIGN_REGIONS
+        if shared:
+            excluded, held = _cover_signs(polygons, triangle)
+        else:
+            excluded = held = (False,)*len(polygons)
+        next_polygons, next_covers = [], []
+        for polygon, covering, out, within in zip(polygons, covers, excluded, held):
+            if out:
+                next_polygons.append(polygon)
+                next_covers.append(covering)
+            elif within:
+                next_polygons.append(polygon)
+                next_covers.append(covering+(int(pair),))
+            else:
+                inside, outside = _split(polygon, planes, radius, triangle, crossed=shared)
+                next_polygons.extend(outside)
+                next_covers.extend([covering]*len(outside))
+                if geometry._polygon_area(inside, radius) > 0.:
+                    next_polygons.append(inside)
+                    next_covers.append(covering+(int(pair),))
+        polygons, covers = next_polygons, next_covers
+    return list(zip(polygons, covers))
+
+
 def _partition_face_uncached(triangles, face, selected, upper, reference_area, radius):
     """Disjoint local stack geometry shared by depth and interface mechanics."""
     if len(np.unique(upper[selected])) != len(selected):
         raise ValueError('Duplicate covering pair in burial geometry.')
-    regions = [(triangles[face], ())]
-    for pair in selected:
-        triangle = triangles[upper[pair]]
-        planes = geometry._triangle_planes(triangle)
-        next_regions = []
-        for polygon, covering in regions:
-            inside, outside = _split(polygon, planes, radius,triangle)
-            next_regions.extend((piece, covering) for piece in outside)
-            if geometry._polygon_area(inside, radius) > 0.:
-                next_regions.append((inside, covering+(int(pair),)))
-        regions = next_regions
+    regions = _clipped_regions(triangles, face, selected, upper, radius)
     areas = np.array([geometry._polygon_area(polygon, radius) for polygon, _ in regions])
     error = abs(float(areas.sum())-reference_area)/reference_area
     # Thin original triangles may lose a region before it reaches this list.
