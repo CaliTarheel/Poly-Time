@@ -5,7 +5,6 @@
   "tools": "Imports the `tools` package, which is not in this repository.",
   "guarded_manager": "Starts a fresh run through `server.SimulationManager`. This guarded entry point only resumes a prepared checkpoint under a controller: the worker stops for want of `_initial_numerical_budget` and the run never reaches the state the test waits for.",
   "saved_metadata": "Builds a saved frame without the dimensional numerical metadata the reader now requires (stale fixture).",
-  "stale_fake": "Uses a test double that lacks an attribute the code now reads (stale fake).",
   "undiagnosed": "Fails on the base branch on a clean machine; cause not yet diagnosed."
  },
  "tests": {
@@ -40,7 +39,6 @@
   "tests.test_checkpoint_branch.BranchTests.test_branch_copies_history_preserves_physics_parent_and_exact_pending_scheduler": "guarded_manager",
   "tests.test_checkpoint_branch.BranchTests.test_past_design_and_incompatible_source_are_rejected_before_creating_branch": "guarded_manager",
   "tests.test_checkpoint_branch.BranchTests.test_saved_source_tampering_is_rejected_before_publishing_branch": "guarded_manager",
-  "tests.test_collision_force_continuity.CollisionForceContinuityTests.test_actual_step_keeps_contact_after_consolidation_without_aging": "stale_fake",
   "tests.test_deforming_history_contract.DeformingHistoryContractTests.test_invalid_deformation_review_bounds_fail_before_overwriting_saved_frame": "saved_metadata",
   "tests.test_deforming_history_contract.DeformingHistoryContractTests.test_server_save_native_reader_and_oriented_review_retain_versioned_fields": "saved_metadata",
   "tests.test_deforming_history_contract.DeformingHistoryContractTests.test_versioned_chart_fields_survive_actual_saved_rotated_package": "saved_metadata",
@@ -74,8 +72,6 @@
   "tests.test_native_owner_sampling.NativeOwnerSamplingTests.test_saved_scores_and_rotated_native_reader_preserve_owner_sampling": "saved_metadata",
   "tests.test_native_topology_accounting.NativeTopologyAccountingTests.test_signed_ocean_ledger_separates_removal_normalization_and_newborn_reset": "undiagnosed",
   "tests.test_native_two_continent_fixture::import": "experiments",
-  "tests.test_passive_plate_resistance.PassiveForceSolveTests.test_single_normal_force_matches_piecewise_exact_solution": "stale_fake",
-  "tests.test_passive_plate_resistance.PassiveForceSolveTests.test_subyield_two_plate_relative_creep_shrinks_with_smoothing": "stale_fake",
   "tests.test_pause_resume.PauseResumeTests.test_atomic_checkpoint_failure_preserves_previous_commit_and_rejects_unknown_types": "guarded_manager",
   "tests.test_pause_resume.PauseResumeTests.test_cancel_is_terminal_even_when_requested_during_checkpoint_write": "guarded_manager",
   "tests.test_pause_resume.PauseResumeTests.test_checkpoint_commit_recovers_if_manifest_was_not_yet_replaced": "guarded_manager",
@@ -101,10 +97,6 @@
   "tests.test_simulation_timing.SimulationTimingTests.test_eta_uses_integration_steps_even_when_no_new_frame_is_saved": "guarded_manager",
   "tests.test_simulation_timing.SimulationTimingTests.test_initialization_and_final_files_count_as_live_processing": "guarded_manager",
   "tests.test_simulation_timing.SimulationTimingTests.test_pause_serialization_and_resume_after_restart_keep_only_active_seconds": "guarded_manager",
-  "tests.test_slab_depth_window.SlabDepthWindowTests.test_force_and_drag_use_current_trace_and_ignore_edge_subdivision": "stale_fake",
-  "tests.test_slab_depth_window.SlabDepthWindowTests.test_more_deep_inventory_cannot_raise_terminal_slab_speed": "stale_fake",
-  "tests.test_slab_depth_window.SlabDepthWindowTests.test_slab_force_matches_gravitational_work_at_dip_limits": "stale_fake",
-  "tests.test_slab_mass_inventory.SlabMassInventoryTests.test_actual_slab_driver_is_invariant_to_collinear_edge_subdivision": "stale_fake",
   "tests.test_trench_persistence.StationaryTrenchTests.test_genuine_opening_still_shuts_persistent_trenches": "undiagnosed",
   "tests.test_world_design.WorldDesignTests.test_native_manager_records_exact_intervals_and_reloads_portable_design": "guarded_manager"
  }

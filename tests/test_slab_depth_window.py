@@ -44,6 +44,7 @@ def model_for(s):
     s.age = np.full(6, 150.)
     model = object.__new__(balance.Balance)
     model.s = s
+    model.effective_subduction = False  # the depth-window law, not the effective-force one
     model.plates = [0, 1]
     model.slot = {0: 0, 1: 1}
     model.size = 6
