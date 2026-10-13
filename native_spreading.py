@@ -323,11 +323,13 @@ def validate_frame(frame):
         raise ValueError('Exact native segments need aligned parent owners.')
     totals={1:0.,5:0.}
     def integer(value): return isinstance(value,(int,np.integer)) and not isinstance(value,(bool,np.bool_))
+    # Boundary label version 2 adds one display code, for convergence that no trench takes up.
+    labels=(1,2,3,4,5,6) if frame.get('boundary_label_version',0)==2 else (1,2,3,4,5)
     for row in rows:
         if not isinstance(row,dict): raise ValueError('Native boundary segment must be an object.')
         kind=row.get('material_side_classification'); code=row.get('code');parent=row.get('contact_index')
         if (not integer(row.get('geometry_version')) or row.get('geometry_version')!=VERSION
-                or kind not in ('ocean','continental') or not integer(code) or code not in (1,2,3,4,5)
+                or kind not in ('ocean','continental') or not integer(code) or code not in labels
                 or not integer(parent) or not 0<=parent<len(owners_a)
                 or not integer(row.get('owner_a')) or not integer(row.get('owner_b'))
                 or row['owner_a']!=int(owners_a[parent]) or row['owner_b']!=int(owners_b[parent])
