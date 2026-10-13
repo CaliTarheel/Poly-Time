@@ -24,10 +24,10 @@
         <div id="advanced-physics-controls">
           <label class="field">Subduction force law<select id="subduction-force-law"><option value="slab">Retained slab physics</option><option value="effective" selected>Lite · effective trench force</option></select></label>
           <div id="effective-subduction-controls" hidden>
-            <label class="field">Pull per metre of active trench <span class="unit">10¹² N/m</span><input id="effective-subduction-force" type="number" min="0" step="any" value="5"></label>
+            <label class="field">Pull per metre of active trench <span class="unit">10¹² N/m</span><input id="effective-subduction-force" type="number" min="0" step="any" value="30"></label>
             <label class="design-toggle"><input id="effective-force-rifting" type="checkbox"> Breakup from plate forces</label>
             <p class="hint">Tests internal tension from the shared force ledger, including opposing pulls that cancel plate rotation. The existing material-strength and viable-cut rules still decide whether breakup can occur.</p>
-            <p class="hint">5 means 5 × 10¹² N/m. Declared trenches pull their incoming plates even from rest; motion follows force balance. Opposing pulls can cancel. Slab depth, breakoff and upper-plate suction are omitted.</p>
+            <p class="hint">30 means 3 × 10¹³ N/m. Declared trenches pull their incoming plates even from rest; motion follows force balance. Opposing pulls can cancel. Slab depth, breakoff and upper-plate suction are omitted.</p>
             <p class="hint">For the next new run, this law replaces detailed slab entry, slab-driven rift traction and rollback behavior. Your starting map, plate connections and declared trench selection are retained. Existing histories keep their recorded law.</p>
           </div>
           <label class="field" id="subduction-response-field">Subduction response<select id="subduction_response" name="subduction_response"><option value="fixed_trench">Historical fixed trench</option><option value="moving_hinge_v1">Moving trench · overriding response</option></select></label>

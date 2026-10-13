@@ -48,7 +48,7 @@ class FreshWorldRequestTests(unittest.TestCase):
         self.assertEqual(config['enhanced_rifting'], SEP21T_RIFTING)
         self.assertEqual(config['subduction_response'], 'fixed_trench')
         self.assertEqual(fresh_world.REVIEWED_FRESH_LAWS['subduction_response'], 'fixed_trench')
-        self.assertEqual(config['effective_subduction'], {'enabled': True, 'force_n_per_m': 5e12})
+        self.assertEqual(config['effective_subduction'], {'enabled': True, 'force_n_per_m': 3e13})
         self.assertTrue(config['primordial_subduction']['enabled'])
         self.assertTrue(config['primordial_ocean']['enabled'])
         self.assertFalse(config['continental_lifecycle']['enabled'])
@@ -65,6 +65,23 @@ class FreshWorldRequestTests(unittest.TestCase):
         self.assertEqual(config['enhanced_rifting'], SEP21T_RIFTING)
         self.assertFalse(config['primordial_subduction']['enabled'])
         self.assertFalse(config['primordial_ocean']['enabled'])
+
+    def test_fresh_partial_force_uses_new_default_and_explicit_force_survives(self):
+        for settings in ({}, {'enabled': True}):
+            request = dict(physics_profile='reviewed_v1', effective_subduction=settings)
+            before = deepcopy(request)
+            self.assertEqual(fresh(request)['effective_subduction'],
+                             dict(enabled=True, force_n_per_m=3e13))
+            self.assertEqual(request, before)
+        for force in (5e12, 9e12, 3e13):
+            request = dict(physics_profile='reviewed_v1',
+                           effective_subduction=dict(enabled=True, force_n_per_m=force))
+            self.assertEqual(fresh(request)['effective_subduction']['force_n_per_m'], force)
+        # Revalidating an older enabled law without a recorded force still uses
+        # the engine's historical 5e12 default, without fresh-world selection.
+        saved = native_engine.validate_config(dict(physics_profile='reviewed_v1',
+            effective_subduction=dict(enabled=True), primordial_subduction=dict(enabled=True)))
+        self.assertEqual(saved['effective_subduction']['force_n_per_m'], 5e12)
 
     def test_ocean_defaults_preserve_parameters_opt_out_and_alternative_initializer(self):
         ocean = dict(plate_count=6, half_spreading_rate_cm_yr=3., maximum_age_myr=150.,
@@ -196,6 +213,7 @@ class ServerFreshWorldTests(unittest.TestCase):
         self.assertEqual(defaults['subduction_response'], 'fixed_trench')
         self.assertEqual(defaults['retained_phases'], 'disabled')
         self.assertTrue(defaults['effective_subduction']['enabled'])
+        self.assertEqual(defaults['effective_subduction']['force_n_per_m'], 3e13)
         self.assertEqual(defaults['enhanced_rifting'], SEP21T_RIFTING)
         self.assertEqual(set(defaults), set(server.DEFAULT_CONFIG))
         normalized_legacy = server.validate_config(deepcopy(server.DEFAULT_CONFIG))
@@ -237,6 +255,7 @@ class ServerFreshWorldTests(unittest.TestCase):
         self.assertEqual(saved['subduction_response'], 'fixed_trench')
         self.assertEqual(saved['retained_phases'], 'disabled')
         self.assertTrue(saved['effective_subduction']['enabled'])
+        self.assertEqual(saved['effective_subduction']['force_n_per_m'], 3e13)
         self.assertTrue(saved['primordial_subduction']['enabled'])
         self.assertTrue(saved['primordial_ocean']['enabled'])
         self.assertEqual(saved['enhanced_rifting'], SEP21T_RIFTING)
@@ -311,6 +330,13 @@ class CommandLineTests(unittest.TestCase):
     def test_saved_partial_ocean_config_keeps_historical_disabled_meaning(self):
         for ocean in ({}, {'plate_count': 6}, {'enabled': False}, {'enabled': True, 'plate_count': 3}):
             saved = dict(physics_profile='reviewed_v1', primordial_ocean=ocean)
+            self.assertEqual(self.rerun(saved), native_engine.validate_config(saved))
+
+    def test_saved_partial_force_keeps_historical_value(self):
+        for settings in ({}, {'force_n_per_m': 9e12}, {'enabled': True},
+                         *[dict(enabled=True, force_n_per_m=force) for force in (5e12, 9e12, 3e13)]):
+            saved = dict(physics_profile='reviewed_v1', effective_subduction=settings,
+                         primordial_subduction=dict(enabled=True))
             self.assertEqual(self.rerun(saved), native_engine.validate_config(saved))
 
     def test_saved_config_without_profile_reproduces_as_legacy(self):
