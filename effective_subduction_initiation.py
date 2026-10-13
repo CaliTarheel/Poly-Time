@@ -658,7 +658,9 @@ def _local_inherit(record,carried,radius,now):
 
 
 def _local_ready(row,controls):
-    return (row['loading_myr']>=controls['minimum_loading_myr']
+    # A paused stretch keeps what it has accepted, but a trench is born only where the fault
+    # is closing in the interval that makes it eligible.
+    return (row['lapse_myr']==0. and row['loading_myr']>=controls['minimum_loading_myr']
             and ((row['shortening_km']>=controls['minimum_shortening_km']
                   and row['shear_slip_km']>=controls['minimum_shear_slip_km'])
                  or row['shortening_km']>=controls['minimum_shortening_alone_km']))

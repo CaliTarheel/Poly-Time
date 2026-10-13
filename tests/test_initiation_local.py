@@ -117,6 +117,26 @@ class LocalInitiationTests(unittest.TestCase):
                 tick(s)
                 self.assertEqual(len(s.trench_systems), 1)
 
+    def test_a_stretch_that_has_qualified_bears_nothing_while_it_is_paused(self):
+        # Too short to be born, so the fault qualifies and waits.
+        s = local_world(minimum_length_km=1000.)
+        tick(s)
+        for _ in range(11):
+            tick(s)
+        ready = lambda: initiation.snapshot(s)['effective_subduction_initiation_diagnostics']['ready_length_km']
+        self.assertAlmostEqual(ready(), 3*127.42, delta=1e-6)
+        # The length rule is relaxed while the fault only slides: still nothing is born.
+        for controls in (s.config['effective_subduction']['initiation'], s.effective_subduction_initiation['parameters']):
+            controls['minimum_length_km'] = 300.
+        motion(s, 0., 12.)
+        tick(s)
+        self.assertFalse(s.trench_systems)
+        self.assertEqual(ready(), 0.)
+        self.assertTrue(all(row['loading_myr'] == 11. and row['lapse_myr'] == 1. for row in tracks(s)))
+        motion(s, 12., 12.)
+        tick(s)
+        self.assertEqual(len(s.trench_systems), 1)
+
     def test_head_on_shortening_alone_qualifies_at_the_higher_threshold(self):
         s = local_world()
         motion(s, 12., 0.)
