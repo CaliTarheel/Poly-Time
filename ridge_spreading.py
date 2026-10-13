@@ -22,7 +22,8 @@ def _active(s):
     dv = np.cross(s.omega[s.bq]-s.omega[s.bp], s.bmid)*RADIUS_KM
     normal = np.sum(dv*s.bn, axis=1)
     shear = np.linalg.norm(dv-normal[:, None]*s.bn, axis=1)
-    threshold = (normal_motion_threshold(shear) if hasattr(s, 'native_mesh')
+    threshold = (normal_motion_threshold(shear,
+                    spreading_version=getattr(s,'normal_spreading_version',0)) if hasattr(s, 'native_mesh')
                  else normal_motion_threshold(shear, obliquity=.35))
     valid &= normal > threshold
     valid &= (s.crust[s.ba] == 0) & (s.crust[s.bb] == 0)

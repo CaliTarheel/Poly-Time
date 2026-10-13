@@ -247,7 +247,8 @@ def prepare(s):
         normal=np.sum(velocity*row['normal'],axis=1)
         shear=np.linalg.norm(velocity-normal[:,None]*row['normal'],axis=1)
         row['normal_speed']=normal
-        row['divergent']=normal>normal_motion_threshold(shear)
+        row['divergent']=normal>normal_motion_threshold(shear,
+            spreading_version=getattr(s,'normal_spreading_version',0))
         row['active']=s.active[row['owner_a']] & s.active[row['owner_b']]
         row['active']&=(s.plate[s.ba[row['parent']]]==row['owner_a']) & (s.plate[s.bb[row['parent']]]==row['owner_b'])
     result['parent_ocean_length_km']=np.bincount(result['ocean']['parent'],weights=result['ocean']['length'],minlength=len(s.ba))
@@ -276,6 +277,9 @@ def boundary_segments(s):
 
 def validate_frame(frame):
     """Reject malformed optional exact native spreading geometry metadata."""
+    normal_motion_threshold(0., spreading_version=frame.get('normal_spreading_version',0))
+    if frame.get('normal_spreading_version',0) and frame.get('native_spreading_version',0)!=VERSION:
+        raise ValueError('Normal spreading policy requires native spreading geometry.')
     version=frame.get('native_spreading_version',0)
     if version==0:
         if has_local_pairing_metadata(frame) or any(isinstance(row,dict) and ('geometry_version' in row or 'material_side_classification' in row)

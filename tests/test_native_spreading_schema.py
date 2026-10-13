@@ -8,6 +8,21 @@ from tectonics import Simulation
 
 
 class NativeSpreadingSchemaTests(unittest.TestCase):
+    def test_normal_spreading_policy_is_optional_and_strictly_versioned(self):
+        for value in (None,0,1):
+            frame=deepcopy(self.frame)
+            frame.pop('normal_spreading_version',None)
+            if value is not None:
+                frame['normal_spreading_version']=value
+            native_spreading.validate_frame(frame)
+        for value in (True,1.,-1,2,'1'):
+            frame=deepcopy(self.frame)
+            frame['normal_spreading_version']=value
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                native_spreading.validate_frame(frame)
+        with self.assertRaises(ValueError):
+            native_spreading.validate_frame({'normal_spreading_version':1})
+
     @classmethod
     def setUpClass(cls):
         cls.simulation=Simulation(dict(mesh_level=2,coast_geometry_level=2,adaptive_refinement=0,
