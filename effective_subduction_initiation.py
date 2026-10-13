@@ -485,9 +485,27 @@ def _finite_trace(row):
     return a,b
 
 
+def _system_trace(s,row):
+    """The trace of a trench together with its active neighbours of the same plates and polarity.
+
+    Stretches of one margin that qualify at different times are separate records, and a contact
+    is matched to one record only. Measured against one record's trace, a contact that lies
+    across two of them would carry part of its trench and lose the rest.
+    """
+    arcs=[_finite_trace(row)]
+    for other in s.trench_systems:
+        law=other.get('effective_subduction') or {}
+        if (other is row or other['phase'] in ('shutdown','joined') or law.get('activation_pending',False)
+                or not law.get('initiation_finite_support',False)
+                or other['downgoing_plate_uid']!=row['downgoing_plate_uid']
+                or other['overriding_plate_uid']!=row['overriding_plate_uid']):continue
+        arcs.append(_finite_trace(other))
+    return np.concatenate([a for a,_ in arcs]),np.concatenate([b for _,b in arcs])
+
+
 def _trace_share(s,row,select):
     """Share of each selected contact's length inside the declared finite trace."""
-    a,b=_finite_trace(row)
+    a,b=_system_trace(s,row)
     contour=s.native_boundary_geometry;parent=np.asarray(contour['contact_index'])
     starts,ends=np.asarray(contour['segments_start']),np.asarray(contour['segments_end'])
     radius=max(120.,1.8*__import__('trench_history')._spacing(s));share=np.zeros(len(select))

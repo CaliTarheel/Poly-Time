@@ -182,6 +182,33 @@ class LocalInitiationTests(unittest.TestCase):
         np.testing.assert_allclose(forces, pull*np.array([0., 1., 1., 10./12.]), rtol=1e-9)
         np.testing.assert_array_equal(live, [False, True, True, True])
 
+    def test_a_contact_across_two_neighbouring_trenches_carries_both(self):
+        s = local_world(minimum_length_km=100.)
+        set_pieces(s, np.array([-.04, -.02, 0., .02, .04]))
+        motion(s, 12., 12.)
+        tick(s)
+        for _ in range(10):
+            tick(s)
+        self.assertEqual(len(s.trench_systems), 1)
+        self.assertTrue(initiation.activate_pending(s))
+        # The same margin as two records, as a later birth beside an earlier one leaves it.
+        first = s.trench_systems[0]
+        ends = np.asarray(first['geometry_xyz'])
+        second = deepcopy(first)
+        second.update(id=first['id']+1, geometry_xyz=ends[4:].tolist(), length_km=2*127.42)
+        second['effective_subduction'].update(support_origin_trench_id=second['id'], support_endpoint_count=4)
+        first.update(geometry_xyz=ends[:4].tolist(), length_km=2*127.42)
+        first['effective_subduction'].update(support_endpoint_count=4)
+        s.trench_systems.append(second)
+        s.next_trench_id = second['id']+1
+        # The margin is redrawn so that the middle contact lies half on each trace.
+        set_pieces(s, np.array([-.04, -.01, .01, .04]))
+        motion(s, 12., 12.)
+        effective.prepare(s)
+        pull = first['effective_subduction']['force_n_per_m']
+        np.testing.assert_allclose(effective.line_state(s)[1], pull, rtol=1e-9)
+        self.assertAlmostEqual(float(effective.line_state(s)[1]@s.bl)/pull, 4*127.42, delta=1e-6)
+
     def _redrawn_local(self, phi):
         s = local_world()
         tick(s)
