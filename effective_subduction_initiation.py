@@ -15,20 +15,39 @@ POLICY='induced oceanic transform/oblique fault initiation from accepted local s
 DEFAULTS=dict(version=VERSION,enabled=False,minimum_convergence_km_myr=2.,
     minimum_consecutive_myr=10.,minimum_shortening_km=100.,minimum_shear_slip_km=100.,
     minimum_ocean_age_myr=20.,minimum_ocean_fraction=.8,minimum_length_km=300.)
+# Version 2 keeps the history of each stretch of a fault on that stretch. Version 1 took the
+# slowest piece of a whole connected fault as its convergence and zeroed its clock at any
+# lapse, so a boundary that closed along part of its length could never qualify, and required
+# shear slip of every fault, so a margin shortened head-on could not either.
+LOCAL_VERSION=2
+LOCAL_POLICY='induced initiation of each finite fault stretch from the shortening accepted on that stretch, with or without accumulated shear'
+LOCAL_DEFAULTS=dict(version=LOCAL_VERSION,enabled=False,minimum_convergence_km_myr=2.,
+    minimum_loading_myr=10.,maximum_lapse_myr=5.,minimum_shortening_km=100.,minimum_shear_slip_km=100.,
+    minimum_shortening_alone_km=200.,minimum_ocean_age_myr=20.,minimum_ocean_fraction=.8,minimum_length_km=300.)
+# A current piece is divided where the fault history under it changes. A part shorter than
+# this shares its longer neighbour's record, and no piece keeps more than this many records.
+LOCAL_MINIMUM_PART_KM=10.
+LOCAL_MAXIMUM_PARTS=4
+TRACK_NUMBERS=('loading_myr','shortening_km','shear_slip_km','lapse_myr','created_myr','last_seen_myr')
 
 
 def normalize(raw=None):
     if raw is None:return deepcopy(DEFAULTS)
-    if not isinstance(raw,dict) or set(raw)-set(DEFAULTS):raise ValueError('Unknown Lite initiation controls.')
-    value=dict(DEFAULTS,**raw)
-    if type(value['version']) is not int or value['version']!=VERSION or type(value['enabled']) is not bool:
+    if not isinstance(raw,dict):raise ValueError('Unknown Lite initiation controls.')
+    local=type(raw.get('version')) is int and raw['version']==LOCAL_VERSION
+    defaults=LOCAL_DEFAULTS if local else DEFAULTS
+    if set(raw)-set(defaults):raise ValueError('Unknown Lite initiation controls.')
+    value=dict(defaults,**raw)
+    if type(value['version']) is not int or value['version']!=defaults['version'] or type(value['enabled']) is not bool:
         raise ValueError('Lite initiation needs original version1 and boolean enabled controls.')
-    for key in set(DEFAULTS)-{'version','enabled'}:
+    for key in set(defaults)-{'version','enabled'}:
         number=value[key]
         if (isinstance(number,(bool,np.bool_)) or not isinstance(number,(int,float,np.number))
                 or not np.isfinite(number) or number<=0.):raise ValueError('Lite initiation thresholds must be finite and positive.')
         value[key]=float(number)
     if value['minimum_ocean_fraction']>1.:raise ValueError('Lite incoming ocean fraction must be in (0,1].')
+    if local and value['minimum_shortening_alone_km']<value['minimum_shortening_km']:
+        raise ValueError('Shortening that qualifies alone cannot be less than shortening that also needs shear.')
     return value
 
 
@@ -40,7 +59,10 @@ def enabled(s):
         return False
     import effective_subduction
     if not effective_subduction.enabled(s):raise ValueError('Lite initiation requires effective subduction.')
+    if isinstance(state,dict) and type(state.get('version')) is int and state['version']==LOCAL_VERSION:
+        return _local_valid(s,state,normalize(raw))
     if (not isinstance(state,dict) or state.get('version')!=VERSION or type(state.get('version')) is not int
+            or normalize(raw)['version']!=VERSION
             or state.get('policy')!=POLICY or state.get('parameters')!=normalize(raw)
             or not isinstance(state.get('candidates'),list) or not isinstance(state.get('births'),list)
             or not isinstance(state.get('events'),list) or type(state.get('next_candidate_id')) is not int
@@ -97,6 +119,10 @@ def upgrade(s,parameters=None):
         physical_state_changed=False,
         provenance='Only subsequent accepted finite-fault observations contribute; no inherited ocean damage or slab history.',
         ocean_age_scope='Existing incoming control-volume cooling age; wet length uses actual native material exclusion.')
+    if controls['version']==LOCAL_VERSION:
+        state=dict(version=LOCAL_VERSION,policy=LOCAL_POLICY,parameters=deepcopy(controls),activation_myr=float(s.t),
+            epoch_myr=float(s.t),tracks=[],candidates=[],next_candidate_id=1,births=[],events=[],
+            provenance=state['provenance'],ocean_age_scope=state['ocean_age_scope'])
     subject=copy(s);subject.config=config;subject.effective_subduction_initiation=state
     enabled(subject)
     s.config=config;s.effective_subduction_initiation=state
@@ -456,6 +482,302 @@ def supported_parents(s,row,select):
     return result
 
 
+def local(s):
+    """Whether the local-history policy (version 2) is the active one."""
+    return enabled(s) and s.effective_subduction_initiation['version']==LOCAL_VERSION
+
+
+def _local_number(value):
+    return (not isinstance(value,(bool,np.bool_)) and isinstance(value,(int,float,np.number))
+            and bool(np.isfinite(value)) and value>=0.)
+
+
+def _local_valid(s,state,controls):
+    if (state.get('policy')!=LOCAL_POLICY or state.get('parameters')!=controls
+            or not all(isinstance(state.get(key),list) for key in ('tracks','candidates','births','events'))
+            or type(state.get('next_candidate_id')) is not int or state['next_candidate_id']<1):
+        raise ValueError('Invalid Lite initiation checkpoint metadata.')
+    activation,epoch=state.get('activation_myr'),state.get('epoch_myr')
+    if not _local_number(activation) or not _local_number(epoch) or not activation<=epoch<=float(s.t):
+        raise ValueError('Invalid Lite initiation activation or accepted clock.')
+    tracks=state['tracks']
+    if tracks:
+        try:
+            ends=np.array([[row['start'],row['end']] for row in tracks],float)
+            values=np.array([[row[key] for key in TRACK_NUMBERS] for row in tracks],float)
+            owners=[(row['incoming_plate_uid'],row['overriding_plate_uid']) for row in tracks]
+        except (KeyError,TypeError,ValueError):
+            raise ValueError('Invalid Lite initiation fault track.') from None
+        if (ends.shape!=(len(tracks),2,3) or not np.isfinite(ends).all()
+                or np.any(abs(np.linalg.norm(ends,axis=2)-1.)>1e-10)
+                or np.any(np.linalg.norm(np.cross(ends[:,0],ends[:,1]),axis=1)<=1e-12)
+                or not np.isfinite(values).all() or np.any(values<0.)
+                or np.any(values[:,4]>values[:,5]) or np.any(values[:,5]>epoch)
+                or any(type(uid) is not int or uid<=0 for pair in owners for uid in pair)
+                or any(first==second for first,second in owners)):
+            raise ValueError('Invalid Lite initiation fault track.')
+    ids=[]
+    for row in state['candidates']:
+        if (not isinstance(row,dict) or type(row.get('id')) is not int or row['id']<1
+                or row.get('phase') not in ('pending','born')
+                or any(type(row.get(k)) is not int or row[k]<=0 for k in ('incoming_plate_uid','overriding_plate_uid'))
+                or row.get('incoming_plate_uid')==row.get('overriding_plate_uid')):
+            raise ValueError('Invalid Lite initiation candidate identity.')
+        ids.append(row['id'])
+    if ids!=sorted(set(ids)) or any(ident>=state['next_candidate_id'] for ident in ids):
+        raise ValueError('Lite initiation candidate IDs must remain unique and ordered.')
+    return True
+
+
+def upgrade_local(s,parameters=None):
+    """Replace the whole-fault policy by local histories at this epoch.
+
+    Nothing is reconstructed. A fault still weakening keeps, on each of its carried arcs, the
+    spatial lower bounds version 1 had already accumulated for it, which hold at every point
+    of that arc. Born and pending candidates are kept because their trenches name them;
+    retired ones carry no history and are dropped.
+    """
+    if not enabled(s):raise ValueError('Local initiation histories replace an active Lite initiation policy.')
+    old=s.effective_subduction_initiation
+    if old['version']==LOCAL_VERSION:return deepcopy(old)
+    controls=normalize(dict(dict(version=LOCAL_VERSION,enabled=True),**(parameters or {})))
+    if not controls['enabled']:raise ValueError('Explicit Lite initiation activation must be enabled.')
+    tracks=[]
+    for row in old['candidates']:
+        if row['phase']!='weakening':continue
+        for first,last in zip(row['segments_start'],row['segments_end']):
+            tracks.append(dict(incoming_plate_uid=row['incoming_plate_uid'],overriding_plate_uid=row['overriding_plate_uid'],
+                start=[float(v) for v in first],end=[float(v) for v in last],
+                loading_myr=float(row.get('consecutive_lower_bound_myr',0.)),
+                shortening_km=float(row.get('shortening_lower_bound_km',0.)),
+                shear_slip_km=float(row.get('shear_lower_bound_km',0.)),lapse_myr=0.,
+                created_myr=float(row['created_myr']),last_seen_myr=float(row['last_seen_myr'])))
+    kept=[deepcopy(row) for row in old['candidates'] if row['phase'] in ('pending','born')]
+    state=dict(version=LOCAL_VERSION,policy=LOCAL_POLICY,parameters=deepcopy(controls),
+        activation_myr=float(old['epoch_myr']),epoch_myr=float(old['epoch_myr']),
+        tracks=tracks,candidates=kept,next_candidate_id=int(old['next_candidate_id']),
+        births=deepcopy(old['births']),events=deepcopy(old['events']),
+        predecessor=dict(version=VERSION,activation_myr=float(old['activation_myr']),parameters=deepcopy(old['parameters']),
+            candidates={phase:sum(row['phase']==phase for row in old['candidates'])
+                        for phase in ('weakening','pending','born','retired')}),
+        provenance='Each carried arc keeps the spatial lower bounds already accepted on it; no history is reconstructed.',
+        ocean_age_scope=old.get('ocean_age_scope','Existing incoming control-volume cooling age.'))
+    config=deepcopy(s.config);config['effective_subduction']=dict(config['effective_subduction'],initiation=controls)
+    subject=copy(s);subject.config=config;subject.effective_subduction_initiation=state
+    enabled(subject)
+    s.config=config;s.effective_subduction_initiation=state
+    return deepcopy(state)
+
+
+def _part(record,first,last,tangent,angle,low,high):
+    """One sub-arc of a current piece, with rates and a wet fraction that hold on it."""
+    item=dict(record)
+    item['start']=first if low==0. else first*math.cos(low)+tangent*math.sin(low)
+    item['end']=last if high==angle else first*math.cos(high)+tangent*math.sin(high)
+    item['mid']=item['start']+item['end'];item['mid']=item['mid']/np.linalg.norm(item['mid'])
+    item['length']=6371.*(high-low)
+    # The part left out could hold all of the piece's water: the same lower bound as a retained core.
+    excluded=max(0.,record['length']-item['length'])
+    item['water']=tuple(float(np.clip((fraction*record['length']-excluded)/item['length'],0.,1.))
+                        for fraction in record['water'])
+    if 'relative_omega' in item:
+        n=np.asarray(item['normal']);n=n-item['mid']*(n@item['mid']);n=n/np.linalg.norm(n)
+        item['normal']=n
+        relative=np.cross(item['relative_omega'],item['mid'])*6371.
+        item['normal_speed']=float(relative@n)
+        item['shear']=float(np.linalg.norm(relative-item['normal_speed']*n))
+    return item
+
+
+def _least(one,two):
+    """What two fault records can both vouch for."""
+    return dict(loading_myr=min(one['loading_myr'],two['loading_myr']),
+        shortening_km=min(one['shortening_km'],two['shortening_km']),
+        shear_slip_km=min(one['shear_slip_km'],two['shear_slip_km']),
+        lapse_myr=max(one['lapse_myr'],two['lapse_myr']),created_myr=max(one['created_myr'],two['created_myr']),
+        observed=one['observed'] and two['observed'])
+
+
+def _local_inherit(record,carried,radius,now):
+    """Divide one current piece by the fault histories carried under it.
+
+    Returns the piece's ends, tangent and angle, and (low, high, history) parts that tile it.
+    A part no carried arc reaches starts with nothing. Where several reach it, it keeps the
+    least that each of them had.
+    """
+    first,last=np.asarray(record['start'],float),np.asarray(record['end'],float)
+    fresh=dict(loading_myr=0.,shortening_km=0.,shear_slip_km=0.,lapse_myr=0.,created_myr=now,observed=False)
+    if not carried:
+        angle=math.atan2(float(np.linalg.norm(np.cross(first,last-first))),float(first@last))
+        return first,last,None,angle,[(0.,angle,fresh)]
+    a=np.array([row[0] for row in carried]);b=np.array([row[1] for row in carried])
+    angle,tangent,union=_arc_intervals(first,last,a,b,radius)
+    covers=[_arc_intervals(first,last,a[k:k+1],b[k:k+1],radius)[2] for k in range(len(carried))]
+    cuts=sorted({0.,angle,*(x for low,high in union for x in (low,high)),
+                 *(x for cover in covers for low,high in cover for x in (low,high))})
+    parts=[]
+    for low,high in zip(cuts[:-1],cuts[1:]):
+        if high-low<=128*np.finfo(float).eps:continue
+        middle=.5*(low+high)
+        if not any(left<=middle<=right for left,right in union):
+            over,history=(),fresh
+        else:
+            over=tuple(k for k,cover in enumerate(covers) if any(left<=middle<=right for left,right in cover))
+            if not over:
+                # Inside a join between two carried arcs: the nearer arc's record.
+                point=first*math.cos(middle)+tangent*math.sin(middle)
+                over=(int(np.argmin(np.minimum(np.arccos(np.clip(a@point,-1.,1.)),np.arccos(np.clip(b@point,-1.,1.))))),)
+            history=dict(carried[over[0]][2],observed=True)
+            for k in over[1:]:history=_least(history,dict(carried[k][2],observed=True))
+        if parts and parts[-1][2]==over:parts[-1][1]=high
+        else:parts.append([low,high,over,history])
+    # A sliver shares its longer neighbour's record instead of costing that neighbour its history.
+    short=LOCAL_MINIMUM_PART_KM/6371.
+    while len(parts)>1:
+        index=min(range(len(parts)),key=lambda k:parts[k][1]-parts[k][0])
+        if parts[index][1]-parts[index][0]>=short:break
+        host=max((k for k in (index-1,index+1) if 0<=k<len(parts)),key=lambda k:parts[k][1]-parts[k][0])
+        parts[host][0],parts[host][1]=min(parts[host][0],parts[index][0]),max(parts[host][1],parts[index][1])
+        del parts[index]
+    while len(parts)>LOCAL_MAXIMUM_PARTS:
+        index=min(range(len(parts)-1),key=lambda k:parts[k+1][1]-parts[k][0])
+        parts[index]=[parts[index][0],parts[index+1][1],None,_least(parts[index][3],parts[index+1][3])]
+        del parts[index+1]
+    return first,last,tangent,angle,[(low,high,history) for low,high,_,history in parts]
+
+
+def _local_ready(row,controls):
+    return (row['loading_myr']>=controls['minimum_loading_myr']
+            and ((row['shortening_km']>=controls['minimum_shortening_km']
+                  and row['shear_slip_km']>=controls['minimum_shear_slip_km'])
+                 or row['shortening_km']>=controls['minimum_shortening_alone_km']))
+
+
+def _local_update(s,dt):
+    """Commit one accepted interval of local fault histories and any births."""
+    state=s.effective_subduction_initiation;epoch=float(state['epoch_myr']);now=float(s.t)
+    if isinstance(dt,(bool,np.bool_)) or not np.isscalar(dt) or not np.isfinite(dt) or dt<0.:
+        raise ValueError('Lite initiation needs finite nonnegative accepted elapsed time.')
+    if now==epoch:
+        return
+    elapsed=now-epoch
+    if elapsed<0. or not math.isclose(elapsed,float(dt),rel_tol=0.,abs_tol=64*np.finfo(float).eps*max(now,float(dt),1.)):
+        raise ValueError('Lite initiation clock does not match the accepted motion interval.')
+    import trench_history
+    controls=state['parameters'];slots=trench_history._slots(s)
+    carried={}
+    for row in state['tracks']:
+        owner=slots.get(row['overriding_plate_uid'])
+        if owner is None or row['incoming_plate_uid'] not in slots:continue
+        rotation=np.asarray(s.omega[owner])*elapsed
+        carried.setdefault((row['incoming_plate_uid'],row['overriding_plate_uid']),[]).append(
+            (rotate(np.asarray(row['start'],float),rotation),rotate(np.asarray(row['end'],float),rotation),row))
+    ends={pair:(np.array([row[0] for row in rows]),np.array([row[1] for row in rows])) for pair,rows in carried.items()}
+    spans={pair:np.arccos(np.clip(np.sum(a*b,axis=1),-1.,1.)) for pair,(a,b) in ends.items()}
+    radius=max(120.,1.8*trench_history._spacing(s))
+
+    def reach(record,uid):
+        """Carried arcs of this plate pair and role that can lie under the piece."""
+        other=record['uids'][1-record['uids'].index(uid)];pair=(uid,other)
+        if pair not in carried:return other,[]
+        a,b=ends[pair]
+        away=np.minimum(np.arccos(np.clip(a@record['mid'],-1.,1.)),np.arccos(np.clip(b@record['mid'],-1.,1.)))
+        return other,[carried[pair][k] for k in np.flatnonzero(away<=(record['length']+radius)/6371.+spans[pair])]
+
+    records=_pieces(s);tracks=[];origin={};trained={};incoming={};seen={}
+    for record in records:
+        edge=int(record['parent']);seen[edge]=seen.get(edge,0)+1
+        sides=[uid for k,uid in enumerate(record['uids'])
+               if record['water'][k]>=controls['minimum_ocean_fraction'] and record['age'][k]>=controls['minimum_ocean_age_myr']]
+        if not sides:
+            trained[edge]=False;continue
+        # Both sides can be old ocean. The side already under load keeps its role; else the older.
+        choice=max(sides,key=lambda uid:(max((row[2]['loading_myr'] for row in reach(record,uid)[1]),default=0.),
+                                         record['age'][record['uids'].index(uid)],-uid))
+        over,near=reach(record,choice);side=record['uids'].index(choice)
+        first,last,tangent,angle,parts=_local_inherit(record,near,radius,now)
+        covered=0.;good=True
+        for low,high,history in parts:
+            item=record if low==0. and high==angle else _part(record,first,last,tangent,angle,low,high)
+            if (item['water'][side]<controls['minimum_ocean_fraction']
+                    or np.linalg.norm(np.cross(item['start'],item['end']))<=1e-12):
+                good=False;continue
+            convergence,shear=_rate_bounds(item)
+            row=dict(incoming_plate_uid=int(choice),overriding_plate_uid=int(over),
+                start=[float(v) for v in item['start']],end=[float(v) for v in item['end']],
+                loading_myr=history['loading_myr'],shortening_km=history['shortening_km'],
+                shear_slip_km=history['shear_slip_km'],lapse_myr=history['lapse_myr'],
+                created_myr=history['created_myr'],last_seen_myr=now)
+            if history['observed']:
+                # A first observation receives no retrospective loading or slip.
+                row['shear_slip_km']+=shear*elapsed
+                if convergence>=controls['minimum_convergence_km_myr']:
+                    row['loading_myr']+=elapsed;row['shortening_km']+=convergence*elapsed;row['lapse_myr']=0.
+                else:
+                    row['lapse_myr']+=elapsed
+                    # A pause keeps what the stretch has accepted; a lapse outlasting it starts again.
+                    if row['lapse_myr']>controls['maximum_lapse_myr']:row['loading_myr']=row['shortening_km']=0.
+            for key in ('loading_myr','shortening_km','shear_slip_km','lapse_myr','created_myr'):row[key]=float(row[key])
+            tracks.append(row);origin[id(row)]=edge;covered+=item['length']
+            good=good and _local_ready(row,controls)
+        # A parent contact joins a birth only if every part of every one of its pieces is ready
+        # for the same incoming plate: no parent-scale force may include an untrained sibling.
+        trained[edge]=trained.get(edge,True) and good and covered>=record['length']*(1.-1e-9)
+        incoming.setdefault(edge,set()).add(int(choice))
+    proposed=dict(state,tracks=tracks,epoch_myr=now,candidates=list(state['candidates']),
+                  births=list(state['births']),events=list(state['events']))
+    parent=np.asarray(s.native_boundary_geometry['contact_index'])
+    whole={edge for edge,good in trained.items() if good and len(incoming.get(edge,()))==1
+           and seen[edge]==int(np.count_nonzero(parent==edge))}
+    births=[]
+    for uid in sorted({next(iter(incoming[edge])) for edge in whole}):
+        ready=[record for record in records if int(record['parent']) in whole and incoming[int(record['parent'])]=={uid}]
+        for group in _groups(ready):
+            length=math.fsum(record['length'] for record in group)
+            if length>=controls['minimum_length_km']:births.append((uid,group,length))
+    s.effective_subduction_initiation=proposed
+    for uid,group,length in births:
+        edges=np.array(sorted(set(int(record['parent']) for record in group)),int)
+        over=next(other for other in group[0]['uids'] if other!=uid)
+        under=[row for row in tracks if origin[id(row)] in set(edges.tolist())]
+        candidate=dict(id=proposed['next_candidate_id'],phase='pending',incoming_plate_uid=int(uid),
+            overriding_plate_uid=int(over),created_myr=min(row['created_myr'] for row in under),last_seen_myr=now,
+            consecutive_myr=min(row['loading_myr'] for row in under),
+            shortening_km=min(row['shortening_km'] for row in under),
+            shear_slip_km=min(row['shear_slip_km'] for row in under),length_km=float(length),
+            segments_start=[record['start'].tolist() for record in group],
+            segments_end=[record['end'].tolist() for record in group])
+        proposed['next_candidate_id']+=1;proposed['candidates'].append(candidate)
+        down=np.full(len(s.ba),slots[uid],int)
+        row=trench_history._birth(s,edges,down,inherited=False)
+        points=np.array([record['mid'] for record in group]);weights=np.array([record['length'] for record in group])
+        center=np.sum(points*weights[:,None],axis=0);center/=np.linalg.norm(center)
+        endpoints=np.array([[record['start'],record['end']] for record in group]).reshape(-1,3)
+        row.update(geometry_xyz=endpoints.tolist(),center=center.tolist(),length_km=float(weights.sum()),anchor_gap_km=0.)
+        force=float(s.effective_subduction_settings['force_n_per_m'])
+        row['effective_subduction']=dict(version=1,force_n_per_m=force,activation_pending=True,
+            initiation_candidate_id=candidate['id'],eligible_myr=now,
+            initiation_finite_support=True,support_origin_trench_id=row['id'],support_endpoint_count=len(endpoints),
+            provenance='Accepted induced finite-fault gates; no slab inventory, retrospective intake or startup clock.')
+        row.update(phase='initiating',maturity=0.)
+        candidate['trench_id']=row['id']
+        event=dict(time_myr=now,candidate_id=candidate['id'],trench_id=row['id'],kind='eligible_pending',
+            incoming_plate_uid=candidate['incoming_plate_uid'],overriding_plate_uid=candidate['overriding_plate_uid'],
+            force_n_per_m=force,consecutive_myr=candidate['consecutive_myr'],
+            shortening_km=candidate['shortening_km'],shear_slip_km=candidate['shear_slip_km'],
+            route='shortening and shear' if candidate['shear_slip_km']>=controls['minimum_shear_slip_km'] else 'shortening alone',
+            force_activation='before next instantaneous solve; no force or intake at eligibility snapshot')
+        proposed['births'].append(deepcopy(event));proposed['events'].append(event)
+        born={id(row) for row in under}
+        proposed['tracks']=[row for row in proposed['tracks'] if id(row) not in born]
+        if hasattr(s,'_record'):
+            s._record('effective_subduction_initiation',
+                'Shortening accepted along this stretch of an ocean-bearing fault made a finite induced trench eligible; traction starts at the next solved source.',
+                ('effective_subduction_initiation',LOCAL_VERSION,candidate['id']),
+                plates=(slots[candidate['incoming_plate_uid']],slots[candidate['overriding_plate_uid']]),
+                xyz=row['center'],details=dict(event,mechanism=LOCAL_POLICY,parameters=deepcopy(controls)))
+
+
 def prepare(s):
     """Pure current observations; never age a candidate or activate a load."""
     if not enabled(s):return []
@@ -467,6 +789,7 @@ def prepare(s):
 def update(s,dt):
     """Commit exactly one accepted clock interval and any pending births."""
     if not enabled(s):return
+    if s.effective_subduction_initiation['version']==LOCAL_VERSION:return _local_update(s,dt)
     state=s.effective_subduction_initiation;epoch=float(state['epoch_myr']);now=float(s.t)
     if isinstance(dt,(bool,np.bool_)) or not np.isscalar(dt) or not np.isfinite(dt) or dt<0.:
         raise ValueError('Lite initiation needs finite nonnegative accepted elapsed time.')
@@ -613,6 +936,24 @@ def activate_pending(s):
 def snapshot(s):
     if not enabled(s):return {}
     state=s.effective_subduction_initiation
+    if state['version']==LOCAL_VERSION:
+        controls=state['parameters']
+        length=[6371.*math.atan2(float(np.linalg.norm(np.cross(row['start'],row['end']))),float(np.dot(row['start'],row['end'])))
+                for row in state['tracks']]
+        def total(select):return float(math.fsum(km for km,row in zip(length,state['tracks']) if select(row)))
+        return dict(effective_subduction_initiation_version=LOCAL_VERSION,effective_subduction_initiation=deepcopy(state),
+            effective_subduction_initiation_diagnostics=dict(parameters=deepcopy(controls),
+                activation_myr=state['activation_myr'],accepted_epoch_myr=state['epoch_myr'],
+                fault_tracks=len(state['tracks']),tracked_length_km=total(lambda row:True),
+                loading_length_km=total(lambda row:row['loading_myr']>0.),
+                paused_length_km=total(lambda row:row['loading_myr']>0. and row['lapse_myr']>0.),
+                ready_length_km=total(lambda row:_local_ready(row,controls)),
+                longest_loading_myr=max((row['loading_myr'] for row in state['tracks']),default=0.),
+                largest_shortening_km=max((row['shortening_km'] for row in state['tracks']),default=0.),
+                pending_trenches=sum(r['phase']=='pending' for r in state['candidates']),
+                activated_trenches=sum(r['phase']=='born' for r in state['candidates']),
+                birth_count=len(state['births']),
+                activation_scope='Pending eligible traces carry no force or intake until the next solved source interval.'))
     return dict(effective_subduction_initiation_version=VERSION,effective_subduction_initiation=deepcopy(state),
         effective_subduction_initiation_diagnostics=dict(parameters=deepcopy(state['parameters']),
             activation_myr=state['activation_myr'],accepted_epoch_myr=state['epoch_myr'],
