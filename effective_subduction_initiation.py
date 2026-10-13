@@ -493,7 +493,18 @@ def _local_number(value):
 
 
 def _local_valid(s,state,controls):
-    if (state.get('policy')!=LOCAL_POLICY or state.get('parameters')!=controls
+    parameters=state.get('parameters')
+    if controls['version']==LOCAL_VERSION:named=parameters==controls
+    else:
+        # A world configured with the whole-fault policy keeps that configuration when local
+        # histories replace it. The state then names its own controls and the ones it replaced.
+        try:
+            named=(isinstance(parameters,dict) and parameters==normalize(parameters)
+                   and parameters['version']==LOCAL_VERSION and parameters['enabled']
+                   and isinstance(state.get('predecessor'),dict)
+                   and state['predecessor'].get('parameters')==controls)
+        except ValueError:named=False
+    if (state.get('policy')!=LOCAL_POLICY or not named
             or not all(isinstance(state.get(key),list) for key in ('tracks','candidates','births','events'))
             or type(state.get('next_candidate_id')) is not int or state['next_candidate_id']<1):
         raise ValueError('Invalid Lite initiation checkpoint metadata.')
@@ -535,7 +546,8 @@ def upgrade_local(s,parameters=None):
     Nothing is reconstructed. A fault still weakening keeps, on each of its carried arcs, the
     spatial lower bounds version 1 had already accumulated for it, which hold at every point
     of that arc. Born and pending candidates are kept because their trenches name them;
-    retired ones carry no history and are dropped.
+    retired ones carry no history and are dropped. The configuration is left as it was: it
+    names the policy the world was made with, and the state names the one that replaced it.
     """
     if not enabled(s):raise ValueError('Local initiation histories replace an active Lite initiation policy.')
     old=s.effective_subduction_initiation
@@ -562,10 +574,9 @@ def upgrade_local(s,parameters=None):
                         for phase in ('weakening','pending','born','retired')}),
         provenance='Each carried arc keeps the spatial lower bounds already accepted on it; no history is reconstructed.',
         ocean_age_scope=old.get('ocean_age_scope','Existing incoming control-volume cooling age.'))
-    config=deepcopy(s.config);config['effective_subduction']=dict(config['effective_subduction'],initiation=controls)
-    subject=copy(s);subject.config=config;subject.effective_subduction_initiation=state
+    subject=copy(s);subject.effective_subduction_initiation=state
     enabled(subject)
-    s.config=config;s.effective_subduction_initiation=state
+    s.effective_subduction_initiation=state
     return deepcopy(state)
 
 

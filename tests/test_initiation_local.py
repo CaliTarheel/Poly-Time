@@ -185,11 +185,16 @@ class LocalInitiationTests(unittest.TestCase):
         for _ in range(5):
             tick(s)
         before = deepcopy(s.effective_subduction_initiation)
+        configured = deepcopy(s.config)
         row = before['candidates'][0]
         self.assertEqual(row['phase'], 'weakening')
         state = initiation.upgrade_local(s)
-        self.assertEqual(state['version'], 2)
-        self.assertEqual(s.config['effective_subduction']['initiation'], state['parameters'])
+        self.assertEqual((state['version'], state['parameters']['version']), (2, 2))
+        # The configuration still names the policy the world was made with; the state names
+        # the one that replaced it, and what it replaced.
+        self.assertEqual(s.config, configured)
+        self.assertEqual(state['predecessor']['parameters'], before['parameters'])
+        self.assertEqual(state['parameters']['minimum_shortening_alone_km'], 200.)
         self.assertEqual(state['predecessor']['candidates'], dict(weakening=1, pending=0, born=0, retired=0))
         self.assertEqual(len(tracks(s)), 3)
         for track in tracks(s):
@@ -238,6 +243,22 @@ class LocalInitiationTests(unittest.TestCase):
         broken.effective_subduction_initiation['policy'] = initiation.POLICY
         with self.assertRaisesRegex(ValueError, 'metadata'):
             initiation.enabled(broken)
+        # A state that replaced the configured policy must name valid controls of its own and
+        # the configured ones as its predecessor.
+        replaced = world()
+        initiation.upgrade(replaced)
+        initiation.upgrade_local(replaced, dict(minimum_shortening_alone_km=250.))
+        self.assertTrue(initiation.local(replaced))
+        self.assertEqual(replaced.effective_subduction_initiation['parameters']['minimum_shortening_alone_km'], 250.)
+        for change in (lambda state: state['parameters'].update(minimum_shortening_alone_km=50.),
+                       lambda state: state['parameters'].update(enabled=False),
+                       lambda state: state['parameters'].pop('maximum_lapse_myr'),
+                       lambda state: state['predecessor']['parameters'].update(minimum_length_km=1.),
+                       lambda state: state.pop('predecessor')):
+            broken = deepcopy(replaced)
+            change(broken.effective_subduction_initiation)
+            with self.assertRaisesRegex(ValueError, 'metadata'):
+                initiation.enabled(broken)
         s.t += .5
         with self.assertRaisesRegex(ValueError, 'clock'):
             initiation.update(s, 1.)
