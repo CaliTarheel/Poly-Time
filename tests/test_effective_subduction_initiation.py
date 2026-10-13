@@ -308,4 +308,78 @@ class InitiationTests(unittest.TestCase):
         self.assertEqual(seen,[True]);self.assertEqual(pickle.dumps(vars(s)),before)
 
 
+class InitiatedTraceTransferTests(unittest.TestCase):
+    """A plate ownership change along an induced trench keeps its carried finite support."""
+
+    def initiated(self):
+        s=world();s.ba=np.array([0,1,2])  # one incoming control cell per parent piece
+        row=qualify(s)
+        self.assertTrue(initiation.activate_pending(s))
+        self.assertTrue(effective.line_state(s)[2].all())
+        # A third plate exists and can receive incoming cells.
+        s.active=np.array([True,True,True]);s.plate_uid=np.array([11,22,33])
+        s.names=['Incoming','Upper','Daughter'];s.omega=np.vstack((s.omega,np.zeros((1,3))))
+        s.polarity=np.full((3,3),-1,int)
+        return s,row
+
+    def test_partial_transfer_leaves_parent_and_daughter_the_whole_support(self):
+        import trench_history
+        s,row=self.initiated()
+        support=np.array(row['geometry_xyz']);count=row['effective_subduction']['support_endpoint_count']
+        self.assertEqual(support.shape,(count,3))
+        moved=np.array([False,False,True])
+        s.plate[s.ba[moved]]=2
+        mapping=trench_history.transfer_downgoing(s,0,2)
+        self.assertEqual(len(s.trench_systems),2)
+        child=s.trench_systems[1]
+        self.assertEqual(mapping,{row['id']:child['id']})
+        self.assertEqual((row['downgoing_plate_uid'],child['downgoing_plate_uid']),(11,33))
+        for trace in (row,child):
+            np.testing.assert_array_equal(np.array(trace['geometry_xyz']),support)
+            law=trace['effective_subduction']
+            self.assertEqual(law['support_endpoint_count'],count)
+            self.assertEqual(law['support_origin_trench_id'],trace['id'])
+        s.bp[moved]=2
+        trench_history.prepare(s)  # raised 'lost its carried endpoint representation' before
+        owners,force,live=effective.line_state(s)
+        np.testing.assert_array_equal(owners,[0,0,2])
+        self.assertTrue(live.all() and np.all(force>0.))
+        np.testing.assert_array_equal(s.trench_id,[row['id'],row['id'],child['id']])
+
+    def test_complete_transfer_keeps_identity_and_support(self):
+        import trench_history
+        s,row=self.initiated()
+        support=np.array(row['geometry_xyz'])
+        s.plate[s.ba]=2
+        self.assertEqual(trench_history.transfer_split(s,0,2),{row['id']:row['id']})
+        self.assertEqual(len(s.trench_systems),1)
+        self.assertEqual(row['downgoing_plate_uid'],33)
+        np.testing.assert_array_equal(np.array(row['geometry_xyz']),support)
+        self.assertEqual(row['effective_subduction']['support_origin_trench_id'],row['id'])
+        s.bp[:]=2
+        trench_history.prepare(s)
+        owners,force,live=effective.line_state(s)
+        np.testing.assert_array_equal(owners,[2,2,2])
+        self.assertTrue(live.all() and np.all(force>0.))
+
+    def test_daughter_support_does_not_reach_boundary_the_fault_never_covered(self):
+        import trench_history
+        s,row=self.initiated()
+        moved=np.array([False,False,True])
+        s.plate[s.ba[moved]]=2
+        trench_history.transfer_downgoing(s,0,2)
+        s.bp[moved]=2
+        # The same contact grows a new piece far beyond the carried arcs: neither trace may load it.
+        contour=s.native_boundary_geometry
+        far=points(np.array([.2,.24]))
+        contour['segments_start']=np.vstack((contour['segments_start'],far[:1]))
+        contour['segments_end']=np.vstack((contour['segments_end'],far[1:]))
+        contour['segment_normals']=np.vstack((contour['segment_normals'],[[0.,1.,0.]]))
+        contour['contact_index']=np.r_[contour['contact_index'],2]
+        trench_history.prepare(s)
+        owners,_,live=effective.line_state(s)
+        np.testing.assert_array_equal(live,[True,True,False])
+        np.testing.assert_array_equal(owners[:2],[0,0])
+
+
 if __name__=='__main__':unittest.main()
