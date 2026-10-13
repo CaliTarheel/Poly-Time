@@ -40,17 +40,53 @@ def offset(point, direction, kilometres):
     return arcs._unit(point*np.cos(angle)+normal*np.sin(angle))
 
 
+# Two arcs that overlapped in a 200 Myr run, saved before this guard existed. The capture
+# was never published with the source, so the tests that read it skip where it is absent.
+CAPTURE=HERE.parent/'candidate-performance/actual-arc-overlap-200.npz'
+NO_CAPTURE='The 200 Myr arc-overlap capture is not part of the published source.'
+
+
+def captured_intrusion():
+    with np.load(CAPTURE) as data:
+        old_v=data['vertices_0'].copy();old_f=data['faces_0'].copy()
+        point=data['source_centre_1'].copy();new_v=data['vertices_1'].copy()
+        requested=float(data['material_reference_area_km2_1'].sum())
+    strike=arcs._unit(new_v[1]-point*np.dot(new_v[1],point))
+    return old_v,old_f,point,strike,requested
+
+
+def constructed_intrusion():
+    """The same situation built from first principles, so it always runs.
+
+    A 600 km2 footprint already exists. A 140 km2 birth is requested 10.8 km across
+    strike from its centre: the source lies outside the old footprint, but the full
+    requested oval intrudes into it by about 37 km2, so only a few km2 can be admitted.
+    """
+    centre=positions_in_cell(state())[:1][0]
+    strike=arcs._unit(np.cross(centre,[0.,0.,1.]))
+    old=arcs._patch(centre,strike,600.)
+    old_v=old['vertices']/np.linalg.norm(old['vertices'],axis=1)[:,None]
+    point=offset(centre,np.cross(centre,strike),10.8)
+    for _ in range(4):
+        # _patch normalizes its centre; start from a unit vector that it leaves untouched.
+        again=arcs._unit(point)
+        if np.array_equal(again,point): break
+        point=again
+    return old_v,old['faces'],point,strike,140.
+
+
 class ArcEmplacementTests(unittest.TestCase):
+    @unittest.skipUnless(CAPTURE.is_file(),NO_CAPTURE)
     def test_actual_200_footprint_intrusion_retains_source_and_pending_volume(self):
+        self.check_intrusion_retains_source_and_pending_volume(*captured_intrusion())
+
+    def test_constructed_footprint_intrusion_retains_source_and_pending_volume(self):
+        self.check_intrusion_retains_source_and_pending_volume(*constructed_intrusion())
+
+    def check_intrusion_retains_source_and_pending_volume(self,old_v,old_f,point,strike,requested):
         s=state()
-        fixture=HERE.parent/'candidate-performance/actual-arc-overlap-200.npz'
-        with np.load(fixture) as data:
-            old_v=data['vertices_0'].copy();old_f=data['faces_0'].copy()
-            point=data['source_centre_1'].copy();new_v=data['vertices_1'].copy()
-            requested=float(data['material_reference_area_km2_1'].sum())
         s.material_surface=dict(vertices=old_v,faces=old_f,radius_km=6371.)
         context=geometry.prepare(s)
-        strike=arcs._unit(new_v[1]-point*np.dot(new_v[1],point))
         factory=lambda amount:arcs._patch(point,strike,amount)
         result=geometry.admit(context,factory,requested,0)
         self.assertGreater(result['diagnostics']['requested_footprint']['material_obstruction_km2'],27.)
@@ -125,12 +161,16 @@ class ArcEmplacementTests(unittest.TestCase):
         self.assertGreaterEqual(result['plan']['vertices'][:,1].min(),-2e-10)
         self.assertLessEqual(result['diagnostics']['accepted_footprint']['foreign_owner_obstruction_km2'],1e-9)
 
+    @unittest.skipUnless(CAPTURE.is_file(),NO_CAPTURE)
     def test_refinement_and_rotation_preserve_actual_obstruction_and_admission(self):
-        fixture=HERE.parent/'candidate-performance/actual-arc-overlap-200.npz'
-        with np.load(fixture) as data:
-            old_v=data['vertices_0'].copy();old_f=data['faces_0'].copy()
-            point=data['source_centre_1'].copy();new_v=data['vertices_1'].copy()
-        strike=arcs._unit(new_v[1]-point*np.dot(new_v[1],point))
+        old_v,old_f,point,strike,_=captured_intrusion()
+        self.check_refinement_and_rotation_preserve_obstruction_and_admission(
+            old_v,old_f,point,strike,84.89948981534839)
+
+    def test_refinement_and_rotation_preserve_constructed_obstruction_and_admission(self):
+        self.check_refinement_and_rotation_preserve_obstruction_and_admission(*constructed_intrusion())
+
+    def check_refinement_and_rotation_preserve_obstruction_and_admission(self,old_v,old_f,point,strike,requested):
         totals=[];full=[]
         for mode in ('original','subdivided','dateline','pole'):
             s=state();v=old_v.copy();f=old_f.copy();p=point.copy();direction=strike.copy()
@@ -159,7 +199,7 @@ class ArcEmplacementTests(unittest.TestCase):
                 s.native_locator=mesh_geometry.build_locator(s.native_mesh['vertices'],s.native_mesh['faces'])
             s.material_surface=dict(vertices=v,faces=f,radius_km=6371.)
             context=geometry.prepare(s)
-            result=geometry.admit(context,lambda area:arcs._patch(p,direction,area),84.89948981534839,0)
+            result=geometry.admit(context,lambda area:arcs._patch(p,direction,area),requested,0)
             totals.append(result['accepted_area_km2'])
             full.append(result['diagnostics']['requested_footprint']['material_obstruction_km2'])
             self.assertTrue(result['diagnostics']['accepted_footprint']['admissible'])

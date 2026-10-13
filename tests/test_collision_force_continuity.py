@@ -75,6 +75,9 @@ class CollisionForceContinuityTests(unittest.TestCase):
             captured['rows']=s.collision_contacts
             raise AtForce()
         s._forces=forces
+        # step() hands over to these through the instance.
+        s._budgeted_step=lambda dt:native_engine.Simulation._budgeted_step(s,dt)
+        s._step_once=lambda dt:native_engine.Simulation._step_once(s,dt)
         with patch.object(native_engine.world_design,'next_transition',return_value=None), \
              patch.object(native_engine.lip_events,'next_transition',return_value=None), \
              patch.object(native_engine.world_design,'record_transitions'), \
