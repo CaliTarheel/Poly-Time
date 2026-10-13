@@ -642,12 +642,7 @@ class Simulation(legacy.Simulation):
         self.boundary_geometry_diagnostics = deepcopy(self.native_boundary_geometry['diagnostics'])
         trench_history.prepare(self)
         physics_profile.stall_buoyant_incoming(self)
-        ranks = np.zeros(self.n, np.uint8)
-        priority = np.array([0, 2, 4, 1, 6, 5], np.uint8)
-        display = boundary_labels.codes(self)
-        np.maximum.at(ranks, self.ba, priority[display])
-        np.maximum.at(ranks, self.bb, priority[display])
-        self.boundary = np.array([0, 3, 1, 0, 2, 5, 4], np.uint8)[ranks]
+        self.boundary = boundary_labels.cells(self, boundary_labels.codes(self), self.n)
 
     def _migrate_trenches(self, dt):
         """The moving hinge follows its upper plate without a second remap."""

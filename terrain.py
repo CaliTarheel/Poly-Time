@@ -129,7 +129,7 @@ def _prepare(frame):
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"The source frame has an invalid {key} field.") from exc
     z, crust, boundary = fields["elevation"], fields["crust"], fields["boundary"]
-    if not np.isin(crust, [0, 1, 2, 3]).all() or not np.isin(boundary, range(6)).all():
+    if not np.isin(crust, [0, 1, 2, 3]).all() or not np.isin(boundary, range(7)).all():
         raise ValueError("Source crust or boundary codes are invalid.")
     smooth = _blur(z, 1)
     gx = (np.roll(smooth, -1, axis=1) - np.roll(smooth, 1, axis=1)) * .5

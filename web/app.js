@@ -15,8 +15,8 @@
   const rasterWrap = document.createElement("canvas");
   const rasterWrapContext = rasterWrap.getContext("2d");
   const configKeys = ["seed", "width", "plate_count", "duration_myr", "dt_myr", "snapshot_myr", "slab_pull", "ridge_push", "erosion", "rift_strength", "mechanics_nodes", "mesh_level", "coast_geometry_level", "adaptive_refinement", "deforming_regions", "deformation_width_km", "material_face_budget"];
-  const boundaryNames = ["None", "Spreading ridge", "Subduction", "Transform", "Continental collision", "Continental rift"];
-  const boundaryColors = [null, [119, 212, 220], [239, 128, 108], [197, 161, 222], [244, 211, 138], [237, 155, 226]];
+  const boundaryNames = ["None", "Spreading ridge", "Subduction", "Transform", "Continental collision", "Continental rift", "Converging, no trench"];
+  const boundaryColors = [null, [119, 212, 220], [239, 128, 108], [197, 161, 222], [244, 211, 138], [237, 155, 226], [255, 255, 255]];
   const crustNames = ["Oceanic crust", "Continental crust", "Stable craton", "Island arc / terrane"];
   const crustColors = [[30, 65, 86], [148, 164, 126], [213, 177, 111], [175, 128, 104]];
   const elevationStops = [-11000, -6500, -4000, -1500, -1, 0, 400, 1200, 2400, 4200, 6500, 9000];
@@ -626,7 +626,7 @@
         const nativeBoundary = Array.isArray(data.boundary_segments);
         const subduction = nativeBoundary ? null : subductionGeometry(data);
         if (mapView.boundaryData !== data || mapView.boundaryWidth !== canvas.width) {
-        const paths = Array.from({ length: 6 }, () => new Path2D());
+        const paths = Array.from({ length: boundaryColors.length }, () => new Path2D());
         const sx = canvas.width / w, sy = canvas.height / h;
         if (nativeBoundary) {
           for (const line of DeepTimeNativeBoundaries.paths(data)) {
@@ -658,7 +658,8 @@
         context.save();
         context.lineWidth = Math.max(1, 1.1 * canvas.width / canvas.getBoundingClientRect().width) / mapView.zoom;
         context.lineJoin = "round"; context.globalAlpha = .9;
-        for (const code of [3, 1, 5, 2, 4]) { context.strokeStyle = `rgb(${boundaryColors[code].join(",")})`; context.stroke(mapView.boundaryPaths[code]); }
+        // Closing boundaries that no trench or collision takes up are dashed: nothing is declared there.
+        for (const code of [3, 6, 1, 5, 2, 4]) { context.strokeStyle = `rgb(${boundaryColors[code].join(",")})`; context.setLineDash(code === 6 ? [4 * context.lineWidth, 3 * context.lineWidth] : []); context.stroke(mapView.boundaryPaths[code]); }
         context.restore();
         drawSubductionTeeth(data);
       }

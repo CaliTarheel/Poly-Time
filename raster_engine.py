@@ -1851,6 +1851,10 @@ class Simulation:
         labels = self._label_codes()
         for code, name in [(1, "ridge"), (2, "subduction"), (3, "transform"), (4, "collision"), (5, "rift")]:
             stats[f"{name}_length_km"] = float(self.bl[labels == code].sum())
+        if getattr(self, 'boundary_label_version', 0) == 2:
+            # Closing boundaries with neither a trench nor a collision, which label version 1
+            # counted as transform.
+            stats["converging_length_km"] = float(self.bl[labels == 6].sum())
         # collision_length_km above counts only bcode==4, which requires continental
         # crust on BOTH sides of a graph edge. The thrust stacking that actually builds
         # mountains is done by collision_contacts on overlapping material sheets and is

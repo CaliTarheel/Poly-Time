@@ -33,6 +33,12 @@ Policy version 2 is opt-in (`effective_subduction.initiation.version = 2`). It k
 
 A trench that ends while its plates still converge is not replaced: there is no step-back behind an arrived block and no reversal of polarity.
 
+## Ocean that closes without a trench leaves no trace
+
+Where two plates close across ocean and no trench has formed, the force balance charges them the integrated strength of the lithosphere for shortening it, but the surface model makes nothing of that shortening. The overlapping ocean support is removed when cell supports are normalised; the floor is neither thickened nor raised, and nothing is recorded as subducted. In the Asein35 run at 287 Myr this was the state of 7,475 km of boundary closing at a mean of 5 km/Myr.
+
+Boundary label version 2 is opt-in (`boundary_labels.upgrade(s, 2)`). It draws such boundaries as "converging, no trench" where version 1 drew a transform, and counts them separately in the length statistics. It changes the map, the statistics and the exports only.
+
 ## Collision columns and relief need further validation
 
 The retained stack supports overlapping material and associated buoyancy accounting. Large combined stack thicknesses should not be read as the thickness of one intact crustal sheet. The current approximation does not resolve the full vertical deformation, pressure-temperature evolution, or gravitational relaxation of a deep collision stack.
