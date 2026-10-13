@@ -238,20 +238,37 @@ class LocalInitiationTests(unittest.TestCase):
         self.assertEqual(len(left), 1)
         self.assertEqual((left[0]['loading_myr'], left[0]['shortening_km']), (0., 0.))
 
-    def test_a_parent_contact_is_not_born_while_one_of_its_pieces_is_untrained(self):
-        # Two parent contacts of two pieces each; the second parent's far piece is new ground.
+    def test_a_trench_is_born_on_trained_ground_only_whatever_contacts_it_crosses(self):
+        # Two contacts: the first of two pieces, the second of one. All three pieces train.
         s = local_world(minimum_length_km=100.)
-        set_pieces(s, np.array([-.03, -.01, .01]), parents=[0, 0])
+        set_pieces(s, np.array([-.03, -.01, .01, .03]), parents=[0, 0, 1])
         motion(s, 12., 12.)
         tick(s)
         for _ in range(9):
             tick(s)
+        # The second contact gains new ground at its far end, so it is only half trained.
         set_pieces(s, np.array([-.03, -.01, .01, .03, .05]), parents=[0, 0, 1, 1])
         motion(s, 12., 12.)
         tick(s)
         self.assertEqual(len(s.trench_systems), 1)
-        self.assertAlmostEqual(s.trench_systems[0]['length_km'], 2*127.42, delta=1e-6)
-        self.assertEqual(len(tracks(s)), 2)
+        trench = s.trench_systems[0]
+        # The trace is the trained ground and no more.
+        self.assertAlmostEqual(trench['length_km'], 3*127.42, delta=1e-6)
+        ends = np.asarray(trench['geometry_xyz'])
+        self.assertAlmostEqual(float(np.arcsin(ends[:, 2]).max()), .03, delta=1e-12)
+        self.assertEqual(len(tracks(s)), 1)
+        self.assertEqual((tracks(s)[0]['loading_myr'], tracks(s)[0]['shortening_km']), (0., 0.))
+        # The half-trained contact pulls by half; the new ground adds nothing to the force.
+        self.assertTrue(initiation.activate_pending(s))
+        effective.prepare(s)
+        pull = trench['effective_subduction']['force_n_per_m']
+        forces = effective.line_state(s)[1]
+        np.testing.assert_allclose(forces, pull*np.array([1., .5]), rtol=1e-9)
+        self.assertAlmostEqual(float(forces@s.bl)/pull, 3*127.42, delta=1e-6)
+        # A contact the trench holds half of is no longer offered to a new one.
+        tick(s)
+        self.assertEqual(tracks(s), [])
+        self.assertEqual(len(s.trench_systems), 1)
 
     def test_replacing_the_whole_fault_policy_keeps_its_lower_bounds_and_named_candidates(self):
         s = world()

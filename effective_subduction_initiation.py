@@ -749,24 +749,22 @@ def _local_update(s,dt):
         away=np.minimum(np.arccos(np.clip(a@record['mid'],-1.,1.)),np.arccos(np.clip(b@record['mid'],-1.,1.)))
         return other,[carried[pair][k] for k in np.flatnonzero(away<=(record['length']+radius)/6371.+spans[pair])]
 
-    records=_pieces(s);tracks=[];origin={};trained={};incoming={};seen={}
+    records=_pieces(s);tracks=[];ready=[];extent={}
     for record in records:
-        edge=int(record['parent']);seen[edge]=seen.get(edge,0)+1
+        edge=int(record['parent']);extent[edge]=extent.get(edge,0.)+record['length']
         sides=[uid for k,uid in enumerate(record['uids'])
                if record['water'][k]>=controls['minimum_ocean_fraction'] and record['age'][k]>=controls['minimum_ocean_age_myr']]
-        if not sides:
-            trained[edge]=False;continue
+        if not sides:continue
         # Both sides can be old ocean. The side already under load keeps its role; else the older.
         choice=max(sides,key=lambda uid:(max((row[2]['loading_myr'] for row in reach(record,uid)[1]),default=0.),
                                          record['age'][record['uids'].index(uid)],-uid))
         over,near=reach(record,choice);side=record['uids'].index(choice)
         first,last,tangent,angle,parts=_local_inherit(record,near,radius,now)
-        covered=0.;good=True
         for low,high,history in parts:
             item=record if low==0. and high==angle else _part(record,first,last,tangent,angle,low,high)
             if (item['water'][side]<controls['minimum_ocean_fraction']
                     or np.linalg.norm(np.cross(item['start'],item['end']))<=1e-12):
-                good=False;continue
+                continue
             convergence,shear=_rate_bounds(item)
             row=dict(incoming_plate_uid=int(choice),overriding_plate_uid=int(over),
                 start=[float(v) for v in item['start']],end=[float(v) for v in item['end']],
@@ -783,41 +781,42 @@ def _local_update(s,dt):
                     # A pause keeps what the stretch has accepted; a lapse outlasting it starts again.
                     if row['lapse_myr']>controls['maximum_lapse_myr']:row['loading_myr']=row['shortening_km']=0.
             for key in ('loading_myr','shortening_km','shear_slip_km','lapse_myr','created_myr'):row[key]=float(row[key])
-            tracks.append(row);origin[id(row)]=edge;covered+=item['length']
-            good=good and _local_ready(row,controls)
-        # A parent contact joins a birth only if every part of every one of its pieces is ready
-        # for the same incoming plate: no parent-scale force may include an untrained sibling.
-        trained[edge]=trained.get(edge,True) and good and covered>=record['length']*(1.-1e-9)
-        incoming.setdefault(edge,set()).add(int(choice))
+            tracks.append(row)
+            if _local_ready(row,controls):
+                ready.append(dict(uids=record['uids'],start=np.asarray(item['start'],float),end=np.asarray(item['end'],float),
+                    mid=np.asarray(item['mid'],float),length=float(item['length']),parent=edge,incoming=int(choice),track=row))
     proposed=dict(state,tracks=tracks,epoch_myr=now,candidates=list(state['candidates']),
                   births=list(state['births']),events=list(state['events']))
-    parent=np.asarray(s.native_boundary_geometry['contact_index'])
-    whole={edge for edge,good in trained.items() if good and len(incoming.get(edge,()))==1
-           and seen[edge]==int(np.count_nonzero(parent==edge))}
+    # A trench is born on the connected ground that is ready, whatever contacts that ground
+    # crosses. A contact pulls by the share of it on the trace, so the untrained ground beside
+    # a trace adds nothing to the force; the trench's first contacts are those it holds a
+    # minimum share of.
     births=[]
-    for uid in sorted({next(iter(incoming[edge])) for edge in whole}):
-        ready=[record for record in records if int(record['parent']) in whole and incoming[int(record['parent'])]=={uid}]
-        for group in _groups(ready):
-            length=math.fsum(record['length'] for record in group)
-            if length>=controls['minimum_length_km']:births.append((uid,group,length))
+    for uid in sorted({part['incoming'] for part in ready}):
+        for group in _groups([part for part in ready if part['incoming']==uid]):
+            length=math.fsum(part['length'] for part in group)
+            if length<controls['minimum_length_km']:continue
+            held={}
+            for part in group:held[part['parent']]=held.get(part['parent'],0.)+part['length']
+            edges=sorted(edge for edge,km in held.items() if km>=LOCAL_MINIMUM_SHARE*extent[edge])
+            if edges:births.append((uid,group,length,np.array(edges,int)))
     s.effective_subduction_initiation=proposed
-    for uid,group,length in births:
-        edges=np.array(sorted(set(int(record['parent']) for record in group)),int)
+    for uid,group,length,edges in births:
         over=next(other for other in group[0]['uids'] if other!=uid)
-        under=[row for row in tracks if origin[id(row)] in set(edges.tolist())]
+        under=[part['track'] for part in group]
         candidate=dict(id=proposed['next_candidate_id'],phase='pending',incoming_plate_uid=int(uid),
             overriding_plate_uid=int(over),created_myr=min(row['created_myr'] for row in under),last_seen_myr=now,
             consecutive_myr=min(row['loading_myr'] for row in under),
             shortening_km=min(row['shortening_km'] for row in under),
             shear_slip_km=min(row['shear_slip_km'] for row in under),length_km=float(length),
-            segments_start=[record['start'].tolist() for record in group],
-            segments_end=[record['end'].tolist() for record in group])
+            segments_start=[part['start'].tolist() for part in group],
+            segments_end=[part['end'].tolist() for part in group])
         proposed['next_candidate_id']+=1;proposed['candidates'].append(candidate)
         down=np.full(len(s.ba),slots[uid],int)
         row=trench_history._birth(s,edges,down,inherited=False)
-        points=np.array([record['mid'] for record in group]);weights=np.array([record['length'] for record in group])
+        points=np.array([part['mid'] for part in group]);weights=np.array([part['length'] for part in group])
         center=np.sum(points*weights[:,None],axis=0);center/=np.linalg.norm(center)
-        endpoints=np.array([[record['start'],record['end']] for record in group]).reshape(-1,3)
+        endpoints=np.array([[part['start'],part['end']] for part in group]).reshape(-1,3)
         row.update(geometry_xyz=endpoints.tolist(),center=center.tolist(),length_km=float(weights.sum()),anchor_gap_km=0.)
         force=float(s.effective_subduction_settings['force_n_per_m'])
         row['effective_subduction']=dict(version=1,force_n_per_m=force,activation_pending=True,
