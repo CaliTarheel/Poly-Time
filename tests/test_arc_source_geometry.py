@@ -29,10 +29,18 @@ def add(s,positions,areas,owners=None):
     return arcs.add_arc_crust(s,cells,np.asarray(areas,float),positions=positions,owners=np.asarray(owners))
 
 
+# Records taken from a September 2026 recovery run. They were not published with the
+# source, so the two tests that replay them skip where they are absent.
+CAPTURES=Path(__file__).resolve().parents[1]/'validation/collision-repair-20260906'
+RECOVERY_PATCHES=CAPTURES/'arc-recovery-birth-patches.json'
+FIRST_FALSE_SOURCE=CAPTURES/'arc-first-false-source.npz'
+NO_CAPTURE='This recovery-run capture is not part of the published source.'
+
+
 class ArcSourceGeometryTests(unittest.TestCase):
+    @unittest.skipUnless(RECOVERY_PATCHES.is_file(),NO_CAPTURE)
     def test_actual_short_recovery_step_uses_final_stored_birth_area_for_25km_source(self):
-        path=Path(__file__).resolve().parents[1]/'validation/collision-repair-20260906/arc-recovery-birth-patches.json'
-        records=json.loads(path.read_text())
+        records=json.loads(RECOVERY_PATCHES.read_text())
         s=ocean_fixture()
         points=np.array([row['centre'] for row in records])
         amounts=np.array([row['amount_km2'] for row in records])
@@ -51,9 +59,9 @@ class ArcSourceGeometryTests(unittest.TestCase):
         self.assertTrue(np.all(s.structure['thickness_km']>=columns.MIN_THICKNESS_KM))
         self.assertTrue(np.all(s.structure['thickness_km']<=columns.MAX_THICKNESS_KM))
 
+    @unittest.skipUnless(FIRST_FALSE_SOURCE.is_file(),NO_CAPTURE)
     def test_real_first_false_source_triangle_blocks_exact_180km_point(self):
-        fixture=Path(__file__).resolve().parents[1]/'validation/collision-repair-20260906/arc-first-false-source.npz'
-        with np.load(fixture,allow_pickle=False) as data:
+        with np.load(FIRST_FALSE_SOURCE,allow_pickle=False) as data:
             s=SimpleNamespace(support=np.zeros((4,1)),
                 material_surface=dict(vertices=data['vertices'],faces=data['faces']),
                 kind=data['kind'],parcel_plate=data['owner'],parcel_collision_sheet=data['sheet'],collision_contacts=[])
