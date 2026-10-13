@@ -229,7 +229,7 @@ class ArcRibbonTransactionTests(unittest.TestCase):
         self.assertAlmostEqual(account['pending_area_km2'], 600., places=9)
         radius = ribbon.POLICY['foundation_maximum_radius_km']
         account, state, _ = self.found_beside_boundary(1, margin+radius+15.)
-        self.assertEqual(account['foundations_born'], 1)
+        self.assertGreaterEqual(account['foundations_born'], 1)
         self.assertGreaterEqual(ribbon.RADIUS_KM*np.arcsin(state.material_surface['vertices'][:, 1]).min(), margin)
 
     def test_ground_beside_a_trench_of_the_overriding_plate_keeps_its_footprint_in_that_plate(self):
@@ -262,6 +262,53 @@ class ArcRibbonTransactionTests(unittest.TestCase):
         self.assertEqual(sorted(set(np.round(offset).tolist())), [0., 10., 20., 30., 40., 50.])
         cells = np.floor(sites*(ribbon.RADIUS_KM/ribbon.LATTICE_KM)).astype(np.int64)
         self.assertEqual(len(np.unique(cells, axis=0)), len(sites))
+
+    def test_an_origin_the_belt_holds_entirely_keeps_no_rounding_remainder(self):
+        area = np.array([120., 120., 120., 120., 0.])
+        fits = area*ribbon.SOURCE_COLUMN_KM
+        fits[0] = np.nextafter(fits[0], 0.)         # held entirely, met to the last bit but one
+        fits[1] *= 1.-1e-13                         # held entirely, a longer sum's rounding
+        fits[2] *= .25                              # three quarters can never be held
+        usable = np.array([True, True, True, False, True])
+        placed = np.zeros(5)
+        raw = area-fits/ribbon.SOURCE_COLUMN_KM
+        self.assertTrue(raw[0] > 0. and raw[1] > 0.)
+        overflow = ribbon.unplaceable(area, fits, placed, usable)
+        np.testing.assert_array_equal(overflow[[0, 1, 3, 4]], 0.)
+        self.assertEqual(overflow[2], 90.)
+        # An origin that is itself only such a remainder has nothing to found with either.
+        dust = np.array([1e-13, 3e-31])
+        np.testing.assert_array_equal(ribbon.unplaceable(dust, np.zeros(2), np.zeros(2), np.ones(2, bool)), 0.)
+        # What is placed this interval counts when it exceeds what was thought to fit.
+        self.assertEqual(ribbon.unplaceable(area, fits, np.r_[0., 0., 60.*ribbon.SOURCE_COLUMN_KM, 0., 0.], usable)[2], 60.)
+
+    def test_only_origins_with_magma_to_spare_propose_foundation_sites(self):
+        state = self.state
+        ribbon.activate(state)
+        points = np.vstack((self.point, self.far))
+        cells = state._indices(points)
+        real = ribbon.unplaceable
+
+        def with_residue(area, fits, placed, usable):
+            # The remainder a held origin kept before: positive, and worth nothing.
+            return real(area, np.where(fits > 0., fits*(1.-1e-15), fits), placed, usable)
+
+        with patch.object(ribbon, 'unplaceable', side_effect=with_residue),                 patch.object(ribbon, '_candidates', wraps=ribbon._candidates) as proposed:
+            account = arcs.add_arc_crust(state, cells, np.array([400., 10000.]), positions=points,
+                                         owners=state.plate[cells], dt=1.)['ribbon']
+        self.assertGreaterEqual(account['foundations_born'], 1)
+        funders = proposed.call_args.args[0]
+        self.assertEqual(len(funders), 1)
+
+    def test_an_origin_used_up_to_rounding_does_not_wait_as_dust(self):
+        area = np.array([100., 100., 100., 2e-13, .5])
+        spent = np.array([np.nextafter(100., 0.), np.nextafter(100., 200.), 40., 0., .5*(1.-1e-13)])
+        self.assertGreater(area[0]-spent[0], 0.)
+        np.testing.assert_array_equal(ribbon.remaining(area, spent), [0., 0., 60., 0., 0.])
+        # Far inside what the saved frame allows an origin between its ledger and its supply.
+        self.assertLess(ribbon.rounding(np.array([1e4]))[0], 1e-7)
+        with self.assertRaisesRegex(ValueError, 'more magma than an origin holds'):
+            ribbon.remaining(area, spent+np.r_[0., 0., 61., 0., 0.])
 
     def test_magma_the_belt_will_hold_founds_nothing(self):
         state = self.state

@@ -40,6 +40,9 @@ FOOTPRINT_FILL = .999
 # Footprint area of the compact eight-ray foundation per squared radius of its farthest vertex.
 FOOTPRINT_AREA_PER_RADIUS2 = 2.6
 LATTICE_KM = 10.
+# Share of an origin's own magma, or of one square kilometre for a smaller origin, within which
+# a remainder is the rounding of the sums that placed it.
+FILL_ROUNDING = 1e-12
 POLICY = dict(version=VERSION, source_column_km=SOURCE_COLUMN_KM, ridge_top_m=-1000., summit_m=2500.,
               constructive_slope_deg=20., rim_km=5., band_km=50., maximum_column_km=75.,
               maximum_thickening_km_per_myr=1., foundation_column_km=8.,
@@ -439,6 +442,37 @@ def _fill(ground, order, volumes, reach, room_km):
     return added, placed, leading
 
 
+def rounding(area):
+    """Largest remainder of each origin that is only the rounding of its own sums."""
+    return np.maximum(area, 1.)*FILL_ROUNDING
+
+
+def unplaceable(area, fits, placed, usable):
+    """Source area of each origin's magma that the belt can never hold.
+
+    The fill meets an origin's supply only to rounding, so an origin the belt holds entirely
+    would otherwise keep a remainder near 1e-16 of itself. That remainder founds nothing, but
+    it would make the origin propose foundation sites for other origins' magma, and whether it
+    did would turn on the last bit of a sum.
+    """
+    overflow = np.maximum(area-np.maximum(fits, placed)/SOURCE_COLUMN_KM, 0.)
+    overflow[(overflow <= rounding(area)) | ~usable] = 0.
+    return overflow
+
+
+def remaining(area, spent):
+    """Source area each origin still holds after an interval.
+
+    Within the rounding of its own sums an origin is used up, whichever way the last bit fell:
+    a remainder of 1e-16 of itself would otherwise wait, and be examined, for ever.
+    """
+    left = area-spent
+    left[np.abs(left) <= rounding(area)] = 0.
+    if np.any(left < 0.):
+        raise ValueError('The arc ribbon spent more magma than an origin holds.')
+    return left
+
+
 def _thicken(s, faces, thickness_km, trace, trace_face):
     """Add juvenile column to existing faces and their enduring points; geometry is untouched."""
     fields = {name: np.asarray(value)[faces].copy() for name, value in s.structure.items()}
@@ -768,8 +802,7 @@ def transaction(s, cells, additions, *, positions=None, owners=None, source_prov
     if not np.isclose(thickened_volume, planned, rtol=2e-11, atol=max(1e-7, abs(before_volume)*2e-15)):
         raise ValueError('Arc ribbon thickening failed its physical column-volume ledger.')
     thickened = placed/SOURCE_COLUMN_KM
-    overflow = np.maximum(area-np.maximum(fits, placed)/SOURCE_COLUMN_KM, 0.)
-    overflow[~usable] = 0.
+    overflow = unplaceable(area, fits, placed, usable)
     foundations = _found(s, ground, order, points, owner, provenance, arcs, overflow, interval)
     founded = foundations['spent']
     founded_volume = float(sum(row['volume_km3'] for row in foundations['born']))
@@ -777,10 +810,7 @@ def transaction(s, cells, additions, *, positions=None, owners=None, source_prov
         raise ValueError('Arc ribbon foundations must use exactly their funded magma volume.')
     _book(s, provenance, points, thickened, leading, ground, foundations['born'])
     spent = thickened+founded
-    left = area-spent
-    left[(left < 0.) & (left > -np.maximum(area, 1.)*1e-12)] = 0.
-    if np.any(left < 0.):
-        raise ValueError('The arc ribbon spent more magma than an origin holds.')
+    left = remaining(area, spent)
     keep = np.flatnonzero(left > 0.)
     totals = s.process_totals
     totals['arc_added_km2'] += float(spent.sum())
