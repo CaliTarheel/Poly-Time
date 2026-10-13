@@ -13,6 +13,7 @@ import plate_balance as balance
 
 def fixture(shape='negative', version=1, size=3):
     model = balance.Balance.__new__(balance.Balance)
+    model.s = SimpleNamespace()  # no numerical accuracy policy: the historical force tolerance
     model.resistance_version = version
     model.size = size
     model.stiffness = np.eye(size)

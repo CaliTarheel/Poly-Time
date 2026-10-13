@@ -117,6 +117,7 @@ class SlabMassInventoryTests(unittest.TestCase):
             s.bp = np.zeros(pieces,int); s.bq = np.ones(pieces,int); s.trench_id = np.ones(pieces,int)
             model = object.__new__(plate_balance.Balance)
             model.s = s; model.size = 6; model.slot = {0:0,1:1}
+            model.effective_subduction = False  # the retained-mass law this test is about
             model.slab_owner, model.slab_load, model.slab_length = slab.line_load(s)
             model.trench_edges = np.arange(pieces); model.bp = s.bp
             model.normal = np.tile([0.,1.,0.],(pieces,1))
