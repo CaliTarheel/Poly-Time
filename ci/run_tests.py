@@ -44,18 +44,25 @@ def brief(error):
     return lines[-1].strip()[:300] if lines else error[0].__name__
 
 
+def detail(error):
+    """The traceback, for the results file: enough to diagnose a failure from the artifact alone."""
+    return ''.join(traceback.format_exception(*error))[-6000:]
+
+
 class Recorder(unittest.TestResult):
     def __init__(self):
         super().__init__()
         self.outcomes = {}
         self.clock = {}
 
-    def record(self, test, outcome, message=''):
+    def record(self, test, outcome, message='', error=None):
         key = identity(test)
         previous = self.outcomes.get(key)
         # A subtest that failed is not undone by its parent finishing.
         if previous is None or RANK[outcome] > RANK[previous['outcome']]:
             self.outcomes[key] = dict(outcome=outcome, message=message, seconds=(previous or {}).get('seconds', 0.))
+            if error is not None:
+                self.outcomes[key]['traceback'] = detail(error)
 
     def startTest(self, test):
         super().startTest(test)
@@ -73,11 +80,11 @@ class Recorder(unittest.TestResult):
 
     def addFailure(self, test, error):
         super().addFailure(test, error)
-        self.record(test, 'failed', brief(error))
+        self.record(test, 'failed', brief(error), error)
 
     def addError(self, test, error):
         super().addError(test, error)
-        self.record(test, 'error', brief(error))
+        self.record(test, 'error', brief(error), error)
 
     def addSkip(self, test, reason):
         super().addSkip(test, reason)
@@ -94,7 +101,7 @@ class Recorder(unittest.TestResult):
     def addSubTest(self, test, subtest, error):
         super().addSubTest(test, subtest, error)
         if error is not None:
-            self.record(test, 'failed' if issubclass(error[0], test.failureException) else 'error', brief(error))
+            self.record(test, 'failed' if issubclass(error[0], test.failureException) else 'error', brief(error), error)
 
 
 def run_module(module, out):

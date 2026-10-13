@@ -4,6 +4,8 @@
   "experiments": "Imports the `experiments` package, which is not in this repository.",
   "tools": "Imports the `tools` package, which is not in this repository.",
   "guarded_manager": "Starts a fresh run through `server.SimulationManager`. This guarded entry point only resumes a prepared checkpoint under a controller: the worker stops for want of `_initial_numerical_budget` and the run never reaches the state the test waits for.",
+  "trench_gains_edge": "The test holds the boundary edges traced at the start at an opening speed. One original trench is given a second edge during the lifecycle, records shortening on it and stays mature. Whether that trench should extend onto the edge is a modelling question, not settled here.",
+  "hosted_runner_only": "Passes on the development machine and fails on a clean hosted runner; cause not yet diagnosed.",
   "undiagnosed": "Fails on the base branch on a clean machine; cause not yet diagnosed."
  },
  "tests": {
@@ -48,12 +50,12 @@
   "tests.test_entry_two_plate_flexure::import": "experiments",
   "tests.test_flow_checkpoint_resume.NativeCheckpointResumeTests.test_saved_frames_match_continuous_integration_after_fresh_manager_resume": "guarded_manager",
   "tests.test_highland_qualification_io::import": "tools",
-  "tests.test_lite_boundary_geometry_transition.BoundarySourceTransitionTests.test_checkpoint_after_readback_and_source_receipt_write_corruption_never_publish": "undiagnosed",
-  "tests.test_lite_boundary_geometry_transition.BoundarySourceTransitionTests.test_corrupt_copied_and_written_child_artifacts_never_publish": "undiagnosed",
-  "tests.test_lite_feedback_transition.LiteFeedbackTransitionTests.test_external_numerical_proof_references_are_truthful_and_relative_metadata_collisions_fail": "undiagnosed",
-  "tests.test_lite_force_port_transition.ForcePortSourceTransitionTests.test_checkpoint_after_readback_and_source_receipt_write_corruption_never_publish": "undiagnosed",
-  "tests.test_lite_force_port_transition.ForcePortSourceTransitionTests.test_corrupt_copied_and_written_child_artifacts_never_publish": "undiagnosed",
-  "tests.test_lite_geometry_acceleration_transition.GeometryAccelerationTransitionTests.test_deep_windows_history_short_stage_exact_copy_and_public_path_refusal": "undiagnosed",
+  "tests.test_lite_boundary_geometry_transition.BoundarySourceTransitionTests.test_checkpoint_after_readback_and_source_receipt_write_corruption_never_publish": "hosted_runner_only",
+  "tests.test_lite_boundary_geometry_transition.BoundarySourceTransitionTests.test_corrupt_copied_and_written_child_artifacts_never_publish": "hosted_runner_only",
+  "tests.test_lite_feedback_transition.LiteFeedbackTransitionTests.test_external_numerical_proof_references_are_truthful_and_relative_metadata_collisions_fail": "hosted_runner_only",
+  "tests.test_lite_force_port_transition.ForcePortSourceTransitionTests.test_checkpoint_after_readback_and_source_receipt_write_corruption_never_publish": "hosted_runner_only",
+  "tests.test_lite_force_port_transition.ForcePortSourceTransitionTests.test_corrupt_copied_and_written_child_artifacts_never_publish": "hosted_runner_only",
+  "tests.test_lite_geometry_acceleration_transition.GeometryAccelerationTransitionTests.test_deep_windows_history_short_stage_exact_copy_and_public_path_refusal": "hosted_runner_only",
   "tests.test_load_history_reuse.LoadHistoryReuseTests::setUpClass": "guarded_manager",
   "tests.test_native_collision_watch::import": "experiments",
   "tests.test_native_entry_approach::import": "experiments",
@@ -84,7 +86,7 @@
   "tests.test_simulation_timing.SimulationTimingTests.test_eta_uses_integration_steps_even_when_no_new_frame_is_saved": "guarded_manager",
   "tests.test_simulation_timing.SimulationTimingTests.test_initialization_and_final_files_count_as_live_processing": "guarded_manager",
   "tests.test_simulation_timing.SimulationTimingTests.test_pause_serialization_and_resume_after_restart_keep_only_active_seconds": "guarded_manager",
-  "tests.test_trench_persistence.StationaryTrenchTests.test_genuine_opening_still_shuts_persistent_trenches": "undiagnosed",
+  "tests.test_trench_persistence.StationaryTrenchTests.test_genuine_opening_still_shuts_persistent_trenches": "trench_gains_edge",
   "tests.test_world_design.WorldDesignTests.test_native_manager_records_exact_intervals_and_reloads_portable_design": "guarded_manager"
  }
 }
