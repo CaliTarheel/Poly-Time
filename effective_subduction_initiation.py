@@ -28,6 +28,14 @@ LOCAL_DEFAULTS=dict(version=LOCAL_VERSION,enabled=False,minimum_convergence_km_m
 # this shares its longer neighbour's record, and no piece keeps more than this many records.
 LOCAL_MINIMUM_PART_KM=10.
 LOCAL_MAXIMUM_PARTS=4
+# Under version 2 a contact carries an induced trench by the share of its length that lies on
+# the trench's declared trace. Version 1 counts a contact only when all of it does. Contacts are
+# redrawn as the boundary moves and soon straddle the ends of a trace, so the trench version 1
+# bore in the Asein35 run at 266 Myr held 401 of its 787 km at once and none after five Myr,
+# on a boundary that went on closing at 6.8 km/Myr. Below the first share a contact is not part
+# of the trench; from the second it is not offered to a new one.
+LOCAL_MINIMUM_SHARE=.25
+LOCAL_RESERVED_SHARE=.5
 TRACK_NUMBERS=('loading_myr','shortening_km','shear_slip_km','lapse_myr','created_myr','last_seen_myr')
 
 
@@ -159,7 +167,7 @@ def _pieces(s):
     reserved=np.zeros(len(ids),bool)
     for trace in s.trench_systems:
         if not trace.get('effective_subduction') or trace['phase'] in ('shutdown','joined'):continue
-        reserved|=supported_parents(s,trace,ids==trace['id'])
+        reserved|=reserved_parents(s,trace,ids==trace['id'])
     ages=np.asarray(s.age,float)
     if not np.isfinite(ages).all() or np.any(ages<0.):raise ValueError('Lite initiation requires finite nonnegative control ocean ages.')
     middle=(a+b);middle/=np.linalg.norm(middle,axis=1)[:,None]
@@ -459,10 +467,13 @@ def _birth_interior(s,group,controls,incoming):
     return max(interiors,key=lambda part:math.fsum(row['length'] for row in part),default=[])
 
 
-def supported_parents(s,row,select):
-    """New force sources cannot recruit untrained parents through a match halo."""
+def _local_state(s):
+    state=getattr(s,'effective_subduction_initiation',None)
+    return isinstance(state,dict) and type(state.get('version')) is int and state['version']==LOCAL_VERSION
+
+
+def _finite_trace(row):
     law=row.get('effective_subduction',{})
-    if not law.get('initiation_finite_support',False):return select
     if row['id']!=law.get('support_origin_trench_id'):
         raise ValueError('Initiated finite support needs an explicit owner/topology transfer before loading a descendant trace.')
     geometry=np.asarray(row['geometry_xyz'],float)
@@ -471,6 +482,47 @@ def supported_parents(s,row,select):
     a,b=geometry[::2],geometry[1::2]
     if np.any(np.linalg.norm(np.cross(a,b),axis=1)<=1e-12):
         raise ValueError('Initiated finite force support needs nondegenerate arcs.')
+    return a,b
+
+
+def _trace_share(s,row,select):
+    """Share of each selected contact's length inside the declared finite trace."""
+    a,b=_finite_trace(row)
+    contour=s.native_boundary_geometry;parent=np.asarray(contour['contact_index'])
+    starts,ends=np.asarray(contour['segments_start']),np.asarray(contour['segments_end'])
+    radius=max(120.,1.8*__import__('trench_history')._spacing(s));share=np.zeros(len(select))
+    for edge in np.flatnonzero(select):
+        total=inside=0.
+        for piece in np.flatnonzero(parent==edge):
+            angle,_,intervals=_arc_intervals(starts[piece],ends[piece],a,b,radius)
+            total+=angle;inside+=math.fsum(high-low for low,high in intervals)
+        if total>0.:share[edge]=min(1.,inside/total)
+    return share
+
+
+def support_share(s,row,select):
+    """The part of the trench's line force each selected contact carries, in [0,1]."""
+    select=np.asarray(select,bool)
+    if not row.get('effective_subduction',{}).get('initiation_finite_support',False):return select.astype(float)
+    if not _local_state(s):return supported_parents(s,row,select).astype(float)
+    share=_trace_share(s,row,select)
+    share[share<LOCAL_MINIMUM_SHARE]=0.
+    return share
+
+
+def reserved_parents(s,row,select):
+    """Contacts an existing trench holds, which are not offered to a new one."""
+    if (not row.get('effective_subduction',{}).get('initiation_finite_support',False) or not _local_state(s)):
+        return supported_parents(s,row,select)
+    return _trace_share(s,row,np.asarray(select,bool))>=LOCAL_RESERVED_SHARE
+
+
+def supported_parents(s,row,select):
+    """New force sources cannot recruit untrained parents through a match halo."""
+    law=row.get('effective_subduction',{})
+    if not law.get('initiation_finite_support',False):return select
+    if _local_state(s):return _trace_share(s,row,np.asarray(select,bool))>=LOCAL_MINIMUM_SHARE
+    a,b=_finite_trace(row)
     contour=s.native_boundary_geometry;parent=np.asarray(contour['contact_index'])
     starts,ends=np.asarray(contour['segments_start']),np.asarray(contour['segments_end'])
     radius=max(120.,1.8*__import__('trench_history')._spacing(s));result=np.asarray(select,bool).copy()

@@ -163,10 +163,15 @@ def line_state(s):
             continue
         select = ((ids == row['id']) & (np.asarray(s.bl) > 1e-10)
                   & (((s.bp == down) & (s.bq == over)) | ((s.bp == over) & (s.bq == down))))
+        share = None
         if law.get('initiation_finite_support',False):
             import effective_subduction_initiation
-            select=effective_subduction_initiation.supported_parents(s,row,select)
+            # One where the whole contact carries the trench. The local initiation policy
+            # gives a contact the share of its length that lies on the declared trace.
+            share=effective_subduction_initiation.support_share(s,row,select)
+            select=share>0.
         owners[select], forces[select], live[select] = down, force, True
+        if share is not None:forces[select]*=share[select]
     forces *= _water_fraction(s, owners)
     return owners, forces, live
 

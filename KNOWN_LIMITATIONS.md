@@ -31,6 +31,8 @@ A trench is either inherited from the starting world or born by induced initiati
 
 Policy version 2 is opt-in (`effective_subduction.initiation.version = 2` for a new world, `upgrade_local` for a saved one). It keeps the history on each stretch of a fault, so a boundary that closes along part of its length can qualify there; a lapse of up to 5 Myr pauses a stretch rather than starting it again; and 200 km of shortening qualifies without shear. Its thresholds (2 km/Myr of guaranteed convergence, 10 Myr of loading, 100 km of shortening with 100 km of shear slip or 200 km alone, 300 km of length, incoming ocean older than 20 Myr and at least 80% wet) are starting values. They have not been calibrated against observed initiation or tested across seeds. Each qualifying stretch is born as its own trench record, so neighbouring stretches that qualify in different steps remain separate trenches, and a qualifying stretch shorter than the minimum length waits for its neighbours.
 
+An induced trench keeps the finite trace it was born with, carried with its overriding plate; it does not lengthen along strike. Under version 2 a boundary contact carries the trench's pull by the share of its length that lies on that trace. The megathrust resistance, the intake of ocean floor and the map label are still those of a whole contact, so at the ends of a trace they cover somewhat more boundary than the pull does.
+
 A trench that ends while its plates still converge is not replaced: there is no step-back behind an arrived block and no reversal of polarity.
 
 ## Ocean that closes without a trench leaves no trace

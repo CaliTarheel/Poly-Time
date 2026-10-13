@@ -137,6 +137,61 @@ class LocalInitiationTests(unittest.TestCase):
         tick(s)
         self.assertEqual(len(s.trench_systems), 1)
 
+    def test_a_born_trench_keeps_its_length_when_its_contacts_are_redrawn(self):
+        # The boundary is cut into contacts at other places than at birth, so the outer contacts
+        # straddle the ends of the declared trace (which runs from -0.03 to 0.03).
+        redrawn = np.array([-.045, -.02, 0., .02, .045])
+        for local in (True, False):
+            with self.subTest(local=local):
+                s = local_world() if local else world()
+                if not local:
+                    initiation.upgrade(s)
+                tick(s)
+                for _ in range(10):
+                    tick(s)
+                self.assertEqual(len(s.trench_systems), 1)
+                self.assertTrue(initiation.activate_pending(s))
+                effective.prepare(s)
+                pull = s.trench_systems[0]['effective_subduction']['force_n_per_m']
+                np.testing.assert_array_equal(effective.line_state(s)[1], pull)
+                set_pieces(s, redrawn)
+                motion(s, 12., 12.)
+                effective.prepare(s)
+                owners, forces, live = effective.line_state(s)
+                if local:
+                    # Each contact pulls by the share of it on the trace: the trace's own length.
+                    np.testing.assert_allclose(forces, pull*np.array([.4, 1., 1., .4]), rtol=1e-9)
+                    self.assertAlmostEqual(float(forces@s.bl)/pull, 3*127.42, delta=1e-6)
+                    self.assertTrue(live.all())
+                    np.testing.assert_array_equal(s.down, 0)
+                else:
+                    # The whole-fault policy keeps only contacts wholly on the trace.
+                    np.testing.assert_array_equal(forces, pull*np.array([0., 1., 1., 0.]))
+                    np.testing.assert_array_equal(live, [False, True, True, False])
+        # The outer contacts are less than half on the trace: they stay open to a new trench,
+        # while the inner ones are held.
+        tick(s := self._redrawn_local(redrawn))
+        self.assertEqual(len(tracks(s)), 2)
+        self.assertEqual(sorted(round(float(np.degrees(np.arcsin(row['start'][2]))), 3) for row in tracks(s)),
+                         sorted(round(float(np.degrees(v)), 3) for v in (redrawn[0], redrawn[3])))
+        # A contact with less than a quarter of its length on the trace is not part of the trench.
+        s = self._redrawn_local(np.array([-.07, -.02, 0., .02, .032]))
+        effective.prepare(s)
+        owners, forces, live = effective.line_state(s)
+        pull = s.trench_systems[0]['effective_subduction']['force_n_per_m']
+        np.testing.assert_allclose(forces, pull*np.array([0., 1., 1., 10./12.]), rtol=1e-9)
+        np.testing.assert_array_equal(live, [False, True, True, True])
+
+    def _redrawn_local(self, phi):
+        s = local_world()
+        tick(s)
+        for _ in range(10):
+            tick(s)
+        initiation.activate_pending(s)
+        set_pieces(s, phi)
+        motion(s, 12., 12.)
+        return s
+
     def test_head_on_shortening_alone_qualifies_at_the_higher_threshold(self):
         s = local_world()
         motion(s, 12., 0.)
