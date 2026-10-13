@@ -25,6 +25,7 @@ DETAILED_FRESH_LAWS = dict(retained_phases='thermal_v1', subduction_response='mo
 REVIEWED_FRESH_LAWS = dict(
     effective_subduction=dict(enabled=True, force_n_per_m=5e12),
     primordial_subduction=dict(enabled=True),
+    primordial_ocean=dict(enabled=True),
     subduction_response='fixed_trench', retained_phases='disabled',
     continental_lifecycle=dict(enabled=False), rift_traction=dict(enabled=False),
     trench_persistence='kinematic', slab_allocation='uniform',
@@ -55,6 +56,17 @@ def fresh_world_request(config=None, initial=None):
     declaration = request.get('primordial_subduction')
     if lite and isinstance(declaration, dict) and 'enabled' not in declaration:
         request['primordial_subduction'] = dict(declaration, enabled=True)
+    if lite:
+        # The ring is an explicit alternative ocean initializer. Preserve it
+        # when no ocean-splitting flag was supplied; explicit conflicts still
+        # reach the engine's normal validation.
+        ring = request.get('supercontinent_ring')
+        ocean_default = not (isinstance(ring, dict) and ring.get('enabled') is True)
+        ocean = request.get('primordial_ocean')
+        if ocean is None:
+            request['primordial_ocean'] = dict(enabled=ocean_default)
+        elif isinstance(ocean, dict) and 'enabled' not in ocean:
+            request['primordial_ocean'] = dict(ocean, enabled=ocean_default)
     for key, value in laws.items():
         if request.get(key) is None:
             request[key] = deepcopy(value)

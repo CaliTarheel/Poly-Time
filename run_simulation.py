@@ -50,6 +50,9 @@ def build_config(args):
         for key in fresh_world.REVIEWED_FRESH_LAWS:
             if config.get(key) is None:
                 config[key] = saved_meaning[key]
+        ocean = config.get('primordial_ocean')
+        if isinstance(ocean, dict) and 'enabled' not in ocean:
+            config['primordial_ocean'] = dict(ocean, enabled=False)
         rifting = config.get('enhanced_rifting')
         if rifting is None:
             config['enhanced_rifting'] = {'enabled': False}

@@ -20,6 +20,7 @@ import unittest
 from unittest.mock import patch
 
 import fresh_world
+import budget
 import native_engine
 import physics_profile
 import progressive_rifting
@@ -49,6 +50,7 @@ class FreshWorldRequestTests(unittest.TestCase):
         self.assertEqual(fresh_world.REVIEWED_FRESH_LAWS['subduction_response'], 'fixed_trench')
         self.assertEqual(config['effective_subduction'], {'enabled': True, 'force_n_per_m': 5e12})
         self.assertTrue(config['primordial_subduction']['enabled'])
+        self.assertTrue(config['primordial_ocean']['enabled'])
         self.assertFalse(config['continental_lifecycle']['enabled'])
         self.assertFalse(config['rift_traction']['enabled'])
         self.assertFalse(config['force_limit_rifting']['enabled'])
@@ -62,6 +64,21 @@ class FreshWorldRequestTests(unittest.TestCase):
         self.assertEqual(config['retained_phases'], 'thermal_v1')
         self.assertEqual(config['enhanced_rifting'], SEP21T_RIFTING)
         self.assertFalse(config['primordial_subduction']['enabled'])
+        self.assertFalse(config['primordial_ocean']['enabled'])
+
+    def test_ocean_defaults_preserve_parameters_opt_out_and_alternative_initializer(self):
+        ocean = dict(plate_count=6, half_spreading_rate_cm_yr=3., maximum_age_myr=150.,
+                     continental_attachments=[dict(region_index=1, continental_plate_uid=3)])
+        request = dict(physics_profile='reviewed_v1', primordial_ocean=ocean)
+        before = deepcopy(request)
+        self.assertEqual(fresh(request)['primordial_ocean'], dict(ocean, enabled=True))
+        self.assertEqual(request, before)
+        off = fresh(dict(physics_profile='reviewed_v1', primordial_ocean={'enabled': False}))
+        self.assertFalse(off['primordial_ocean']['enabled'])
+        ring = dict(physics_profile='reviewed_v1', supercontinent_ring={'enabled': True})
+        self.assertFalse(fresh(ring)['primordial_ocean']['enabled'])
+        with self.assertRaisesRegex(ValueError, 'alternative ocean initializations'):
+            fresh(dict(ring, primordial_ocean={'enabled': True}))
 
     def test_lite_keeps_the_full_detail_contract(self):
         config = server.fresh_world_defaults()
@@ -149,6 +166,7 @@ class FreshWorldRequestTests(unittest.TestCase):
         self.assertEqual(native_engine.NATIVE_DEFAULTS['retained_phases'], 'disabled')
         self.assertIsNone(native_engine.NATIVE_DEFAULTS['enhanced_rifting'])
         self.assertFalse(config['effective_subduction']['enabled'])
+        self.assertFalse(config['primordial_ocean']['enabled'])
 
     def test_selection_is_outside_the_hashed_engine_sources(self):
         # Checkpoints record a hash of every engine helper; resume and branch
@@ -188,7 +206,7 @@ class ServerFreshWorldTests(unittest.TestCase):
                                                  'force_limit_rifting', 'supercontinent_ring',
                                                  'effective_subduction', 'continental_lifecycle', 'rift_traction'}:
             self.assertEqual(defaults[key], normalized_legacy[key], key)
-        self.assertFalse(defaults['primordial_ocean']['enabled'])
+        self.assertTrue(defaults['primordial_ocean']['enabled'])
         self.assertTrue(defaults['primordial_subduction']['enabled'])
         self.assertFalse(defaults['lip_events']['enabled'])
         self.assertFalse(defaults['force_limit_rifting']['enabled'])
@@ -220,6 +238,7 @@ class ServerFreshWorldTests(unittest.TestCase):
         self.assertEqual(saved['retained_phases'], 'disabled')
         self.assertTrue(saved['effective_subduction']['enabled'])
         self.assertTrue(saved['primordial_subduction']['enabled'])
+        self.assertTrue(saved['primordial_ocean']['enabled'])
         self.assertEqual(saved['enhanced_rifting'], SEP21T_RIFTING)
         # Re-validating the saved file (branch) reproduces it exactly.
         self.assertEqual(native_engine.validate_config(saved), saved)
@@ -268,6 +287,7 @@ class CommandLineTests(unittest.TestCase):
 
     def test_default_profile_matches_the_app(self):
         self.assertEqual(run_simulation.build_config(self.args())['physics_profile'], 'reviewed_v1')
+        self.assertTrue(run_simulation.build_config(self.args())['primordial_ocean']['enabled'])
         parsed = run_simulation.parser().parse_args(['--physics-profile', 'legacy', '--seed', '4'])
         config = run_simulation.build_config(parsed)
         self.assertEqual((config['physics_profile'], config['seed']), ('legacy', 4))
@@ -287,6 +307,11 @@ class CommandLineTests(unittest.TestCase):
         explicit = {'physics_profile': 'reviewed_v1', 'subduction_response': 'moving_hinge_v1',
                     'retained_phases': 'thermal_v1', 'enhanced_rifting': {'enabled': True}}
         self.assertEqual(self.rerun(explicit), native_engine.validate_config(explicit))
+
+    def test_saved_partial_ocean_config_keeps_historical_disabled_meaning(self):
+        for ocean in ({}, {'plate_count': 6}, {'enabled': False}, {'enabled': True, 'plate_count': 3}):
+            saved = dict(physics_profile='reviewed_v1', primordial_ocean=ocean)
+            self.assertEqual(self.rerun(saved), native_engine.validate_config(saved))
 
     def test_saved_config_without_profile_reproduces_as_legacy(self):
         # Runs saved before physics_profile existed (e.g. 20260915-180344).
@@ -318,8 +343,13 @@ class CommandLineTests(unittest.TestCase):
 
 class FreshReviewedWorldSmokeTest(unittest.TestCase):
     def test_fresh_reviewed_world_records_lite_laws_and_steps(self):
-        config = fresh(dict(SMALL, physics_profile='reviewed_v1'))
+        # Resolve the distinct ocean-ridge and coastal contacts; level 2 was
+        # sufficient only for the previous single-ocean default.
+        config = fresh(dict(SMALL, mesh_level=4, physics_profile='reviewed_v1'))
         s = native_engine.Simulation(config)
+        self.assertEqual(s.primordial_ocean_version, 1)
+        self.assertEqual(s.primordial_ocean_diagnostics['water_region_count'], 4)
+        self.assertGreater(s.primordial_ocean_diagnostics['ridge_length_km'], 0.)
         self.assertEqual(s.subduction_response_version, 0)
         self.assertEqual(s.backarc_driver_version, 2)
         self.assertEqual(getattr(s, 'retained_dense_crust_version', 0), 0)
@@ -333,7 +363,11 @@ class FreshReviewedWorldSmokeTest(unittest.TestCase):
                          'realized native material-link logarithmic extension')
         self.assertEqual(calibration['breakup_extension_km'], progressive_rifting.BREAKUP_EXTENSION_KM)
         self.assertNotIn('rupture_strain_threshold', calibration)
-        s.step(.005)
+        # This is a physical-law smoke test, not a wall-time benchmark. The
+        # refined control mesh cannot reliably finish within the production
+        # budget's nine seconds for a .005 Myr interval on CI hosts.
+        with budget.step_budget(.005, seconds_per_myr=120000):
+            s.step(.005)
         self.assertEqual(s.t, .005)
 
 
