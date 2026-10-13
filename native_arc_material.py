@@ -65,7 +65,13 @@ def snapshot_fields(s):
     if policy==1:
         import arc_emplacement_geometry as emplacement
         result['arc_emplacement_version']=1
-        pending=getattr(s,'native_arc_pending',dict(xyz=np.empty((0,3)),owner=np.empty(0,np.int16),area=np.empty(0)))
+        pending=getattr(s,'native_arc_pending',None)
+        if pending is None:
+            # No arc transaction has run yet, as in a new world's first frame. Volcanic points
+            # require provenance for every pending origin; for none of them that is the empty list.
+            pending=dict(xyz=np.empty((0,3)),owner=np.empty(0,np.int16),area=np.empty(0))
+            import arc_point_nucleation
+            if arc_point_nucleation.version(s):pending['source_provenance']=[]
         result['arc_pending_source']=emplacement.pending_snapshot(pending)
     import arc_birth_profile
     result.update(arc_birth_profile.snapshot_fields(s))

@@ -71,7 +71,10 @@ def complete_schema(source):
                 or name in mesh_history.eclogite_sink.ARRAY_FIELDS
                 or name in mesh_history.ENHANCED_RIFT_DTYPES
                 # This chart-only fixture does not enable local welding.
-                or name in mesh_history.localized_accretion.ARRAY_FIELDS):
+                or name in mesh_history.localized_accretion.ARRAY_FIELDS
+                # Nor does it declare a coastal reference or a numerical accuracy policy.
+                or name in mesh_history.COAST_DTYPES
+                or name in mesh_history.numerical_accuracy.ARRAY_FIELDS):
             continue
         n = len(result['material_faces']) if name.startswith('material_') else len(result['mesh_faces'])
         if name.startswith('native_boundary_'):
