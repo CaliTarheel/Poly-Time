@@ -571,7 +571,8 @@ class Simulation(legacy.Simulation):
             self.bp, self.bq = self.plate[self.ba], self.plate[self.bb]
         else:
             self.native_boundary_geometry = native_boundary_geometry.reconstruct(
-                self.native_mesh, self.plate, self.support, self.boundary_edge_indices)
+                self.native_mesh, self.plate, self.support, self.boundary_edge_indices,
+                with_shares=native_boundary_geometry.share_version(self) == 1)
         self.bn = self.native_boundary_geometry['normals'].copy()
         self.bmid = self.native_boundary_geometry['midpoints'].copy()
         self.bl = self.native_boundary_geometry['lengths'].copy()
@@ -955,6 +956,7 @@ class Simulation(legacy.Simulation):
             native_boundary_edges=self.native_mesh['edge_vertices'][self.boundary_edge_indices].copy(),
             native_boundary_code=boundary_labels.codes(self), native_boundary_kinematic_code=self.bcode.copy(),
             boundary_label_version=int(getattr(self, 'boundary_label_version', 0)),
+            contact_share_version=native_boundary_geometry.share_version(self),
             boundary_label_diagnostics=boundary_labels.disagreement(self),
             native_boundary_owner_a=self.bp.copy(),
             native_boundary_owner_b=self.bq.copy(), native_boundary_down=self.down.copy(),
