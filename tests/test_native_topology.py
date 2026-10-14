@@ -9,6 +9,8 @@ from native_engine import Simulation
 import native_topology as topology
 import material_surface
 import structure_engine
+import plate_balance
+import force_rifting
 
 
 def world(kind=0,level=2):
@@ -172,6 +174,49 @@ class NativeTopologyTests(unittest.TestCase):
         self.assertFalse(s.active[1]);self.assertTrue(np.all(s.plate==0))
         self.assertEqual(s.next_plate_uid,uid)
         np.testing.assert_array_equal(s.support.sum(axis=0),support)
+
+    def test_consumed_plate_retires_before_post_transport_force_balance(self):
+        s=world(level=2)
+        s.active[:]=False;s.active[:2]=True;s.plate[:]=0
+        s.support[:]=0.;s.support[0]=1.
+        s._boundaries()
+        support=s.support.copy();uids=s.plate_uid.copy();omega=s.omega.copy()
+        returned=dict(history=deepcopy(s.ocean_history),diagnostics={},proposals=[])
+        def current_force(state,dt):
+            self.assertFalse(state.active[1])
+            # The real rigid solver must succeed with the represented plate,
+            # without regularizing an empty slot's three zero-drag modes.
+            balance=plate_balance.Balance(state,dt)
+            balance.solve()
+            self.assertEqual(balance.plates,[0])
+        with patch.object(topology.ocean_rifting,'update',return_value=returned), \
+             patch.object(force_rifting,'update',side_effect=current_force) as current, \
+             patch.object(topology.backarc,'commit_pending',return_value=True):
+            self.assertTrue(topology.update_topology(s,1.))
+        current.assert_called_once_with(s,1.)
+        np.testing.assert_array_equal(s.support,support)
+        np.testing.assert_array_equal(s.plate_uid,uids)
+        np.testing.assert_array_equal(s.omega,omega)
+
+    def test_empty_retirement_keeps_all_represented_and_invalid_slots(self):
+        s=SimpleNamespace(active=np.ones(8,bool),plate=np.array([0,1]),
+            support=np.zeros((8,2)),parcel_plate=np.array([2]),trace_plate=np.array([3]))
+        s.support[0]=1.
+        s.support[4,0]=1e-30
+        s.support[5,0]=np.nan
+        s.support[6,0]=-1.
+        topology._retire_empty_plates(s)
+        np.testing.assert_array_equal(s.active,[True,True,True,True,True,True,True,False])
+
+    def test_remnant_cleanup_preserves_positive_fractional_only_plate(self):
+        s=world(level=2)
+        s.active[:]=False;s.active[:2]=True;s.plate[:]=0
+        s.support[:]=0.;s.support[0]=1.;s.support[1,0]=1e-15
+        before=s.support.copy()
+        topology._retire_empty_plates(s)
+        topology._retire_remnants(s)
+        self.assertTrue(s.active[1])
+        np.testing.assert_array_equal(s.support,before)
 
 
 if __name__=='__main__':unittest.main()
