@@ -24,8 +24,10 @@ def context(triangles, **values):
 
 def baseline(candidate, contexts, old=None):
     # The original path partitions every bin candidate. Disable only the
-    # certificate, so the oracle retains all existing exact polygon arithmetic.
-    with patch.object(exclusion._Index, 'reference_planes', exclusion._Index.planes):
+    # certificates (exact plane exclusion and its float64 proof), so the oracle
+    # retains all existing exact polygon arithmetic.
+    with patch.object(exclusion._Index, 'reference_planes', exclusion._Index.planes), \
+            patch.object(exclusion._Index, 'separated', lambda self, faces, triangle: np.zeros(len(faces), bool)):
         return exclusion.obstruction(candidate, contexts, old)
 
 
