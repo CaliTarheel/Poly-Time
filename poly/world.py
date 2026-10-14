@@ -29,6 +29,13 @@ GAINS = ('ridge', 'trench_opening', 'sliver', 'junction')
 LOSSES = ('subducted', 'continent_at_trench', 'overriding_edge', 'collision', 'compression', 'sliver', 'junction')
 TOLERANCE = 1e-9  # of the sphere's area
 ZONE_MARGIN_KM = 25.
+# A converging boundary becomes a trench once it has closed this far: about 100 km of convergence
+# starts induced subduction (Gurnis et al. 2004 and later models).
+INITIATION_KM = 100.
+# A trench where at least this much continental crust arrives in one step becomes a collision.
+COLLISION_KM2 = 500.
+# How far either side of a boundary its crust is sampled to choose which plate goes down.
+SAMPLE_KM = 150.
 
 
 @dataclass
@@ -72,13 +79,14 @@ class World:
         half_width = 2. * speed + ZONE_MARGIN_KM
         misfit = self.network.move(rotations)
         self.network.tidy()
+        events = self.network.reclassify(rotations_per_myr)
         # A section can shrink by both its ends' displacement in a step; catch it well before zero.
-        events = self.network.resolve_short(rotations_per_myr, 2. * speed + 50., self.overriding_rule)
+        events += self.network.resolve_short(rotations_per_myr, 2. * speed + 50., self.overriding_rule)
         repairs = self.network.repair()
         plates = self.network.plates()
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
-                     subducted_by_section={}, junction_misfit_km=max(misfit.values(), default=0.), events=events,
-                     repairs=repairs)
+                     subducted_by_section={}, continent_at_trench_by_section={},
+                     junction_misfit_km=max(misfit.values(), default=0.), events=events, repairs=repairs)
         world_regions = {p: self.network.polygon(p) for p in plates}
         self._zones, self._regions = {}, {}
         crust = []
@@ -110,8 +118,89 @@ class World:
         self.time_myr += dt
         entry['plates_km2'] = {p: sphere.area_km2(shape) for p, shape in world_regions.items()}
         self._check(entry)
+        entry['events'] += self._evolve(rotations_per_myr, dt, entry)
         self.ledger.append(entry)
         return entry
+
+    def _evolve(self, rotations_per_myr, dt, entry) -> list:
+        """Boundary changes that take effect from the next step: initiation and collision."""
+        from poly.topology import segment_motion
+        events = []
+        regions = None
+        for ident, s in list(self.network.sections.items()):
+            if s.kind == 'trench' and entry['continent_at_trench_by_section'].get(ident, 0.) > COLLISION_KM2:
+                s.kind, s.overriding = 'collision', None
+                events.append(dict(kind='collision', section=ident, plates=(s.left, s.right),
+                                   arrived_km2=entry['continent_at_trench_by_section'][ident]))
+                continue
+            if s.kind != 'converging':
+                continue
+            points = self.network.points(ident)
+            opening, _ = segment_motion(points, rotations_per_myr[s.left], rotations_per_myr[s.right])
+            lengths = sphere.arc_km(points[:-1], points[1:])
+            closing = float(np.sum(np.maximum(-opening, 0.) * lengths) / max(float(lengths.sum()), 1e-12))
+            s.closed_km += closing * dt
+            if s.closed_km < INITIATION_KM:
+                continue
+            if regions is None:
+                regions = {p: self.network.polygon(p) for p in self.network.plates()}
+            sides = self._sides(ident, regions)
+            kinds = {plate: max(set(k for k, _ in samples), key=[k for k, _ in samples].count) if samples else 'ocean'
+                     for plate, samples in sides.items()}
+            if kinds[s.left] == 'continent' and kinds[s.right] == 'continent':
+                s.kind = 'collision'
+                events.append(dict(kind='collision', section=ident, plates=(s.left, s.right), closed_km=s.closed_km))
+            else:
+                if kinds[s.left] != kinds[s.right]:
+                    over = s.left if kinds[s.left] == 'continent' else s.right
+                    reason = 'ocean under continent'
+                else:
+                    ages = {plate: np.mean([age for _, age in samples]) if samples else 0. for plate, samples in sides.items()}
+                    over = s.left if ages[s.left] < ages[s.right] else s.right
+                    reason = 'older ocean under younger'
+                s.kind, s.overriding = 'trench', over
+                events.append(dict(kind='subduction_initiated', section=ident, plates=(s.left, s.right),
+                                   overriding=over, closed_km=s.closed_km, reason=reason))
+            s.closed_km = 0.
+        return events
+
+    def _sides(self, ident, regions) -> dict:
+        """Crust (kind, age) sampled SAMPLE_KM either side of a section, at a quarter, half and three quarters."""
+        s = self.network.sections[ident]
+        points = self.network.points(ident)
+        lengths = np.r_[0., np.cumsum(sphere.arc_km(points[:-1], points[1:]))]
+        samples = {s.left: [], s.right: []}
+        angle = SAMPLE_KM / sphere.RADIUS_KM
+        for fraction in (.25, .5, .75):
+            k = min(int(np.searchsorted(lengths, fraction * lengths[-1])), len(points) - 1)
+            a, b = points[max(k - 1, 0)], points[min(k, len(points) - 1)]
+            if np.allclose(a, b):
+                continue
+            middle = sphere.unit(a + b)
+            left = sphere.unit(np.cross(a, b))  # walking a -> b, the left plate is towards this pole
+            for plate, sign in ((s.left, 1.), (s.right, -1.)):
+                point = sphere.unit(middle * np.cos(angle) + sign * left * np.sin(angle))
+                found = self._crust_at(point, regions)
+                if found is not None and found[0] == plate:
+                    samples[plate].append(found[1:])
+        return samples
+
+    def _crust_at(self, point, regions):
+        """(plate, kind, age in Myr) of the crust at a world point, or None."""
+        import spherely
+        lon, lat = sphere.to_lonlat(point)
+        for plate, region in regions.items():
+            if not spherely.contains(region, spherely.create_point(float(lon), float(lat))):
+                continue
+            local = sphere.rotate(point, self.frame(plate).T)
+            llon, llat = sphere.to_lonlat(local)
+            here = spherely.create_point(float(llon), float(llat))
+            for piece in self.crust:
+                if piece.plate == plate and spherely.contains(piece.shape, here):
+                    age = 0. if piece.born_myr is None else self.time_myr - piece.born_myr
+                    return plate, piece.kind, age
+            return plate, 'ocean', 0.
+        return None
 
     def _sections_of(self, plate, other=None):
         return [ident for ident, s in self.network.sections.items()
@@ -166,6 +255,7 @@ class World:
             if kind == 'ocean':
                 entry['subducted_by_section'][ident] = entry['subducted_by_section'].get(ident, 0.) + area
                 return 'subducted'
+            entry['continent_at_trench_by_section'][ident] = entry['continent_at_trench_by_section'].get(ident, 0.) + area
             return 'continent_at_trench'
         if section.kind in ('collision', 'converging'):
             return 'collision' if kind == 'continent' else 'compression'
