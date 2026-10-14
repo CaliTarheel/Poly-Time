@@ -204,7 +204,7 @@ def _common_certificate(balance, ledger):
         sums = []
         for port in term.ports:
             if id(port) not in ports:
-                ports[id(port)] = np.sum(port.matrices, axis=0).T
+                ports[id(port)] = port.uniform()
                 if (np.linalg.norm(ports[id(port)]-np.eye(3))/math.sqrt(3.)
                         > _COMMON_RESTRICTION_TOLERANCE):
                     raise ValueError('A common force port does not preserve uniform motion.')

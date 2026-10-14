@@ -24,6 +24,7 @@ _TORQUE = pb.RADIUS_M/pb.CM_YR_M_S
 DEFAULT_BAND_KM = 400.
 MAX_LIFT_CONDITION = 1e12
 AGREEMENT_TOLERANCE = 2e-8
+UNIFORM_RESTRICTION_TOLERANCE = 1e-9
 
 
 class _ControlTree:
@@ -73,14 +74,38 @@ class Port:
     nearest_fallback: bool = False
     distance_km: float = 0.
 
+    def uniform(self):
+        """Qualify the lift before using its analytic partition of unity."""
+        if (self.matrices.shape != (len(self.cells), 3, 3) or not len(self.cells)
+                or not np.isfinite(self.matrices).all()
+                or np.linalg.norm(self.matrices.sum(axis=0)-np.eye(3))/math.sqrt(3.)
+                > UNIFORM_RESTRICTION_TOLERANCE):
+            raise UnsupportedForceLedger('A common force port does not preserve uniform motion.')
+        return np.eye(3)
+
     def motion(self, field):
-        return np.einsum('cij,ci->j', self.matrices, field[self.cells])
+        self.uniform()
+        values = field[self.cells]
+        anchor = values[0]
+        return anchor+np.einsum('cij,ci->j', self.matrices, values-anchor)
+
+    def lift(self, force):
+        """Adjoint of the anchored velocity map, independent of equilibrium."""
+        self.uniform()
+        lifted = np.einsum('cij,j->ci', self.matrices, force)
+        lifted[0] = force-lifted[1:].sum(axis=0)
+        return lifted
 
     def basis(self, field, index=None):
         cells = self.cells if index is None else index[self.cells]
         if np.any(cells < 0):
             raise UnsupportedForceLedger('Finite mode omits a retained owned spatial port.')
-        return np.einsum('cij,cik->jk', self.matrices, field[cells])
+        self.uniform()
+        values = field[cells]
+        anchor = values[0]
+        # Exact constant fields prevent an ulp in a port sum from activating
+        # a unilateral law. The same linear map defines motion and its adjoint.
+        return anchor+np.einsum('cij,cik->jk', self.matrices, values-anchor)
 
 
 @dataclass(slots=True)
@@ -463,7 +488,7 @@ def export(balance, x=None, *, band_km=None, delta=None):
             if term.kind not in arrays:
                 arrays[term.kind] = np.zeros((len(spatial.cells[port.owner]), 3))
             positions = np.fromiter((lookup[port.owner][int(c)] for c in port.cells), int, count=len(port.cells))
-            lifted = -np.einsum('cij,j->ci', port.matrices, gradient[3*j:3*j+3])*_TORQUE
+            lifted = -port.lift(gradient[3*j:3*j+3])*_TORQUE
             arrays[term.kind][positions] += lifted
             local_gross[port.owner] += float(np.abs(lifted).sum())
     gross = float(np.max(balance._force_reference, initial=0.))
@@ -531,6 +556,16 @@ def export(balance, x=None, *, band_km=None, delta=None):
 
 class CompiledMode(pb.Balance):
     """Balance-compatible potential on a fixed geometry's reduced velocity mode."""
+    def _row_rates(self, operator, x):
+        common = getattr(self, 'common_size', 0)
+        if not common:
+            return operator@x
+        # Adding daughter columns must not change the native common dot
+        # product's reduction at a unilateral activation surface. Split every
+        # motion, including nonzero daughter rates, by the same linear map.
+        return (np.ascontiguousarray(operator[..., :common])@x[:common]
+                +np.ascontiguousarray(operator[..., common:])@x[common:])
+
     def evaluate(self, z, delta=None):
         return self._evaluate(np.asarray(z, float), self.delta if delta is None else delta)[:3]
 
@@ -571,6 +606,16 @@ def compile_mode(ledger, basis):
     if not m:
         raise ValueError('Finite-mode basis has no coordinates.')
     result = object.__new__(CompiledMode)
+    common = m >= source.size
+    if common:
+        for p, entry in ledger['plates'].items():
+            values = prepared[p] if inverse[p] is not None else prepared[p][entry['cells']]
+            expected = np.zeros((3, source.size))
+            expected[:, 3*source.slot[p]:3*source.slot[p]+3] = np.eye(3)
+            if not np.all(values[:, :, :source.size] == expected):
+                common = False
+                break
+    result.common_size = source.size if common else 0
     result.size = m; result.stiffness = np.zeros((m, m)); result.torque = np.zeros(m)
     result.elements = []; result.hinge = []; result.hinge_coefficient = []
     result.resistance_version = source.resistance_version
