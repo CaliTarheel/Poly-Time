@@ -93,8 +93,14 @@ class World:
                 # can be split, it is absorbed by the neighbour it shares the most boundary with.
                 if not collision.plates:
                     raise
-                plate = next(iter(collision.plates))
-                events.append(self.absorb(plate, reason='pinched between boundaries %d and %d'
+                # The pinched plate goes to a plate across one of the two colliding boundaries, so
+                # that one of them disappears with it.
+                plate = min(collision.plates, key=lambda q: sphere.area_km2(self.network.polygon(q))
+                            if self._valid(q) else 0.)
+                across = {o for ident in (collision.first, collision.second)
+                          for o in (self.network.sections[ident].left, self.network.sections[ident].right) if o != plate}
+                into = max(across, key=lambda o: self.network.shared_km(plate, o))
+                events.append(self.absorb(plate, into=into, reason='pinched between boundaries %d and %d'
                                           % (collision.first, collision.second)))
         else:
             raise ValueError('Plate outlines still cross after absorbing pinched plates.')
@@ -117,6 +123,15 @@ class World:
             for piece in mine:
                 kept = sphere.intersection(piece.shape, region)
                 lost = sphere.difference(piece.shape, region)
+                if kept_shapes:
+                    # A plate's pieces never overlap once moved, except where two plates have just
+                    # merged and their crust, each carried by its own plate, met along their old
+                    # boundary. That overlap is shortening, booked by the crust's kind.
+                    before = sphere.area_km2(kept)
+                    kept = sphere.difference(kept, sphere.union(*kept_shapes))
+                    overlap = before - sphere.area_km2(kept)
+                    if overlap > 1e-6:
+                        entry['lost']['collision' if piece.kind == 'continent' else 'compression'] += overlap
                 if sphere.area_km2(kept) > 0.:
                     crust.append(Crust(plate, piece.kind, kept, piece.born_myr))
                     kept_shapes.append(kept)
@@ -162,6 +177,13 @@ class World:
         self.network.absorb(plate, into)
         self.frames.pop(plate, None)
         return dict(kind='plate_absorbed', plate=plate, into=into, area_km2=area, reason=reason)
+
+    def _valid(self, plate) -> bool:
+        try:
+            self.network.polygon(plate)
+            return True
+        except ValueError:
+            return False
 
     def _absorb_small(self) -> list:
         events = []
