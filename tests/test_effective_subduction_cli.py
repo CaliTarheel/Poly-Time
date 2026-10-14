@@ -15,6 +15,7 @@ class EffectiveSubductionCommandLineTests(unittest.TestCase):
     def test_explicit_opt_in_selects_compatible_laws(self):
         config = self.parse('--effective-subduction')
         self.assertTrue(config['effective_subduction']['enabled'])
+        self.assertEqual(config['effective_subduction']['force_n_per_m'], 3e13)
         self.assertTrue(config['primordial_subduction']['enabled'])
         self.assertEqual(config['physics_profile'], 'reviewed_v1')
         self.assertEqual(config['subduction_response'], 'fixed_trench')
@@ -31,6 +32,7 @@ class EffectiveSubductionCommandLineTests(unittest.TestCase):
     def test_normal_new_world_default_uses_lite_and_detailed_can_be_selected(self):
         default = self.parse()
         self.assertTrue(default['effective_subduction']['enabled'])
+        self.assertEqual(default['effective_subduction']['force_n_per_m'], 3e13)
         self.assertTrue(default['primordial_subduction']['enabled'])
         self.assertEqual(default['subduction_response'],'fixed_trench')
         self.assertEqual(default['retained_phases'],'disabled')

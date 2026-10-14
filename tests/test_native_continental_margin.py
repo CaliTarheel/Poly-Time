@@ -61,7 +61,10 @@ class NativeContinentalMarginTests(unittest.TestCase):
             if name.startswith('continental_margin_'):del old[name]
         mesh_history.arrays(old)
         derived=continental_margin.upgrade_frame(old)
-        for name in mesh_history.DTYPES:
+        # Optional array families this world does not use are in neither frame.
+        saved=set(mesh_history.DTYPES).intersection(frame)
+        self.assertEqual(set(mesh_history.DTYPES).intersection(derived),saved)
+        for name in saved:
             np.testing.assert_array_equal(derived[name],frame[name])
         # Snapshot is read-only and all new state consists of ordinary typed
         # checkpoint fields, with no hidden locator or nonserializable cache.

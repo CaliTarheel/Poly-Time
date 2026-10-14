@@ -149,12 +149,13 @@ def main():
         reference_area_equals_mass=bool(np.array_equal(state.material_surface['reference_area_km2'], mass)),
         last_geometric_shortening_volume_residual_km3=getattr(state, 'material_geometry_volume_residual_km3', None))
     totals = dict(state.process_totals)
-    expected_reference = float(state.original_mass) + float(totals.get('arc_added_km2', 0.))
+    created_reference = float(totals.get('arc_added_km2', 0.)) - float(totals.get('arc_deposited_source_area_km2', 0.))
+    expected_reference = float(state.original_mass) + created_reference
     report['reference_material_accounting'] = dict(original_reference_area_km2=float(state.original_mass),
-        retained_reference_area_km2=float(mass.sum()), juvenile_created_reference_area_km2=totals.get('arc_added_km2', 0.),
+        retained_reference_area_km2=float(mass.sum()), juvenile_created_reference_area_km2=created_reference,
         retained_minus_original_and_created_residual_km2=float(mass.sum() - expected_reference),
         relative_residual=float((mass.sum()-expected_reference)/max(expected_reference, 1.)),
-        continental_retained_fraction=float((mass.sum()-totals.get('arc_added_km2', 0.))/state.original_mass),
+        continental_retained_fraction=float((mass.sum()-created_reference)/state.original_mass),
         craton_retained_fraction=float(mass[state.kind == 2].sum()/state.original_craton_mass),
         reference_area_by_material_kind={str(kind): float(mass[state.kind == kind].sum()) for kind in np.unique(state.kind)},
         process_totals=totals, material_face_count=len(mass),

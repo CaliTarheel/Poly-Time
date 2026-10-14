@@ -14,6 +14,7 @@ import mesh_coverage
 import column_density
 import dense_crust as phase
 import crustal_structure as columns
+from exact_polygon import ExactPolygon
 
 
 def enabled(s):
@@ -89,6 +90,9 @@ def _entered_region_triangles(depth_state,face,polygon,radius):
     phase_evolution. The mechanical entry potential retains its own fixed
     reference measure; no source-area approximation is fed back into forces.
     """
+    if isinstance(polygon, ExactPolygon):
+        raise ValueError('Entry-phase clipping does not support exact-ray polygon precision; '
+                         'the stack region cannot be rounded to binary64.')
     triangle=depth_state['triangles'][face]
     finite=depth_state['finite_pieces'].get(face)
     if finite is None:

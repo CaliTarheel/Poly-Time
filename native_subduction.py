@@ -150,14 +150,22 @@ def edge_ocean_fraction(s,down=None):
     A scalar owner queries every parent for that candidate polarity. An owner
     array selects its local polarity per parent; omitted uses current s.down.
     No center-cell crust flag participates in this new version.
+
+    Where the reconstruction carries the division of its pieces among contacts, each
+    piece's length and wet length go to contacts in those shares, so the fraction is
+    that of the ground the contact's length came from. Otherwise a piece counts whole
+    for the one contact it is listed under, and a contact with no piece reads dry.
     """
     contour=s.native_boundary_geometry
     requested=np.asarray(s.down if down is None else down)
     if requested.ndim==0:requested=np.full(len(s.ba),int(requested))
     if requested.shape!=(len(s.ba),):raise ValueError('Incoming owner must align with parent contacts.')
     digest=hashlib.sha256()
+    import native_boundary_geometry
+    shared=native_boundary_geometry.has_shares(contour)
     for array in (np.array([len(s.ba)]),s.bp,s.bq,s.material_surface['vertices'],s.material_surface['faces'],_owners(s),
-                  contour['segments_start'],contour['segments_end'],contour['contact_index']):
+                  contour['segments_start'],contour['segments_end'],contour['contact_index'],
+                  *((contour['share_segment'],contour['share_contact'],contour['share_weight']) if shared else ())):
         digest.update(np.asarray(array).tobytes())
     signature=digest.hexdigest()
     if signature!=getattr(s,'_native_subduction_water_signature',None):
@@ -168,13 +176,20 @@ def edge_ocean_fraction(s,down=None):
         p=int(p)
         if p not in cache:
             context=_material(s,p);total=np.zeros(len(s.ba));wet=np.zeros(len(s.ba))
-            for a,b,parent in zip(contour['segments_start'],contour['segments_end'],contour['contact_index']):
+            pieces=len(contour['contact_index']);piece_total=np.zeros(pieces);piece_wet=np.zeros(pieces)
+            for index,(a,b,parent) in enumerate(zip(contour['segments_start'],contour['segments_end'],contour['contact_index'])):
                 if p not in (s.bp[parent],s.bq[parent]):continue
                 length=RADIUS_KM*math.atan2(float(np.linalg.norm(np.cross(a,b))),float(a@b))
-                total[parent]+=length
+                total[parent]+=length;piece_total[index]=length
                 for low,high in exact.ocean_intervals(a,b,context):
                     first=_unit((1-low)*a+low*b);last=_unit((1-high)*a+high*b)
-                    wet[parent]+=RADIUS_KM*math.atan2(float(np.linalg.norm(np.cross(first,last))),float(first@last))
+                    extent=RADIUS_KM*math.atan2(float(np.linalg.norm(np.cross(first,last))),float(first@last))
+                    wet[parent]+=extent;piece_wet[index]+=extent
+            if shared:
+                # A piece only shares with contacts of its own plate pair, so these sums stay
+                # within the contacts that involve this owner.
+                total=native_boundary_geometry.shares(contour,piece_total,len(s.ba))
+                wet=native_boundary_geometry.shares(contour,piece_wet,len(s.ba))
             cache[p]=np.clip(np.divide(wet,total,out=np.zeros_like(wet),where=total>0),0.,1.)
         take=requested==p;result[take]=cache[p][take]
     return result

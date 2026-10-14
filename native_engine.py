@@ -292,6 +292,9 @@ class Simulation(legacy.Simulation):
         self.w, self.h = cfg['width'], cfg['height']
         self.native_mesh = geometry.icosphere(cfg['mesh_level'])
         self.native_spreading_version = 1
+        # Fresh reviewed worlds admit slow normal opening. Decoded historical
+        # states without this marker retain the original speed/obliquity gate.
+        self.normal_spreading_version = int(cfg['physics_profile'] == 'reviewed_v1')
         self.native_subduction_version = 1
         self.native_subduction_geometry_version = 1
         self.foreland_loading_version = 1
@@ -301,7 +304,9 @@ class Simulation(legacy.Simulation):
         self.native_arc_source_geometry_version = 1
         self.native_arc_emplacement_version = 1
         self.native_arc_birth_profile_version = 1
+        self.native_arc_deposition_version = 1
         self.native_arc_footprint_version = 1
+        self.native_arc_point_version = 1
         self.native_locator = geometry.build_locator(self.native_mesh['vertices'], self.native_mesh['faces'])
         self.native_stencil = transport.face_vertex_stencil(self.native_mesh)
         xyz = self.native_mesh['xyz']
@@ -566,7 +571,8 @@ class Simulation(legacy.Simulation):
             self.bp, self.bq = self.plate[self.ba], self.plate[self.bb]
         else:
             self.native_boundary_geometry = native_boundary_geometry.reconstruct(
-                self.native_mesh, self.plate, self.support, self.boundary_edge_indices)
+                self.native_mesh, self.plate, self.support, self.boundary_edge_indices,
+                with_shares=native_boundary_geometry.share_version(self) == 1)
         self.bn = self.native_boundary_geometry['normals'].copy()
         self.bmid = self.native_boundary_geometry['midpoints'].copy()
         self.bl = self.native_boundary_geometry['lengths'].copy()
@@ -579,9 +585,12 @@ class Simulation(legacy.Simulation):
         # Classification shares the finite-spreading threshold. Normal partition
         # version 1 independently admits closing motion to convergence processes,
         # allowing sliding and subduction to coexist without changing ridge policy.
-        threshold = normal_motion_threshold(shear)
+        threshold = normal_motion_threshold(shear,
+            spreading_version=getattr(self, 'normal_spreading_version', 0))
         ext = self.normal_speed > threshold
-        con = self.normal_speed < -threshold
+        # Closing retains its historical kinematic labels; normal_partition
+        # separately admits all actual convergence to consumption processes.
+        con = self.normal_speed < -normal_motion_threshold(shear)
         la, lb = self.crust[self.ba] > 0, self.crust[self.bb] > 0
         self.bcode = np.where(self.bl > 1e-10, 3, 0).astype(np.uint8)
         self.bcode[ext & ~(la | lb)] = 1
@@ -640,12 +649,7 @@ class Simulation(legacy.Simulation):
         self.boundary_geometry_diagnostics = deepcopy(self.native_boundary_geometry['diagnostics'])
         trench_history.prepare(self)
         physics_profile.stall_buoyant_incoming(self)
-        ranks = np.zeros(self.n, np.uint8)
-        priority = np.array([0, 2, 4, 1, 6, 5], np.uint8)
-        display = boundary_labels.codes(self)
-        np.maximum.at(ranks, self.ba, priority[display])
-        np.maximum.at(ranks, self.bb, priority[display])
-        self.boundary = np.array([0, 3, 1, 0, 2, 5, 4], np.uint8)[ranks]
+        self.boundary = boundary_labels.cells(self, boundary_labels.codes(self), self.n)
 
     def _migrate_trenches(self, dt):
         """The moving hinge follows its upper plate without a second remap."""
@@ -952,6 +956,7 @@ class Simulation(legacy.Simulation):
             native_boundary_edges=self.native_mesh['edge_vertices'][self.boundary_edge_indices].copy(),
             native_boundary_code=boundary_labels.codes(self), native_boundary_kinematic_code=self.bcode.copy(),
             boundary_label_version=int(getattr(self, 'boundary_label_version', 0)),
+            contact_share_version=native_boundary_geometry.share_version(self),
             boundary_label_diagnostics=boundary_labels.disagreement(self),
             native_boundary_owner_a=self.bp.copy(),
             native_boundary_owner_b=self.bq.copy(), native_boundary_down=self.down.copy(),
@@ -1044,6 +1049,7 @@ class Simulation(legacy.Simulation):
                                                    contour['segment_normals'], contour['contact_index'])]
         if getattr(self,'native_spreading_version',0)==1:
             result['native_spreading_version']=1
+            result['normal_spreading_version']=getattr(self,'normal_spreading_version',0)
             result['boundary_segments']=native_spreading.boundary_segments(self)
             exact=self.native_spreading_geometry
             for kind,name in (('ocean','ridge_length_km'),('continental','rift_length_km')):

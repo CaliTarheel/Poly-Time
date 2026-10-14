@@ -505,6 +505,8 @@ def deform_and_accrete(s, dt):
     if exact_arc:
         source_arguments=dict(positions=source_positions,owners=source_owners)
         if source_provenance is not None:source_arguments['source_provenance']=source_provenance
+        import arc_ribbon
+        if arc_ribbon.version(s):source_arguments['dt']=dt
         add_arc_crust(s,arc_cells,additions,**source_arguments)
     else:
         add_arc_crust(s,arc_cells,additions)
@@ -721,13 +723,15 @@ def _legacy_add_arc_crust(s, cells, additions):
     return dict(added_area_km2=added,pending_area_km2=float(s.native_arc_pending['area'].sum()),new_faces=count)
 
 
-def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenance=None):
+def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenance=None,dt=None):
     """Build connected volcanic foundations; preserve explicit legacy opt-in."""
     if getattr(s,'native_arc_material_version',1)==0:
         return _legacy_add_arc_crust(s,cells,additions)
     from native_arc_material import add_arc_crust as add_connected_arc
+    # Only the arc ribbon limits what one interval may place, so only it is told the interval.
+    interval={} if dt is None else dict(dt=dt)
     if source_provenance is not None:
         return add_connected_arc(s,cells,additions,positions=positions,owners=owners,
-            source_provenance=source_provenance)
-    return add_connected_arc(s,cells,additions,positions=positions,owners=owners)
+            source_provenance=source_provenance,**interval)
+    return add_connected_arc(s,cells,additions,positions=positions,owners=owners,**interval)
 

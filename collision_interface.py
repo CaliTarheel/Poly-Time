@@ -18,6 +18,7 @@ import burial_depth
 import collision_surface
 import eclogite_sink
 import mesh_coverage
+from exact_polygon import ExactPolygon
 
 VERSION = 1
 VISCOSITY_PA_S = 1e20
@@ -64,8 +65,10 @@ def _precise_rotation_integral(polygon):
 
     Edge terms scale with perimeter while their sum scales with area. At a
     thin overlap those terms cancel far below double precision, even when the
-    polygon is valid. Recompute the represented spherical geometry, not its
-    eigenvalues, using the standard library's decimal arithmetic.
+    polygon is valid. Integrate the supplied rays with guard digits, retaining
+    exact clipped rays when binary64 vertices cannot represent the footprint.
+    Winding and edge normals use the original rays, before normalization can
+    perturb an exactly collinear fan. No eigenvalues or areas are corrected.
     """
     from decimal import Decimal, localcontext
 
@@ -92,19 +95,38 @@ def _precise_rotation_integral(polygon):
                 return total*multiplier
             total = updated
 
-    with localcontext() as context:
-        context.prec = 64
-        points = []
+    exact = isinstance(polygon, ExactPolygon)
+    if exact:
+        rays = [point[:3] for point in polygon.homogeneous]
+    else:
+        rays = []
         for point in polygon:
-            row = [Decimal.from_float(float(value)) for value in point]
+            # Binary64 coordinates are exact dyadic rationals. A positive
+            # common denominator cancels on normalization, just as it does
+            # for an ExactPolygon; integer predicates retain exact zeros.
+            ratios = [float(value).as_integer_ratio() for value in point]
+            denominator = max(divisor for _, divisor in ratios)
+            rays.append([value*(denominator//divisor) for value, divisor in ratios])
+    with localcontext() as context:
+        context.prec = 80 if exact else 64
+        points = []
+        lengths = []
+        for point in rays:
+            # A positive homogeneous denominator cancels on normalization.
+            row = [Decimal(value) for value in point]
             norm = dot(row, row).sqrt()
             points.append([value/norm for value in row])
+            lengths.append(norm)
         area = Decimal(0)
         a = points[0]
         signs = []
-        for b, c in zip(points[1:-1], points[2:]):
-            ab, ac = ([y-x for x, y in zip(a, other)] for other in (b, c))
-            numerator = dot(a, cross(ab, ac))
+        for index, (b, c) in enumerate(zip(points[1:-1], points[2:]), 1):
+            determinant = dot(rays[0], cross(rays[index], rays[index+1]))
+            if exact and determinant < 0:
+                raise ValueError('Interface polygon requires positive convex winding.')
+            if exact and determinant == 0:
+                continue
+            numerator = Decimal(determinant)/(lengths[0]*lengths[index]*lengths[index+1])
             denominator = 1+dot(a, b)+dot(b, c)+dot(c, a)
             if denominator <= 0:
                 raise ValueError('Interface polygon must occupy a minor convex spherical patch.')
@@ -114,9 +136,13 @@ def _precise_rotation_integral(polygon):
             raise ValueError('Interface polygon has inconsistent convex winding.')
         if area < 0:
             raise ValueError('Interface polygon requires positive convex winding.')
+        if exact and area == 0:
+            raise ValueError('Interface polygon requires positive convex winding.')
         boundary = [[Decimal(0) for _ in range(3)] for _ in range(3)]
-        for a, b in zip(points, points[1:]+points[:1]):
-            normal = cross(a, b)
+        for index, (a, b) in enumerate(zip(points, points[1:]+points[:1])):
+            following = (index+1) % len(points)
+            normal = [Decimal(value)/(lengths[index]*lengths[following])
+                      for value in cross(rays[index], rays[following])]
             midpoint = [x+y for x, y in zip(a, b)]
             denominator = 1+dot(a, b)
             if denominator <= 0:
@@ -136,6 +162,13 @@ def _rotation_metric_uncached(polygon, radius_km):
     The divergence theorem converts its second moment to boundary integrals.
     Each edge's outward normal is constant and its integral of r is analytic.
     """
+    if isinstance(polygon, ExactPolygon):
+        if not np.isfinite(radius_km) or radius_km <= 0:
+            raise ValueError('Interface integration requires a finite unit-sphere polygon and positive radius.')
+        metric, area = _precise_rotation_integral(polygon)
+        if np.linalg.eigvalsh(metric).min(initial=0.) < -2e-11*max(area, 1e-30):
+            raise ValueError('Interface rotation metric has negative resisting work.')
+        return metric*(radius_km*1000.)**2
     polygon = np.asarray(polygon, float)
     if (polygon.ndim != 2 or polygon.shape[1] != 3 or len(polygon) < 3
             or not np.isfinite(polygon).all() or not np.isfinite(radius_km) or radius_km <= 0

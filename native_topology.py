@@ -356,8 +356,24 @@ def _commit_isolated(s):
     return False
 
 
+def _retire_empty_plates(s):
+    """Remove empty Euler unknowns before any post-transport force balance.
+
+    Advection can consume the last fractional ocean footprint while its slot
+    is still active. There is then no plate to move and no basal resistance.
+    Keep every positive fractional footprint, however small, as well as all
+    material and trace owners. Invalid support must still fail validation.
+    """
+    for p in np.flatnonzero(s.active):
+        if (np.any(s.plate == p) or not np.all(s.support[p] == 0.)
+                or np.any(s.parcel_plate == p) or np.any(s.trace_plate == p)):
+            continue
+        s.active[p] = False
+
+
 def _retire_remnants(s):
     """Absorb only whole, tiny, material-free plates; keep named other domains."""
+    _retire_empty_plates(s)
     # Eligibility is geometric/material, not elapsed integration-step count.
     # A 20-step gate kept identical remnants alive for different physical ages
     # when dt or an authored transition split changed the step schedule.
@@ -370,7 +386,6 @@ def _retire_remnants(s):
         boundary=((s.plate[a]==p)&(s.plate[b]!=p))|((s.plate[b]==p)&(s.plate[a]!=p))
         neighbours=np.where(s.plate[a[boundary]]==p,s.plate[b[boundary]],s.plate[a[boundary]])
         if not len(neighbours):
-            if area[p]==0 and not np.any(s.support[p]>1e-12):s.active[p]=False
             continue
         q=int(np.bincount(neighbours,weights=s.native_mesh['edge_length'][boundary],minlength=s.capacity).argmax())
         s.plate[s.plate==p]=q;s.support[q]+=s.support[p];s.support[p]=0.
@@ -390,6 +405,7 @@ def update_topology(s,dt,*,backarc_pending=None):
     The ocean solve uses the pre-commit owners/boundaries. A successful backarc
     changes topology, but cannot erase the elapsed ocean damage/healing step.
     """
+    _retire_empty_plates(s)
     boundary={name:getattr(s,name) for name in ('ba','bb','bp','bq','bmid','bn','bl')}
     boundary['valid']=s._valid_loading_edges()
     result=ocean_rifting.update(s.native_mesh,dict(owner=s.plate,ocean=s.crust==0,age_myr=s.age),

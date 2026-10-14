@@ -420,7 +420,8 @@ def audit(args):
     power_relative = float(balance['power_balance_error_w'])/max(abs(float(balance['driver_work_w'])), 1.)
     column_scale = max(abs(float(budget['before_motion_volume_km3'])), abs(float(budget['after_columns_volume_km3'])), 1.)
     column_relative = float(budget['residual_km3'])/column_scale
-    created = float(state.process_totals.get('arc_added_km2', 0.))
+    created = (float(state.process_totals.get('arc_added_km2', 0.))
+               - float(state.process_totals.get('arc_deposited_source_area_km2', 0.)))
     reference_expected = float(state.original_mass)+created
     reference_relative = (float(state.mass.sum())-reference_expected)/max(reference_expected, 1.)
     geometric = float(state.material_surface['area_km2'] @ state.structure['thickness_km'])

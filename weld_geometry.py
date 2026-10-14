@@ -9,6 +9,7 @@ import math
 import numpy as np
 
 import collision_fronts as fronts
+import vector_norm
 
 VERSION = 1
 
@@ -130,7 +131,7 @@ def moments(start, end):
     return first, second
 
 
-def integrate(operator, x, start, end, delta):
+def integrate(operator, x, start, end, delta, *, velocity=None):
     """Exact arc integral of unilateral Huber opening resistance and derivatives.
 
     Closing speed is a*cos(theta)+b*sin(theta). The dissipation density is zero
@@ -141,10 +142,12 @@ def integrate(operator, x, start, end, delta):
     """
     if not np.isfinite([start, end, delta]).all() or end <= start or delta <= 0.:
         raise ValueError('Weld integration requires a finite positive arc and smoothing width.')
-    velocity = operator@x
+    # Reduced modes may preserve the native-width common product separately
+    # from their differential columns; derivatives still use the full operator.
+    velocity = operator@x if velocity is None else np.asarray(velocity, float)
     if velocity.shape != (2,) or not np.isfinite(velocity).all():
         raise ValueError('Weld integration requires two finite velocity modes.')
-    amplitude = float(np.linalg.norm(velocity))
+    amplitude = vector_norm.length(velocity)
     cuts = [start, end]
     if amplitude:
         phase = math.atan2(float(velocity[1]), float(velocity[0]))

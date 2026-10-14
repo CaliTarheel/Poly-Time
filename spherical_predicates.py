@@ -23,6 +23,13 @@ def _inputs(points, a, b=None, valid=None):
     return arrays,active
 
 
+def _dyadic(vector):
+    """Binary64 coordinates as exact integers over one power-of-two denominator."""
+    ratios=[float(value).as_integer_ratio() for value in vector]
+    scale=max(denominator for _,denominator in ratios)
+    return [numerator*(scale//denominator) for numerator,denominator in ratios],scale
+
+
 def _record(stats,active,uncertain,incident):
     if stats is not None:
         for key,value in [('calls',1),('evaluations',np.count_nonzero(active)),
@@ -48,6 +55,9 @@ def edge_distances(points,a,b,*,valid=None,stats=None):
     if np.any(uncertain):
         # A clipping plane is shared by many vertices; compute its exact
         # coefficients once per original edge for this bounded call.
+        # Binary64 values are dyadic rationals, so the determinant is an
+        # integer over a power of two: the same rational a Fraction would
+        # hold, and integer division rounds it to binary64 the same way.
         coefficients={}
         flat=value.reshape(-1)
         aa=a.reshape(-1,3);bb=b.reshape(-1,3);pp=p.reshape(-1,3)
@@ -55,12 +65,13 @@ def edge_distances(points,a,b,*,valid=None,stats=None):
             key=tuple(aa[index])+tuple(bb[index])
             coefficient=coefficients.get(key)
             if coefficient is None:
-                x=[Fraction(float(v)) for v in aa[index]]
-                y=[Fraction(float(v)) for v in bb[index]]
-                coefficient=(x[1]*y[2]-x[2]*y[1],x[2]*y[0]-x[0]*y[2],x[0]*y[1]-x[1]*y[0])
+                x,x_scale=_dyadic(aa[index])
+                y,y_scale=_dyadic(bb[index])
+                coefficient=(x[1]*y[2]-x[2]*y[1],x[2]*y[0]-x[0]*y[2],x[0]*y[1]-x[1]*y[0],x_scale*y_scale)
                 coefficients[key]=coefficient
-            exact=sum((c*Fraction(float(v)) for c,v in zip(coefficient,pp[index])),Fraction(0))
-            flat[index]=float(exact)
+            point,scale=_dyadic(pp[index])
+            exact=coefficient[0]*point[0]+coefficient[1]*point[1]+coefficient[2]*point[2]
+            flat[index]=exact/(coefficient[3]*scale)
             if exact and flat[index]==0.:
                 raise ValueError('Spherical determinant is below the representable coordinate domain.')
     _record(stats,active,uncertain,incident)

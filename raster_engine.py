@@ -1824,12 +1824,16 @@ class Simulation:
         area = np.bincount(self.plate, weights=self.cell_area, minlength=self.capacity)
         speed = np.linalg.norm(np.cross(self.omega[self.plate], self.xyz), axis=1) * RADIUS_KM * .1
         ocean_mask = self.crust == 0
+        # Arc source area is a 25-km magma-volume equivalent. Fixed-footprint
+        # deposits thicken existing material without creating reference area.
+        arc_reference_created = (self.process_totals["arc_added_km2"]
+                                 - self.process_totals.get("arc_deposited_source_area_km2", 0.))
         stats = {"continental_area_km2": float(self.cell_area[~ocean_mask].sum()),
                  "continental_fraction": float(self.cell_area[~ocean_mask].sum() / self.earth_area),
                  "craton_area_km2": float(self.cell_area[self.crust == 2].sum()),
                  "buoyant_crust_mass_km2": float(self.mass.sum()),
                  "original_continental_mass_km2": self.original_mass,
-                 "continental_mass_retained_fraction": float((self.mass.sum() - self.process_totals["arc_added_km2"]) / self.original_mass) if self.original_mass else 1.,
+                 "continental_mass_retained_fraction": float((self.mass.sum() - arc_reference_created) / self.original_mass) if self.original_mass else 1.,
                  "craton_mass_retained_fraction": float(self.mass[self.kind == 2].sum() / self.original_craton_mass) if self.original_craton_mass else 1.,
                  "mean_ocean_age_myr": float(np.average(self.age[ocean_mask], weights=self.cell_area[ocean_mask])) if np.any(ocean_mask) else 0.,
                  "mean_plate_speed_cm_yr": float(np.average(speed, weights=self.cell_area)),
@@ -1847,6 +1851,10 @@ class Simulation:
         labels = self._label_codes()
         for code, name in [(1, "ridge"), (2, "subduction"), (3, "transform"), (4, "collision"), (5, "rift")]:
             stats[f"{name}_length_km"] = float(self.bl[labels == code].sum())
+        if getattr(self, 'boundary_label_version', 0) == 2:
+            # Closing boundaries with neither a trench nor a collision, which label version 1
+            # counted as transform.
+            stats["converging_length_km"] = float(self.bl[labels == 6].sum())
         # collision_length_km above counts only bcode==4, which requires continental
         # crust on BOTH sides of a graph edge. The thrust stacking that actually builds
         # mountains is done by collision_contacts on overlapping material sheets and is
