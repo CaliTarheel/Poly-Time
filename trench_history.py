@@ -785,6 +785,24 @@ def transfer_split(s, old, new):
     return mapping
 
 
+def _relocate(s, row, edges):
+    """Record where a rehosted trace now lies.
+
+    An induced trench carries the finite fault it formed on as endpoint pairs and may load only
+    boundary those arcs cover. A change of plate ownership moves neither that fault nor its ends,
+    so parent and daughter both keep the whole carried support and their plate pairs decide which
+    of its edges each one loads. Replacing it by the edge anchors used for every other trench
+    would discard the endpoints and let a trace claim boundary it never weakened.
+    """
+    law = row.get('effective_subduction') or {}
+    if law.get('initiation_finite_support', False):
+        # The declared owner of the support follows the record that now carries it.
+        law['support_origin_trench_id'] = row['id']
+        return
+    geometry, center, length, gap = _geometry(s, edges)
+    row.update(geometry_xyz=geometry, center=center, length_km=length, anchor_gap_km=gap)
+
+
 def _transfer(s, old, new, role, reason):
     if not hasattr(s, 'trench_systems') or old == new:
         return {}
@@ -828,12 +846,10 @@ def _transfer(s, old, new, role, reason):
                                          inherited_trench_id=row['id'])])
             s.next_trench_id += 1
             s.trench_systems.append(target)
-            geom, center, length, gap = _geometry(s, edges[~moved])
-            row.update(geometry_xyz=geom, center=center, length_km=length, anchor_gap_km=gap)
+            _relocate(s, row, edges[~moved])
             slab_memory.refresh_line_load(row)
-        geom, center, length, gap = _geometry(s, edges[moved])
-        target.update({role: new_uid, 'plate_uids': sorted([target[other_role], new_uid]),
-                       'geometry_xyz': geom, 'center': center, 'length_km': length, 'anchor_gap_km': gap})
+        target.update({role: new_uid, 'plate_uids': sorted([target[other_role], new_uid])})
+        _relocate(s, target, edges[moved])
         slab_memory.refresh_line_load(target)
         _event(s, target, 'transferred', reason)
         mapping[row['id']] = target['id']
