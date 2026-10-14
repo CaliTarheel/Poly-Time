@@ -67,7 +67,8 @@ def _precise_rotation_integral(polygon):
     thin overlap those terms cancel far below double precision, even when the
     polygon is valid. Integrate the supplied rays with guard digits, retaining
     exact clipped rays when binary64 vertices cannot represent the footprint.
-    No eigenvalues or areas are corrected after integration.
+    Winding and edge normals use the original rays, before normalization can
+    perturb an exactly collinear fan. No eigenvalues or areas are corrected.
     """
     from decimal import Decimal, localcontext
 
@@ -95,15 +96,24 @@ def _precise_rotation_integral(polygon):
             total = updated
 
     exact = isinstance(polygon, ExactPolygon)
+    if exact:
+        rays = [point[:3] for point in polygon.homogeneous]
+    else:
+        rays = []
+        for point in polygon:
+            # Binary64 coordinates are exact dyadic rationals. A positive
+            # common denominator cancels on normalization, just as it does
+            # for an ExactPolygon; integer predicates retain exact zeros.
+            ratios = [float(value).as_integer_ratio() for value in point]
+            denominator = max(divisor for _, divisor in ratios)
+            rays.append([value*(denominator//divisor) for value, divisor in ratios])
     with localcontext() as context:
         context.prec = 80 if exact else 64
         points = []
         lengths = []
-        rays = [point[:3] for point in polygon.homogeneous] if exact else polygon
         for point in rays:
             # A positive homogeneous denominator cancels on normalization.
-            row = ([Decimal(value) for value in point] if exact else
-                   [Decimal.from_float(float(value)) for value in point])
+            row = [Decimal(value) for value in point]
             norm = dot(row, row).sqrt()
             points.append([value/norm for value in row])
             lengths.append(norm)
@@ -111,16 +121,12 @@ def _precise_rotation_integral(polygon):
         a = points[0]
         signs = []
         for index, (b, c) in enumerate(zip(points[1:-1], points[2:]), 1):
-            ab, ac = ([y-x for x, y in zip(a, other)] for other in (b, c))
-            if exact:
-                determinant = dot(rays[0], cross(rays[index], rays[index+1]))
-                if determinant < 0:
-                    raise ValueError('Interface polygon requires positive convex winding.')
-                if determinant == 0:
-                    continue
-                numerator = Decimal(determinant)/(lengths[0]*lengths[index]*lengths[index+1])
-            else:
-                numerator = dot(a, cross(ab, ac))
+            determinant = dot(rays[0], cross(rays[index], rays[index+1]))
+            if exact and determinant < 0:
+                raise ValueError('Interface polygon requires positive convex winding.')
+            if exact and determinant == 0:
+                continue
+            numerator = Decimal(determinant)/(lengths[0]*lengths[index]*lengths[index+1])
             denominator = 1+dot(a, b)+dot(b, c)+dot(c, a)
             if denominator <= 0:
                 raise ValueError('Interface polygon must occupy a minor convex spherical patch.')
@@ -134,12 +140,9 @@ def _precise_rotation_integral(polygon):
             raise ValueError('Interface polygon requires positive convex winding.')
         boundary = [[Decimal(0) for _ in range(3)] for _ in range(3)]
         for index, (a, b) in enumerate(zip(points, points[1:]+points[:1])):
-            if exact:
-                following = (index+1) % len(points)
-                normal = [Decimal(value)/(lengths[index]*lengths[following])
-                          for value in cross(rays[index], rays[following])]
-            else:
-                normal = cross(a, b)
+            following = (index+1) % len(points)
+            normal = [Decimal(value)/(lengths[index]*lengths[following])
+                      for value in cross(rays[index], rays[following])]
             midpoint = [x+y for x, y in zip(a, b)]
             denominator = 1+dot(a, b)
             if denominator <= 0:

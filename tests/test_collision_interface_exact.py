@@ -138,6 +138,131 @@ class ExactInterfaceGeometryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'antipodal edge'):
             interface.rotation_metric(antipodal, .001)
 
+    def test_binary64_collinear_fan_retains_exact_zero_and_positive_work(self):
+        # All vertices meet the existing unit-vector contract. The first fan
+        # is exactly collinear in stored binary64 coordinates, but separate
+        # Decimal normalization used to create a negative determinant.
+        a = np.ones(3)/np.sqrt(3.)
+        b = 2.**-24*np.array([1., -1., 0.])
+        c = 2.**-21*np.array([1., 1., -2.])
+        polygon = np.array([a, a+b, a+2*b, a+2*b+c, a+c])
+        np.testing.assert_allclose(np.linalg.norm(polygon, axis=1), 1., rtol=0., atol=1e-12)
+        exact = rational_polygon(polygon)
+        from exact_polygon import determinant
+        self.assertEqual(determinant(*exact.homogeneous[:3]), 0)
+        metric = interface.rotation_metric(polygon, .001)
+        without_collinear = polygon[[0, 2, 3, 4]]
+        expected = interface.rotation_metric(without_collinear, .001)
+        np.testing.assert_allclose(metric, expected, rtol=3e-15,
+                                   atol=np.finfo(float).eps*np.linalg.norm(expected))
+        np.testing.assert_allclose(metric, interface.rotation_metric(exact, .001),
+                                   rtol=3e-15, atol=np.finfo(float).eps*np.linalg.norm(metric))
+        self.assertGreater(np.linalg.eigvalsh(metric).min(), 0.)
+        oracle = rational_polygon(without_collinear)
+        for omega in (*np.eye(3), a, np.array([.2, -.7, .3])):
+            area, work = independent_ray_quadrature(oracle, omega)
+            actual = float(omega@metric@omega)
+            self.assertGreater(actual, 0.)
+            tolerance = 32*np.finfo(float).eps*np.linalg.norm(metric)*float(omega@omega)
+            self.assertAlmostEqual(actual, work, delta=tolerance)
+            self.assertAlmostEqual(float(np.trace(metric)), 2*area,
+                                   delta=32*np.finfo(float).eps*area)
+        # A one-ULP perturbation really inverts the formerly zero fan. It
+        # must still fail; exact predicates do not introduce a tolerance band.
+        inverted = polygon.copy()
+        inverted[1, 2] = np.nextafter(inverted[1, 2], -np.inf)
+        self.assertLess(determinant(*rational_polygon(inverted).homogeneous[:3]), 0)
+        for invalid in (polygon[::-1], polygon[[0, 2, 4, 3]], inverted):
+            with self.assertRaisesRegex(ValueError, 'winding'):
+                interface.rotation_metric(invalid, .001)
+
+    def test_binary64_zero_fan_still_requires_a_minor_patch(self):
+        # An exact zero determinant alone does not prove a harmless collinear
+        # subdivision: these rays span the entire great circle. Keep the
+        # pre-existing binary64 guard-digit denominator check for zero fans.
+        polygon = np.array([[1., 0., 0.], [-.5, np.sqrt(3.)/2, 0.],
+                            [-.5, -np.sqrt(3.)/2, 0.]])
+        with self.assertRaisesRegex(ValueError, 'minor convex spherical patch'):
+            interface._precise_rotation_integral(polygon)
+
+    def test_dyadic_zero_fan_corpus_matches_exact_rays_across_numpy_modes(self):
+        # These are constructed represented geometries, not a capture of the
+        # failed 268 -> 269 interval. Integer offsets retain an exactly zero
+        # first fan across eight widths without renormalizing the input rays.
+        from exact_polygon import determinant
+        scale = 2**52
+        origin = np.rint(np.array([.2, .3, np.sqrt(.87)])*scale).astype(np.int64)
+        for mode in ('warn', 'raise', 'ignore'):
+            with np.errstate(all=mode):
+                for width in (1, 2, 4, 8, 16, 32, 64, 128):
+                    with self.subTest(mode=mode, width=width):
+                        interface.burial_depth.geometry_cache_reset()
+                        self.addCleanup(interface.burial_depth.geometry_cache_reset)
+                        offsets = np.array([[0, 0, 0], [width, -width, 0],
+                                            [2*width, -2*width, 0], [0, 0, -2*width]])
+                        polygon = (origin+offsets)/scale
+                        np.testing.assert_allclose(np.linalg.norm(polygon, axis=1),
+                                                   1., rtol=0., atol=1e-12)
+                        exact = rational_polygon(polygon)
+                        self.assertEqual(determinant(*exact.homogeneous[:3]), 0)
+                        self.assertGreater(determinant(*(exact.homogeneous[i]
+                                                        for i in (0, 2, 3))), 0)
+                        actual = interface.rotation_metric(polygon, .001)
+                        expected = interface.rotation_metric(exact, .001)
+                        without_zero_fan = interface.rotation_metric(polygon[[0, 2, 3]], .001)
+                        np.testing.assert_allclose(actual, expected, rtol=3e-15, atol=0.)
+                        np.testing.assert_allclose(actual, without_zero_fan, rtol=3e-15, atol=0.)
+                        self.assertGreater(float(np.trace(actual)), 0.)
+                        self.assertAlmostEqual(float(np.trace(actual))/(2*exact.solid_angle()),
+                                               1., delta=3e-15)
+                        # The public cache must not let caller mutation damage
+                        # a later use of the same ordinary binary64 polygon.
+                        actual[:] = -1.
+                        np.testing.assert_allclose(interface.rotation_metric(polygon, .001),
+                                                   expected, rtol=3e-15, atol=0.)
+
+    def test_ordinary_all_zero_fans_keep_existing_zero_integral(self):
+        # Unlike ExactPolygon's stricter admission contract, the existing
+        # ordinary precise path permits identical rays with zero area/work.
+        # Exact winding predicates must not silently change that contract.
+        metric, area = interface._precise_rotation_integral(np.tile([1., 0., 0.], (3, 1)))
+        np.testing.assert_array_equal(metric, np.zeros((3, 3)))
+        self.assertEqual(area, 0.)
+
+    def test_captured_233_binary64_zero_fan_matches_surface_quadrature(self):
+        # Exact binary64 coordinates captured from the failed 233 -> 234 Myr
+        # interface integral, reduced to geometry only. The leading fan is
+        # exactly zero; Decimal64 normalization made it -2.4121e-80 and rejected
+        # the positive remaining 1.25675e-32 fan as inconsistent winding.
+        polygon = np.array([
+            [.24904695108520772, .5963652171177501, -.7631016603095953],
+            [.24904695108520764, .59636521711775, -.7631016603095954],
+            [.2490469510852078, .5963652171177503, -.7631016603095951],
+            [.24904695108520788, .5963652171177503, -.7631016603095951],
+        ])
+        from exact_polygon import determinant
+        exact = rational_polygon(polygon)
+        self.assertEqual(determinant(*exact.homogeneous[:3]), 0)
+        self.assertGreater(determinant(*(exact.homogeneous[i] for i in (0, 2, 3))), 0)
+        radius = 6371.
+        metric = interface.rotation_metric(polygon, radius)
+        without_zero_fan = polygon[[0, 2, 3]]
+        np.testing.assert_array_equal(metric, interface.rotation_metric(without_zero_fan, radius))
+        np.testing.assert_array_equal(metric, interface.rotation_metric(exact, radius))
+        # Omit only the proved exact-zero fan in the independent oracle, whose
+        # own normalized Decimal Jacobian otherwise has the same sign hazard.
+        oracle = rational_polygon(without_zero_fan)
+        for omega in (*np.eye(3), np.array([.2, -.7, .3])):
+            area, work = independent_ray_quadrature(oracle, omega)
+            actual = float(omega@metric@omega)
+            expected = work*(radius*1000.)**2
+            self.assertGreater(actual, 0.)
+            self.assertAlmostEqual(actual/expected, 1., delta=2e-14)
+            self.assertAlmostEqual(float(np.trace(metric))/(2*area*(radius*1000.)**2),
+                                   1., delta=2e-14)
+        with self.assertRaisesRegex(ValueError, 'winding'):
+            interface.rotation_metric(polygon[::-1], radius)
+
     def test_well_conditioned_array_keeps_fast_path(self):
         with patch.object(interface, '_precise_rotation_integral', side_effect=AssertionError('slow path')):
             metric = interface.rotation_metric(np.eye(3), .001)
