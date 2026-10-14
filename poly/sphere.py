@@ -263,5 +263,13 @@ def clean(geography, minimum_km2=1e-6):
 
 def rotate_geography(geography, matrix):
     """The same polygons rotated by `matrix` (rings keep their orientation)."""
-    parts = [polygon(rotate(rings[0], matrix), [rotate(h, matrix) for h in rings[1:]]) for rings in polygons(geography)]
-    return union(*parts) if parts else EMPTY
+    pieces, dropped = [], 0.
+    for rings in polygons(geography):
+        piece, lost = part([rotate(ring, matrix) for ring in rings])
+        dropped += lost
+        if not is_empty(piece):
+            pieces.append(piece)
+    result = union(*pieces) if pieces else EMPTY
+    if dropped > DEBRIS_LIMIT_KM2 or abs(area_km2(result) + dropped - area_km2(geography)) > max(1e-3, 1e-9 * SPHERE_KM2):
+        raise ValueError('Rotating changed the area by %.3g km2.' % (area_km2(result) - area_km2(geography)))
+    return result

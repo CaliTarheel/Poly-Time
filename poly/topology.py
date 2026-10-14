@@ -22,6 +22,14 @@ from poly import sphere
 KINDS = ('ridge', 'trench', 'transform', 'converging', 'collision')
 
 
+class BoundaryCollision(ValueError):
+    """Two boundaries that share no junction cross: the plate between them is pinched."""
+
+    def __init__(self, first, second, plates):
+        super().__init__('Boundaries %d and %d collide away from any junction.' % (first, second))
+        self.first, self.second, self.plates = first, second, plates
+
+
 @dataclass
 class Section:
     start: int
@@ -212,6 +220,26 @@ class Network:
                     changed = True
                     break
         return events
+
+    def absorb(self, plate, into) -> list:
+        """Hand `plate` to its neighbour `into`: their shared boundaries go, its others pass to `into`."""
+        if not any({s.left, s.right} == {plate, into} for s in self.sections.values()):
+            raise ValueError('Plate %d does not touch plate %d.' % (plate, into))
+        for ident in [i for i, s in self.sections.items() if {s.left, s.right} == {plate, into}]:
+            del self.sections[ident]
+        for s in self.sections.values():
+            if s.left == plate:
+                s.left = into
+            if s.right == plate:
+                s.right = into
+            if s.overriding == plate:
+                s.overriding = into
+        for junction in [j for j in self.junctions if not self.incident(j)]:
+            del self.junctions[junction]
+        return self.join_alike()
+
+    def shared_km(self, a, b) -> float:
+        return sum(self.length_km(i) for i, s in self.sections.items() if {s.left, s.right} == {a, b})
 
     def length_km(self, ident) -> float:
         points = self.points(ident)
@@ -408,7 +436,9 @@ class Network:
                 ends = ({self.sections[first].start, self.sections[first].end}
                         & {self.sections[second].start, self.sections[second].end})
                 if not ends:
-                    raise ValueError('Boundaries %d and %d collide away from any junction.' % (first, second))
+                    shared = ({self.sections[first].left, self.sections[first].right}
+                              & {self.sections[second].left, self.sections[second].right})
+                    raise BoundaryCollision(first, second, shared)
                 junction = min(ends, key=lambda k: float(sphere.arc_km(self.junctions[k], meet)))
                 self.junctions[junction] = meet
                 self._retrim(junction)

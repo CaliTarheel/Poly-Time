@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from poly import sphere
-from poly.topology import Network
+from poly.topology import BoundaryCollision, Network
 
 GAINS = ('ridge', 'trench_opening', 'sliver', 'junction')
 LOSSES = ('subducted', 'continent_at_trench', 'overriding_edge', 'collision', 'compression', 'sliver', 'junction')
@@ -36,6 +36,8 @@ INITIATION_KM = 100.
 COLLISION_KM2 = 500.
 # How far either side of a boundary its crust is sampled to choose which plate goes down.
 SAMPLE_KM = 150.
+# A plate smaller than this is absorbed by the neighbour it shares the most boundary with.
+MINIMUM_PLATE_KM2 = 1e6
 
 
 @dataclass
@@ -82,7 +84,24 @@ class World:
         events = self.network.reclassify(rotations_per_myr)
         # A section can shrink by both its ends' displacement in a step; catch it well before zero.
         events += self.network.resolve_short(rotations_per_myr, 2. * speed + 50., self.overriding_rule)
-        repairs = self.network.repair()
+        for _ in range(5):
+            try:
+                repairs = self.network.repair()
+                break
+            except BoundaryCollision as collision:
+                # Two boundaries of one plate have met: the plate is pinched. Until a pinched plate
+                # can be split, it is absorbed by the neighbour it shares the most boundary with.
+                if not collision.plates:
+                    raise
+                plate = next(iter(collision.plates))
+                events.append(self.absorb(plate, reason='pinched between boundaries %d and %d'
+                                          % (collision.first, collision.second)))
+        else:
+            raise ValueError('Plate outlines still cross after absorbing pinched plates.')
+        small = self._absorb_small()
+        if small:
+            events += small
+            repairs += self.network.repair()
         plates = self.network.plates()
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
                      subducted_by_section={}, continent_at_trench_by_section={},
@@ -121,6 +140,38 @@ class World:
         entry['events'] += self._evolve(rotations_per_myr, dt, entry)
         self.ledger.append(entry)
         return entry
+
+    def absorb(self, plate, into=None, reason='') -> dict:
+        """Hand a plate and its crust to a neighbour (the one it shares the most boundary with).
+
+        The plates' shared boundaries go; the crust keeps its shape and is carried into the
+        neighbour's frame, so nothing is created or destroyed.
+        """
+        neighbours = {o for s in self.network.sections.values() if plate in (s.left, s.right)
+                      for o in (s.left, s.right) if o != plate}
+        if into is None:
+            into = max(neighbours, key=lambda o: self.network.shared_km(plate, o))
+        area = sum(c.area_km2() for c in self.crust if c.plate == plate)
+        carry = self.frame(into).T @ self.frame(plate)
+        moved = []
+        for piece in self.crust:
+            if piece.plate == plate:
+                shape, _, _ = sphere.clean(sphere.rotate_geography(piece.shape, carry))
+                piece.plate, piece.shape = into, shape
+                moved.append(piece)
+        self.network.absorb(plate, into)
+        self.frames.pop(plate, None)
+        return dict(kind='plate_absorbed', plate=plate, into=into, area_km2=area, reason=reason)
+
+    def _absorb_small(self) -> list:
+        events = []
+        for plate in self.network.plates():
+            if plate not in self.network.plates():
+                continue
+            region = self.network.polygon(plate)
+            if sphere.area_km2(region) < MINIMUM_PLATE_KM2:
+                events.append(self.absorb(plate, reason='smaller than %.0f km2' % MINIMUM_PLATE_KM2))
+        return events
 
     def _evolve(self, rotations_per_myr, dt, entry) -> list:
         """Boundary changes that take effect from the next step: initiation and collision."""
