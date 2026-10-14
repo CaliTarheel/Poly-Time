@@ -23,6 +23,8 @@ Inherited Lite configuration defaults and the included historical launchers do n
 
 New reviewed Lite worlds select **Start with several ocean plates and ridges** by default (four water regions, with the existing ridge cooling-age settings). Explicitly disabling it, loading a saved configuration, or choosing the alternative supercontinent-ring initializer preserves that choice. Detailed-slab and legacy defaults are unchanged. Continental attachments still require explicit region-to-plate choices for the particular starting map; enabling ocean splitting alone does not attach the new ocean regions to continents. Seeded ridges describe the inherited ocean geometry and ages, while active spreading and displayed boundary types follow the solved motion.
 
+Fresh reviewed worlds record `normal_spreading_version = 1`: any positive normal opening can create paired ocean crust, including slow or highly oblique opening. Previously, creation required more than 2 km/Myr (0.2 cm/year) and 15% of the sliding speed, while normal-motion consumption admitted any closing speed. The new policy retains the existing finite-geometry, material-exclusion and local capacity checks; it adds no driving force or prescribed velocity. Historical states without the marker retain their previous spreading gate, and source compatibility checks still apply to their checkpoints. Legacy raster dynamics are unchanged.
+
 | Location | Contents |
 | --- | --- |
 | Root Python modules and `web/` | The recorded runtime baseline, with this branch's source changes described in [Coarse handoff](docs/COARSE_HANDOFF.md). |

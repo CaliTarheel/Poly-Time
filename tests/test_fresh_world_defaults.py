@@ -348,6 +348,7 @@ class FreshReviewedWorldSmokeTest(unittest.TestCase):
         config = fresh(dict(SMALL, mesh_level=4, physics_profile='reviewed_v1'))
         s = native_engine.Simulation(config)
         self.assertEqual(s.primordial_ocean_version, 1)
+        self.assertEqual(s.normal_spreading_version, 1)
         self.assertEqual(s.primordial_ocean_diagnostics['water_region_count'], 4)
         self.assertGreater(s.primordial_ocean_diagnostics['ridge_length_km'], 0.)
         self.assertEqual(s.subduction_response_version, 0)
