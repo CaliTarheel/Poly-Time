@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101a21">
   <title>Deep Time Lite · Tectonic laboratory</title>
-  <link rel="stylesheet" href="/style.css?v=globe-playback-1">
+  <link rel="stylesheet" href="/style.css?v=motion-visibility-1">
 </head>
 <body>
   <header class="app-header">
@@ -161,7 +161,7 @@
       <div class="map-toolbar">
         <div class="layer-tabs" role="group" aria-label="Map layer"><button data-layer="elevation" class="active" aria-pressed="true">Elevation</button><button data-layer="plate" aria-pressed="false">Plates</button><button data-layer="crust" aria-pressed="false">Crust</button><button data-layer="age" aria-pressed="false">Ocean age</button><button data-layer="loading" aria-pressed="false" title="Relative accumulated boundary loading toward internal breakup; not physical stress">Rift loading</button><button id="layer-thickness" data-layer="thickness" aria-pressed="false" title="Current compensated crustal column thickness" hidden disabled>Crust thickness</button><button id="layer-basins" data-layer="basins" aria-pressed="false" title="Current downward flexure of the foreland beside mountain belts; not total basin depth" hidden disabled>Foreland basins</button><button id="layer-damage" data-layer="damage" aria-pressed="false" title="Accumulated local mechanical damage, from zero to one" hidden disabled>Rift damage</button><button id="layer-weakness" data-layer="weakness" aria-pressed="false" title="Relative lithospheric strength; lower values mean weaker material" hidden disabled>Lithosphere strength</button></div>
         <div class="layer-tabs" role="group" aria-label="Material deformation layers"><button id="layer-deformation" data-layer="deformation" aria-pressed="false" hidden disabled>Deforming regions</button><button id="layer-strain" data-layer="strain" aria-pressed="false" hidden disabled>Area strain</button><button id="layer-refinement" data-layer="refinement" aria-pressed="false" hidden disabled>Mesh detail</button></div>
-        <div class="overlay-options"><label><input type="checkbox" id="show-boundaries" checked title="Approximate boundary types sampled on the simulation grid"> Boundaries</label><label><input type="checkbox" id="show-slab-windows" checked title="Recorded active ridge-subduction episodes; dotted circles mark approximate thermal footprints, not plate boundaries"> Slab windows</label><label><input type="checkbox" id="show-motion" title="Plate motion direction and relative speed from spherical plate rotations"> Motion</label><label><input type="checkbox" id="show-grid"> Grid</label></div>
+        <div class="overlay-options"><label><input type="checkbox" id="show-boundaries" checked title="Approximate boundary types sampled on the simulation grid"> Boundaries</label><label><input type="checkbox" id="show-slab-windows" checked title="Recorded active ridge-subduction episodes; dotted circles mark approximate thermal footprints, not plate boundaries"> Slab windows</label><label><input type="checkbox" id="show-motion" title="Plate motion direction; slow speeds enlarged on a logarithmic arrow scale"> Motion</label><label><input type="checkbox" id="show-grid"> Grid</label></div>
       </div>
       <div class="projection-toolbar">
         <div class="projection-switch" role="group" aria-label="View projection"><button id="view-flat" type="button" aria-pressed="true">Map</button><button id="view-globe" type="button" aria-pressed="false" disabled>Globe</button></div>
@@ -178,8 +178,10 @@
         <div class="map-hover" id="map-hover" hidden></div>
         <div class="measure-readout" id="measure-readout" hidden role="status"></div>
         <div class="map-scale"><span>180° W</span><span>0°</span><span>180° E</span></div>
+        <div id="motion-fullscreen-legend" class="motion-legend motion-fullscreen-legend" hidden aria-label="Fullscreen plate motion speed scale"></div>
       </div>
       <div class="map-caption"><span id="map-caption">Equirectangular projection · drag to paint your initial condition</span><div class="map-view-controls"><button class="text-button" id="map-zoom-out" title="Zoom out of the recorded map" aria-label="Zoom out of tectonic history" disabled>−</button><output id="map-zoom-label">1×</output><button class="text-button" id="map-zoom-in" title="Zoom into the recorded map" aria-label="Zoom into tectonic history" disabled>+</button><button class="text-button" id="map-zoom-fit" disabled>Fit</button><button class="text-button" id="fit-map" title="Expand map">⛶ <span>Expand</span></button></div></div>
+      <div id="motion-legend" class="motion-legend" hidden aria-label="Plate motion speed scale"></div>
       <p id="globe-note" class="hint globe-note" hidden>Use the timeline below to play or scrub the recorded history. The globe shows the same saved map layers and boundary markers; rotating the view keeps your selected time.</p>
       <details class="orientation-panel"><summary>Orient the globe <span id="orientation-current">Original globe orientation</span></summary><p id="orientation-description" class="hint"></p><div class="orientation-axes">
         <label>Longitude / yaw<div><input id="orientation-yaw" type="number" min="-180" max="180" step="1" value="0" aria-label="Globe longitude shift in degrees"><span>°</span></div><input id="orientation-yaw-slider" type="range" min="-180" max="180" step="1" value="0" aria-label="Globe longitude shift"></label>
@@ -205,7 +207,7 @@
         <input type="range" id="timeline" min="0" max="0" value="0" aria-label="History snapshot" disabled>
         <div id="event-track" class="event-track" aria-label="Tectonic events along the timeline"></div>
         <div class="timeline-labels"><span>BREAKUP / 0 Myr</span><span id="snapshot-label">Run an experiment to record its history</span><span id="timeline-end">1,000 Myr</span></div>
-        <div class="timeline-jump"><label for="jump-time">Go to elapsed time</label><input id="jump-time" type="number" min="0" step="any" value="0" aria-label="Elapsed time in million years"><span>Myr</span><button id="jump-button" class="secondary-button" disabled>Go</button><label id="follow-label" class="follow-label" hidden><input id="follow-live" type="checkbox" checked> Follow new frames</label><span id="motion-note" hidden>Arrows show motion direction and relative speed (length capped at 6 cm/year).</span></div>
+        <div class="timeline-jump"><label for="jump-time">Go to elapsed time</label><input id="jump-time" type="number" min="0" step="any" value="0" aria-label="Elapsed time in million years"><span>Myr</span><button id="jump-button" class="secondary-button" disabled>Go</button><label id="follow-label" class="follow-label" hidden><input id="follow-live" type="checkbox" checked> Follow new frames</label></div>
       </section>
 
       <section id="spreading-history" class="history-inspector" aria-labelledby="spreading-heading" hidden>
@@ -313,6 +315,6 @@
   <script src="/subduction.js?v=2" defer></script>
   <script src="/native_boundaries.js?v=2" defer></script>
   <script src="/globe.js?v=1" defer></script>
-  <script src="/app.js?v=effective-subduction-20261002" defer></script>
+  <script src="/app.js?v=motion-visibility-1" defer></script>
 </body>
 </html>

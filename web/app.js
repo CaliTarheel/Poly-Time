@@ -358,7 +358,7 @@
     }
     $("boundary-legend").style.opacity = mode === "initial" ? ".35" : "1";
     $("show-motion").disabled = mode === "initial";
-    $("motion-note").hidden = mode === "initial" || !$("show-motion").checked;
+    updateMotionLegend();
     updateLegend();
     updateExportButtons();
     updateStats();
@@ -399,6 +399,7 @@
   function drawGlobe() {
     if (!globeView.active || !state.frame || globeView.textureFrame !== state.frame) return;
     globeView.renderer.draw(globeView.pose);
+    if ($("show-motion").checked) drawMotion(state.frame, true);
     updateGlobePlayback();
     const {lon, lat} = globeView.pose;
     $("globe-center").textContent = `Centered on ${Math.abs(lat).toFixed(0)}° ${lat < 0 ? "S" : "N"}, ${Math.abs(lon).toFixed(0)}° ${lon < 0 ? "W" : "E"}`;
@@ -667,7 +668,6 @@
       }
       if (!initial && $("show-slab-windows").checked) drawSlabWindows(data);
       if (!initial && $("show-lip").checked) drawLipSources(data);
-      if (!initial && $("show-motion").checked) drawMotion(data);
       if (!initial && state.inspection) drawTrace();
       if (initial && state.hover && !isBusy()) {
         context.save(); context.fillStyle = "rgba(250,235,183,.24)"; context.strokeStyle = "rgba(245,237,214,.95)"; context.lineWidth = 1.2 * canvas.width / 1000;
@@ -682,6 +682,7 @@
       }
       context.restore();
       }
+      if (!initial && !globeView.active && $("show-motion").checked) drawMotion(data);
       if (globeView.active) { globeView.renderer.setTexture(canvas); globeView.textureFrame = data; drawGlobe(); }
       $("map-empty").hidden = true;
     });
@@ -1542,26 +1543,79 @@
     svg.dataset.maxTime = maxTime;
   }
 
-  function drawMotion(data) {
-    const plates = new Map((data.plates || []).map((p) => [p.id, p.angular_velocity]));
-    const scale = canvas.width / 1000;
-    context.save(); context.strokeStyle = "rgba(236,244,237,.8)"; context.lineWidth = 1.2 * scale; context.shadowColor = "#071721"; context.shadowBlur = 2 * scale;
-    for (let row = 1; row < 10; row++) for (let col = 0; col < 20; col++) {
-      const fx = (col + .5) / 20, fy = row / 10;
-      const cell = Math.min(data.height - 1, Math.floor(fy * data.height)) * data.width + Math.min(data.width - 1, Math.floor(fx * data.width));
-      const omega = plates.get(data.plate[cell]); if (!omega || omega.length !== 3) continue;
-      const lon = fx * 2 * Math.PI - Math.PI, lat = Math.PI / 2 - fy * Math.PI, c = Math.cos(lat), s = Math.sin(lat), cl = Math.cos(lon), sl = Math.sin(lon);
-      const r = [c * cl, c * sl, s], v = [omega[1] * r[2] - omega[2] * r[1], omega[2] * r[0] - omega[0] * r[2], omega[0] * r[1] - omega[1] * r[0]];
-      const east = -v[0] * sl + v[1] * cl, north = -v[0] * s * cl - v[1] * s * sl + v[2] * c;
-      let dx = east / Math.max(.15, c) * canvas.width / (2 * Math.PI) * 20, dy = -north * canvas.height / Math.PI * 20;
-      const magnitude = Math.hypot(dx, dy), speed = Math.hypot(...v) * 6371 * .1;
-      if (magnitude < 1e-8 || speed < .2) continue;
-      const length = Math.min(30, speed * 5) * scale; dx *= length / magnitude; dy *= length / magnitude;
-      const px = fx * canvas.width, py = fy * canvas.height, angle = Math.atan2(dy, dx), head = Math.min(5 * scale, Math.hypot(dx, dy) * .45);
-      context.beginPath(); context.moveTo(px - dx / 2, py - dy / 2); context.lineTo(px + dx / 2, py + dy / 2);
-      context.moveTo(px + dx / 2 - Math.cos(angle - .6) * head, py + dy / 2 - Math.sin(angle - .6) * head); context.lineTo(px + dx / 2, py + dy / 2); context.lineTo(px + dx / 2 - Math.cos(angle + .6) * head, py + dy / 2 - Math.sin(angle + .6) * head); context.stroke();
+  // CSS pixels, shared with the legend. The minimum and logarithmic scale reveal
+  // slow plates without letting a fast remnant fill the map.
+  function motionArrowLength(speed) {
+    return Number.isFinite(speed) && speed > 0 ? 10 + 7 * Math.log1p(Math.min(30, speed) / .2) : 0;
+  }
+
+  function updateMotionLegend() {
+    const legend = $("motion-legend");
+    legend.hidden = state.mode === "initial" || !$("show-motion").checked;
+    $("motion-fullscreen-legend").hidden = legend.hidden;
+    if (legend.hidden || legend.innerHTML) return;
+    const samples = [.1, .5, 1, 5, 30].map(speed => {
+      const length = motionArrowLength(speed), x = (52 - length) / 2, tip = x + length;
+      return `<span><svg width="52" height="16" aria-hidden="true"><path d="M${x},8 H${tip} M${tip-4},5 L${tip},8 L${tip-4},11"/></svg>${speed === 30 ? "30+" : speed}</span>`;
+    }).join("");
+    legend.innerHTML = `<strong>Plate motion · cm/year</strong><div class="motion-samples">${samples}</div><span>Slow motion enlarged · logarithmic arrow lengths · capped at 30 cm/year. Hover for exact speed.</span>`;
+    $("motion-fullscreen-legend").innerHTML = legend.innerHTML;
+  }
+
+  function motionAt(data, plates, u, v) {
+    if (v < 0 || v > 1) return null;
+    u = ((u % 1) + 1) % 1;
+    const cell = Math.min(data.height - 1, Math.floor(v * data.height)) * data.width + Math.min(data.width - 1, Math.floor(u * data.width));
+    const omega = plates.get(data.plate[cell]);
+    if (!omega || omega.length !== 3 || !omega.every(Number.isFinite)) return null;
+    const lon = u * 2 * Math.PI - Math.PI, lat = Math.PI / 2 - v * Math.PI;
+    const c = Math.cos(lat), s = Math.sin(lat), cl = Math.cos(lon), sl = Math.sin(lon);
+    const r = [c * cl, c * sl, s];
+    const velocity = [omega[1] * r[2] - omega[2] * r[1], omega[2] * r[0] - omega[0] * r[2], omega[0] * r[1] - omega[1] * r[0]];
+    return { velocity, speed: Math.hypot(...velocity) * 6371 * .1,
+      east: -velocity[0] * sl + velocity[1] * cl,
+      north: -velocity[0] * s * cl - velocity[1] * s * sl + velocity[2] * c, cosLat: c };
+  }
+
+  function drawMotion(data, globe = false) {
+    const target = globe ? globeCanvas : canvas, ctx = target.getContext("2d"), rect = target.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return;
+    const plates = new Map((data.plates || []).map(p => [p.id, p.angular_velocity]));
+    const camera = globe ? DeepTimeGlobe.basis(globeView.pose.lon, globeView.pose.lat) : null;
+    const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
+    ctx.save();
+    // Screen-space sizes and density stay readable at every zoom/DPR. Project
+    // globe tangents directly, rather than stretching arrows from its texture.
+    ctx.setTransform(target.width / rect.width, 0, 0, target.height / rect.height, 0, 0);
+    if (globe) {
+      const radius = .44 * Math.min(target.width, target.height) * globeView.pose.zoom;
+      ctx.beginPath();
+      ctx.ellipse(rect.width / 2, rect.height / 2, radius * rect.width / target.width, radius * rect.height / target.height, 0, 0, 2 * Math.PI);
+      ctx.clip();
     }
-    context.restore();
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    const cols = Math.max(1, Math.floor(rect.width / 60)), rows = Math.max(1, Math.floor(rect.height / 60));
+    for (let row = 0; row < rows; row++) for (let col = 0; col < cols; col++) {
+      const x = (col + .5) * rect.width / cols, y = (row + .5) * rect.height / rows;
+      const point = globe ? globeView.renderer.pick(rect.left + x, rect.top + y, globeView.pose) :
+        { u: (x / rect.width - .5) / mapView.zoom + mapView.cx, v: (y / rect.height - .5) / mapView.zoom + mapView.cy };
+      if (!point) continue;
+      const motion = motionAt(data, plates, point.u, point.v);
+      if (!motion || motion.speed < 1e-12) continue;
+      let dx = globe ? dot(motion.velocity, camera.east) : motion.east / Math.max(1e-8, motion.cosLat) * rect.width / (2 * Math.PI);
+      let dy = globe ? -dot(motion.velocity, camera.north) : -motion.north * rect.height / Math.PI;
+      const magnitude = Math.hypot(dx, dy);
+      if (!(magnitude > 1e-14)) continue;
+      const length = motionArrowLength(motion.speed);
+      dx *= length / magnitude; dy *= length / magnitude;
+      const angle = Math.atan2(dy, dx), tipX = x + dx / 2, tipY = y + dy / 2;
+      ctx.beginPath(); ctx.moveTo(x - dx / 2, y - dy / 2); ctx.lineTo(tipX, tipY);
+      ctx.moveTo(tipX - Math.cos(angle - .6) * 5, tipY - Math.sin(angle - .6) * 5);
+      ctx.lineTo(tipX, tipY); ctx.lineTo(tipX - Math.cos(angle + .6) * 5, tipY - Math.sin(angle + .6) * 5);
+      ctx.strokeStyle = "rgba(7,23,33,.85)"; ctx.lineWidth = 3.8; ctx.stroke();
+      ctx.strokeStyle = "#ecf4ed"; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+    ctx.restore();
   }
 
   function drawTrace() {
@@ -2945,7 +2999,7 @@
   $("lip-remove").addEventListener("click", () => {
     lipDraft.events = lipDraft.events.filter(row => row.id !== $("lip-authored").value); updateLipDraft();
   });
-  $("show-motion").addEventListener("change", () => { $("motion-note").hidden = !$("show-motion").checked; render(); });
+  $("show-motion").addEventListener("change", () => { updateMotionLegend(); render(); });
   $("event-type").addEventListener("change", updateEvents); $("event-search").addEventListener("input", updateEvents);
   $("trench-select").addEventListener("change", () => { const id = Number($("trench-select").value); trenchReview.selectedId = Number.isSafeInteger(id) && id > 0 ? id : null; updateTrenchHistory(); });
   $("rift-select").addEventListener("change", () => { const id = Number($("rift-select").value); riftReview.selectedId = Number.isSafeInteger(id) && id > 0 ? id : null; updateRiftHistory(); });
