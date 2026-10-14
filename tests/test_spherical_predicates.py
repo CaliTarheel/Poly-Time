@@ -40,6 +40,19 @@ class SphericalPredicateTests(unittest.TestCase):
         np.testing.assert_array_equal(actual,expected)
         self.assertEqual(stats['exact_fallbacks'],3)
 
+    def test_exact_fallback_values_are_the_rationals_rounded_once(self):
+        rng=np.random.default_rng(31)
+        a=unit(rng.normal(size=(40,3)));b=unit(a+1e-3*rng.normal(size=(40,3)))
+        # Points of each edge's own great circle, rounded: every distance is in doubt.
+        weights=rng.uniform(.1,.9,size=(40,9,1))
+        p=unit(weights*a[:,None,:]+(1-weights)*b[:,None,:])
+        stats={};actual=edge_distances(p,a[:,None,:],b[:,None,:],stats=stats)
+        expected=np.array([[float(exact_distance(a[row],b[row],p[row,slot])) for slot in range(9)]
+                           for row in range(40)])
+        np.testing.assert_array_equal(actual,expected)
+        self.assertEqual(stats['exact_fallbacks'],360)
+        self.assertTrue(np.any(actual>0.) and np.any(actual<0.))
+
     def test_plane_only_predicate_describes_stored_normal(self):
         normal=np.array([1.,1.,-1.])
         p=np.array([[1.,2.,3.],[1.,2.,np.nextafter(3.,np.inf)]])
