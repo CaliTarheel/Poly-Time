@@ -61,6 +61,14 @@ def enabled(s):
             value=row.get(key)
             if isinstance(value,(bool,np.bool_)) or not isinstance(value,(int,float,np.number)) or not np.isfinite(value) or value<0.:
                 raise ValueError('Invalid Lite initiation candidate history.')
+        for key,total in (('shortening_lower_bound_km','shortening_km'),('shear_lower_bound_km','shear_slip_km'),
+                          ('consecutive_lower_bound_myr','consecutive_myr')):
+            value=row.get(key,0.)
+            if (isinstance(value,(bool,np.bool_)) or not isinstance(value,(int,float,np.number))
+                    or not np.isfinite(value) or value<0. or value>row[total]+1e-10*max(1.,row[total])):
+                raise ValueError('Invalid Lite initiation spatial history bound.')
+        if type(row.get('bounded_history',False)) is not bool:
+            raise ValueError('Invalid Lite initiation spatial history policy.')
         if not activation<=row['created_myr']<=row['last_seen_myr']<=epoch:raise ValueError('Lite initiation invents candidate history outside accepted time.')
         for name in ('segments_start','segments_end'):
             xyz=np.asarray(row.get(name),float)
@@ -163,6 +171,7 @@ def _pieces(s):
             length=float(length[piece]),normal_speed=float(normal[piece]),shear=float(shear[piece]),
             slots=(p,q),uids=(int(s.plate_uid[p]),int(s.plate_uid[q])),
             water=water[piece],
+            normal=n[piece],relative_omega=np.asarray(s.omega[q])-np.asarray(s.omega[p]),
             age=(float(ages[s.ba[edge]]),float(ages[s.bb[edge]]))))
     return records
 
@@ -206,11 +215,33 @@ def _measure(group,controls,incoming=None):
         if not options:return None
         age,_,_,water=options[0]
     over=pair[1] if pair[0]==incoming else pair[0]
+    bounds=[_rate_bounds(row) for row in group]
     return dict(incoming_plate_uid=incoming,overriding_plate_uid=over,length_km=length,
         mean_ocean_age_myr=age,mean_ocean_fraction=water,
         minimum_convergence_km_myr=min(-row['normal_speed'] for row in group),
         mean_convergence_km_myr=math.fsum(row['length']*max(-row['normal_speed'],0.) for row in group)/length,
-        mean_shear_km_myr=math.fsum(row['length']*row['shear'] for row in group)/length)
+        mean_shear_km_myr=math.fsum(row['length']*row['shear'] for row in group)/length,
+        minimum_shear_km_myr=min(row['shear'] for row in group),
+        guaranteed_convergence_km_myr=min(row[0] for row in bounds),
+        guaranteed_shear_km_myr=min(row[1] for row in bounds))
+
+
+def _rate_bounds(row):
+    """Spatial lower bounds, not the midpoint observations used by the law.
+
+    Every point on an arc is at most 2 sin(angle/4) from its midpoint. Both
+    Euler velocity and the projected unit normal vary by at most this chord
+    times |omega| and 1 respectively. The same bound applies to the norm of
+    the shear projection. Thus a later subarc cannot inherit a faster old
+    midpoint's slip. Synthetic records without omega are piecewise constant.
+    """
+    margin=0.
+    if 'relative_omega' in row:
+        a,b=np.asarray(row['start']),np.asarray(row['end'])
+        angle=math.atan2(float(np.linalg.norm(np.cross(a,b-a))),float(a@b))
+        speed=6371.*float(np.linalg.norm(row['relative_omega']))
+        margin=speed*(4.*math.sin(angle/4.)+256*np.finfo(float).eps)
+    return max(0.,-row['normal_speed']-margin),max(0.,row['shear']-margin)
 
 
 def _distance(group,row):
@@ -232,34 +263,174 @@ def _distance(group,row):
 
 def _covered(points,a,b,radius):
     """Each point projects inside real finite support, with a lateral allowance."""
-    normals=np.cross(a,b);normals/=np.linalg.norm(normals,axis=1)[:,None]
-    arc=np.arctan2(np.linalg.norm(np.cross(a,b),axis=1),np.sum(a*b,axis=1))
+    # Translated cross products avoid cancellation on short arcs. Signed
+    # endpoint tangents avoid subtracting three nearly equal arc lengths:
+    # that old test could reject an endpoint of its own represented arc.
+    normals=np.cross(a,b-a);normals/=np.linalg.norm(normals,axis=1)[:,None]
+    first=np.cross(normals,a);last=np.cross(b,normals)
     for point in points:
-        dot=normals@point;foot=point-dot[:,None]*normals
-        magnitude=np.linalg.norm(foot,axis=1)
-        foot/=np.maximum(magnitude[:,None],1e-30)
-        left=np.arctan2(np.linalg.norm(np.cross(foot,a),axis=1),np.sum(foot*a,axis=1))
-        right=np.arctan2(np.linalg.norm(np.cross(foot,b),axis=1),np.sum(foot*b,axis=1))
-        on=(magnitude>1e-12)&(left+right<=arc+128*np.finfo(float).eps)
+        dot=normals@point
+        on=(first@point>=-128*np.finfo(float).eps)&(last@point>=-128*np.finfo(float).eps)
         lateral=6371.*np.arcsin(np.minimum(abs(dot),1.))
         if not np.any(on & (lateral<=radius)):return False
     return True
+
+
+def _arc_intervals(first,last,a,b,radius):
+    """Intervals on one current arc inside the union of carried finite arcs.
+
+    The existing lateral matching allowance does not extend endpoints. Each
+    source arc contributes its two endpoint halfspaces and a spherical strip.
+    Degree-two bends have bounded joins; genuine ends have no caps. Analytic
+    roots clip the entire target arc, not just sampled points.
+    """
+    cross=np.cross(first,last-first);angle=math.atan2(float(np.linalg.norm(cross)),float(first@last))
+    tangent=np.cross(cross/np.linalg.norm(cross),first)
+    tolerance=128*np.finfo(float).eps
+    normal=np.cross(a,b-a);normal/=np.linalg.norm(normal,axis=1)[:,None]
+    starts=np.cross(normal,a);ends=np.cross(b,normal)
+    strip=math.sin(min(math.pi/2.,radius/6371.));covered=[]
+    regions=[((start,0.),(end,0.),(n,-strip),(-n,-strip))
+             for n,start,end in zip(normal,starts,ends)]
+    regions.extend(_bend_regions(a,b,radius))
+    for planes in regions:
+        intervals=[(0.,angle)]
+        for plane,level in planes:
+            cosine,sine=float(first@plane),float(tangent@plane)
+            amplitude=math.hypot(cosine,sine);roots=[]
+            if amplitude>abs(level):
+                phase=math.atan2(sine,cosine);offset=math.acos(level/amplitude)
+                for base in (phase-offset,phase+offset):
+                    roots.extend(base+2*math.pi*k for k in (-1,0,1) if 0.<base+2*math.pi*k<angle)
+            result=[]
+            for low,high in intervals:
+                cuts=[low]+sorted(x for x in roots if low<x<high)+[high]
+                for left,right in zip(cuts[:-1],cuts[1:]):
+                    middle=(left+right)/2.
+                    if cosine*math.cos(middle)+sine*math.sin(middle)>=level-tolerance:
+                        result.append((left,right))
+            intervals=result
+            if not intervals:break
+        covered.extend(intervals)
+    merged=[]
+    for low,high in sorted(covered):
+        if low<=tolerance:low=0.
+        if high>=angle-tolerance:high=angle
+        if high-low<=tolerance:continue
+        if merged and low<=merged[-1][1]+tolerance:merged[-1]=(merged[-1][0],max(high,merged[-1][1]))
+        else:merged.append((low,high))
+    return angle,tangent,merged
+
+
+def _bend_regions(a,b,radius):
+    """Fill only the missing wedge at a genuine degree-two polyline bend.
+
+    A full vertex disk would extend a nearby real endpoint when its adjacent
+    segment is short. Each join is restricted to the outward joint wedge and
+    both incident arcs' remote-end halfspaces. Reversed/duplicate copies of
+    one arc never turn its endpoint into a bend.
+    """
+    vertices={}
+    for first,last in zip(a,b):
+        for point,other in ((first,last),(last,first)):
+            key=tuple(np.round(point,12));neighbor=tuple(np.round(other,12))
+            if key==neighbor:continue
+            vertex=vertices.setdefault(key,[point,{},0.]);center,adjacent,_=vertex
+            vertex[2]=max(vertex[2],float(np.linalg.norm(point-center)))
+            if neighbor in adjacent:
+                vertex[2]=max(vertex[2],float(np.linalg.norm(other-adjacent[neighbor])))
+            adjacent[neighbor]=other
+    result=[]
+    for center,adjacent,merged_error in vertices.values():
+        if len(adjacent)!=2:continue
+        planes=[(center,math.cos(min(math.pi/2.,radius/6371.)))]
+        directions=[];magnitudes=[]
+        coordinate_error=128*np.finfo(float).eps+4.*merged_error
+        for other in adjacent.values():
+            normal=np.cross(center,other-center);magnitude=float(np.linalg.norm(normal))
+            if magnitude<=coordinate_error:break
+            magnitudes.append(magnitude);normal/=magnitude
+            direction=np.cross(normal,center);directions.append(direction)
+            planes.extend(((-direction,0.),(np.cross(other,normal),0.)))
+        if len(directions)!=2:continue
+        # Overlapping copies with different far endpoints are still one
+        # branch; they must not turn a real endpoint into a capped joint.
+        # Normalizing a short arc amplifies endpoint uncertainty by 1/sin L.
+        # Reject unresolved joins conservatively, including representatives
+        # merged by the existing rounded endpoint-identity key.
+        uncertainty=coordinate_error*sum(1./value for value in magnitudes)
+        if (uncertainty>=1. or (directions[0]@directions[1]>0.
+                and np.linalg.norm(np.cross(*directions))<=uncertainty)):continue
+        result.append(tuple(planes))
+    return result
+
+
+def _retained_core(group,row,radius):
+    """Only previously observed finite support may inherit a fault's clock."""
+    a,b=np.asarray(row['segments_start']),np.asarray(row['segments_end']);core=[]
+    for record in group:
+        first,last=np.asarray(record['start']),np.asarray(record['end'])
+        angle,tangent,intervals=_arc_intervals(first,last,a,b,radius)
+        for low,high in intervals:
+            # Keep the checkpoint's existing nondegenerate-arc contract.
+            # Unresolvable endpoint slivers receive no inherited history.
+            if math.sin(high-low)<=1e-12:continue
+            item=dict(record)
+            item['start']=first if low==0. else first*math.cos(low)+tangent*math.sin(low)
+            item['end']=last if high==angle else first*math.cos(high)+tangent*math.sin(high)
+            if np.linalg.norm(np.cross(item['start'],item['end']))<=1e-12:continue
+            item['mid']=item['start']+item['end'];item['mid']/=np.linalg.norm(item['mid'])
+            item['length']=6371.*(high-low)
+            item['complete_piece']=low==0. and high==angle
+            # The discarded part could contain all of the observed water.
+            # A clipped piece must not inherit its parent's wet fraction.
+            # This lower bound uses the already exact finite-arc wet length;
+            # it is deliberately conservative when the piece was mixed.
+            excluded=max(0.,record['length']-item['length'])
+            if 'water' in item:
+                item['water']=tuple(float(np.clip((fraction*record['length']-excluded)/item['length'],0.,1.))
+                                    for fraction in record['water'])
+            if 'relative_omega' in item:
+                n=np.asarray(item['normal']);n=n-item['mid']*(n@item['mid']);n/=np.linalg.norm(n)
+                item['normal']=n
+                relative=np.cross(item['relative_omega'],item['mid'])*6371.
+                item['normal_speed']=float(relative@n)
+                item['shear']=float(np.linalg.norm(relative-item['normal_speed']*n))
+            core.append(item)
+    return core
 
 
 def _same_support(group,row,radius):
     """Bidirectional finite coverage prevents halo growth and borrowed history."""
     a,b=np.asarray(row['segments_start']),np.asarray(row['segments_end'])
     c,d=np.array([r['start'] for r in group]),np.array([r['end'] for r in group])
-    old_mid=(a+b);old_mid/=np.linalg.norm(old_mid,axis=1)[:,None]
-    new_mid=(c+d);new_mid/=np.linalg.norm(new_mid,axis=1)[:,None]
-    return (_covered(np.r_[c,d,new_mid],a,b,radius)
-        and _covered(np.r_[a,b,old_mid],c,d,radius))
+    return _arcs_covered(c,d,a,b,radius) and _arcs_covered(a,b,c,d,radius)
+
+
+def _arcs_covered(c,d,a,b,radius):
+    for first,last in zip(c,d):
+        angle,_,intervals=_arc_intervals(first,last,a,b,radius)
+        if intervals!=[(0.,angle)]:return False
+    return True
 
 
 def _complete_parents(s,group):
     parent=np.asarray(s.native_boundary_geometry['contact_index'])
-    selected={row['index'] for row in group}
+    selected={row['index'] for row in group if row.get('complete_piece',True)}
     return all(set(np.flatnonzero(parent==edge))<=selected for edge in {row['parent'] for row in group})
+
+
+def _birth_interior(s,group,controls,incoming):
+    """No parent-scale force may include a clipped, untrained sibling piece."""
+    parent=np.asarray(s.native_boundary_geometry['contact_index'])
+    selected={row['index'] for row in group if row.get('complete_piece',True)}
+    complete={edge for edge in {row['parent'] for row in group}
+              if set(np.flatnonzero(parent==edge))<=selected}
+    interiors=[part for part in _groups([row for row in group if row['parent'] in complete])
+               if _measure(part,controls,incoming) is not None]
+    # One candidate creates one connected trace; other support receives no
+    # inherited force and can begin fresh observations after this birth.
+    return max(interiors,key=lambda part:math.fsum(row['length'] for row in part),default=[])
 
 
 def supported_parents(s,row,select):
@@ -280,8 +451,8 @@ def supported_parents(s,row,select):
     for edge in np.flatnonzero(result):
         pieces=parent==edge
         if not np.any(pieces):result[edge]=False;continue
-        c,d=starts[pieces],ends[pieces];mid=c+d;mid/=np.linalg.norm(mid,axis=1)[:,None]
-        if not _covered(np.r_[c,d,mid],a,b,radius):result[edge]=False
+        c,d=starts[pieces],ends[pieces]
+        if not _arcs_covered(c,d,a,b,radius):result[edge]=False
     return result
 
 
@@ -314,38 +485,73 @@ def update(s,dt):
         rotation=np.asarray(s.omega[owner])*elapsed
         row['segments_start']=rotate(np.asarray(row['segments_start']),rotation).tolist()
         row['segments_end']=rotate(np.asarray(row['segments_end']),rotation).tolist()
-    groups=[group for group in _groups(_pieces(s)) if _measure(group,controls) is not None]
+    groups=_groups(_pieces(s))
     radius=max(120.,1.8*trench_history._spacing(s))
-    matches={i:[] for i in range(len(groups))};old_matches={row['id']:[] for row in live if row['phase']=='weakening'}
+    matches={i:[] for i in range(len(groups))};cores={}
+    old_matches={row['id']:[] for row in live if row['phase']=='weakening'}
     for i,group in enumerate(groups):
         pair=set(group[0]['uids'])
         for row in live:
-            if (row['phase']=='weakening' and pair=={row['incoming_plate_uid'],row['overriding_plate_uid']}
-                    and _measure(group,controls,row['incoming_plate_uid']) is not None and _same_support(group,row,radius)):
-                matches[i].append(row);old_matches[row['id']].append(i)
+            if row['phase']!='weakening' or pair!={row['incoming_plate_uid'],row['overriding_plate_uid']}:continue
+            core=_retained_core(group,row,radius)
+            # Clipping can leave several trained intervals on the same
+            # connected observed fault. They share a conservative history;
+            # a real split into distinct observed groups still fails the
+            # one-to-one match below, and a birth uses connected interiors.
+            if core and _measure(core,controls,row['incoming_plate_uid']) is not None:
+                matches[i].append(row);old_matches[row['id']].append(i);cores[i,row['id']]=core
     accepted=set();births=[]
     for i,group in enumerate(groups):
         choices=matches[i]
         reuse=len(choices)==1 and len(old_matches[choices[0]['id']])==1
         if reuse:
-            row=choices[0];measurement=_measure(group,controls,row['incoming_plate_uid']);accepted.add(row['id'])
-            row['shear_slip_km']+=measurement['mean_shear_km_myr']*elapsed
-            if measurement['minimum_convergence_km_myr']>=controls['minimum_convergence_km_myr']:
+            row=choices[0];full=_same_support(group,row,radius);group=cores[i,row['id']]
+            measurement=_measure(group,controls,row['incoming_plate_uid']);accepted.add(row['id'])
+            # A removed fast end can make the old whole-fault mean larger
+            # than the surviving core ever experienced. Only accumulated
+            # spatial minima are transferable to a restricted footprint.
+            row.setdefault('shortening_lower_bound_km',0.);row.setdefault('shear_lower_bound_km',0.)
+            row.setdefault('consecutive_lower_bound_myr',0.)
+            row['bounded_history']=row.get('bounded_history',False) or not full
+            if row['bounded_history']:
+                row['shortening_km']=row['shortening_lower_bound_km']
+                row['shear_slip_km']=row['shear_lower_bound_km']
+                row['consecutive_myr']=row['consecutive_lower_bound_myr']
+            row['shear_lower_bound_km']+=measurement['guaranteed_shear_km_myr']*elapsed
+            row['shear_slip_km']+=(measurement['guaranteed_shear_km_myr'] if row['bounded_history']
+                                     else measurement['mean_shear_km_myr'])*elapsed
+            convergence=(measurement['guaranteed_convergence_km_myr'] if row['bounded_history']
+                         else measurement['minimum_convergence_km_myr'])
+            if convergence>=controls['minimum_convergence_km_myr']:
                 row['consecutive_myr']+=elapsed
-                row['shortening_km']+=measurement['mean_convergence_km_myr']*elapsed
+                row['shortening_km']+=(measurement['guaranteed_convergence_km_myr'] if row['bounded_history']
+                                      else measurement['mean_convergence_km_myr'])*elapsed
             else:row['consecutive_myr']=row['shortening_km']=0.
+            if measurement['guaranteed_convergence_km_myr']>=controls['minimum_convergence_km_myr']:
+                row['consecutive_lower_bound_myr']+=elapsed
+                row['shortening_lower_bound_km']+=measurement['guaranteed_convergence_km_myr']*elapsed
+            else:row['consecutive_lower_bound_myr']=row['shortening_lower_bound_km']=0.
         else:
             measurement=_measure(group,controls)
+            if measurement is None:continue
             row=dict(id=proposed['next_candidate_id'],phase='weakening',created_myr=now,
-                consecutive_myr=0.,shortening_km=0.,shear_slip_km=0.)
+                consecutive_myr=0.,shortening_km=0.,shear_slip_km=0.,
+                shortening_lower_bound_km=0.,shear_lower_bound_km=0.,consecutive_lower_bound_myr=0.,bounded_history=False)
             proposed['next_candidate_id']+=1;proposed['candidates'].append(row)
         row.update(measurement,last_seen_myr=now,
             segments_start=[r['start'].tolist() for r in group],segments_end=[r['end'].tolist() for r in group])
         if (row['consecutive_myr']>=controls['minimum_consecutive_myr']
                 and row['shortening_km']>=controls['minimum_shortening_km']
-                and row['shear_slip_km']>=controls['minimum_shear_slip_km']
-                and _complete_parents(s,group)):
-            row['phase']='pending';births.append((row,group))
+                and row['shear_slip_km']>=controls['minimum_shear_slip_km']):
+            interior=_birth_interior(s,group,controls,row['incoming_plate_uid'])
+            if interior:
+                if len(interior)!=len(group):
+                    if (row['consecutive_lower_bound_myr']<controls['minimum_consecutive_myr']
+                            or row['shortening_lower_bound_km']<controls['minimum_shortening_km']
+                            or row['shear_lower_bound_km']<controls['minimum_shear_slip_km']):continue
+                    row.update(bounded_history=True,consecutive_myr=row['consecutive_lower_bound_myr'],
+                        shortening_km=row['shortening_lower_bound_km'],shear_slip_km=row['shear_lower_bound_km'])
+                row['phase']='pending';births.append((row,interior))
     for row in live:
         if row['phase']=='weakening' and row['id'] not in accepted:
             row.update(phase='retired',reason='finite_fault_unmatched_or_ambiguous_topology')

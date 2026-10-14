@@ -8,6 +8,7 @@ from unittest.mock import patch
 import numpy as np
 
 import adaptive_timestepping
+import budget
 import checkpoint
 import effective_subduction as effective
 import effective_subduction_initiation as initiation
@@ -90,7 +91,10 @@ class InitiationTests(unittest.TestCase):
         self.assertFalse(np.any(effective.line_state(s)[1]))
         before=float(s.process_totals['ocean_consumed_km2'])
         self.assertEqual(native_subduction.capture_polygons(s,.001),[])
-        s.step(.001)
+        # This checks source activation and conservation, not the 1.8-second
+        # production wall limit implied by a .001 Myr interval. Geometry
+        # startup exceeds that limit on an otherwise passing baseline too.
+        with budget.step_budget(.001,seconds_per_myr=300000):s.step(.001)
         self.assertAlmostEqual(s.t,1.021)
         self.assertFalse(trace['effective_subduction']['activation_pending'])
         self.assertEqual(trace['effective_subduction']['activated_myr'],1.02)
@@ -239,13 +243,17 @@ class InitiationTests(unittest.TestCase):
         self.assertEqual(s.effective_subduction_initiation['candidates'][0]['incoming_plate_uid'],11)
         np.testing.assert_array_equal(s.polarity,-1)
 
-    def test_remesh_same_support_retains_but_extension_resets_clock(self):
+    def test_remesh_retains_and_extension_cannot_borrow_core_history(self):
         s=world();initiation.upgrade(s);tick(s);tick(s)
         set_pieces(s,np.linspace(-.03,.03,7));tick(s)
         self.assertEqual(s.effective_subduction_initiation['candidates'][0]['consecutive_myr'],2.)
         set_pieces(s,np.linspace(-.03,.04,8));tick(s)
-        self.assertEqual(s.effective_subduction_initiation['candidates'][0]['phase'],'retired')
-        self.assertEqual(s.effective_subduction_initiation['candidates'][1]['shortening_km'],0.)
+        row=s.effective_subduction_initiation['candidates'][0]
+        self.assertEqual(row['phase'],'weakening')
+        self.assertEqual(row['consecutive_myr'],3.)
+        self.assertTrue(row['bounded_history'])
+        self.assertEqual(len(s.effective_subduction_initiation['candidates']),1)
+        self.assertLessEqual(np.arcsin(np.asarray(row['segments_end'])[:,2]).max(),.03+1e-13)
 
     def test_candidate_advection_and_owner_change_cannot_borrow_history(self):
         s=world();initiation.upgrade(s);tick(s);tick(s)
