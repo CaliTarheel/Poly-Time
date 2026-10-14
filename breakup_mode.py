@@ -26,6 +26,7 @@ VERSION = 1
 _FINAL_WIDTH = pb.HUBER_CONTINUATION_KM_MYR[-1]*pb.KM_MYR_CM_YR
 _COMMON_RESTRICTION_TOLERANCE = 1e-9
 _MAX_METRIC_CONDITION = 1e8
+_LINE_SEARCH_CURVATURE = .9
 
 
 def _metric_inverse(matrix):
@@ -398,7 +399,14 @@ def _minimize(model, initial, cost, *, relax_common=True):
                 # _evaluate updates its force reference, so compute the trial
                 # backward error immediately, before another evaluation.
                 trial_residual = residual(trial, trial_gradient)
-                if (trial_value <= value+pb.ARMIJO*alpha*slope
+                # Armijo alone can accept repeated overshoots across narrow
+                # contact transitions: energy decreases while a common plate
+                # alternates between opposite saturated forces. Bound the
+                # positive directional slope (the upper Wolfe condition).
+                # Negative slopes remain admissible at a feasible end point;
+                # the existing force test handles unresolved energy changes.
+                if ((trial_value <= value+pb.ARMIJO*alpha*slope
+                        and float(trial_gradient@step) <= -_LINE_SEARCH_CURVATURE*slope)
                         or (-alpha*slope <= roundoff and trial_value <= value+roundoff
                             and trial_residual < (1.-pb.ARMIJO*alpha)*current)):
                     accepted = True

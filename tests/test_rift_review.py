@@ -152,7 +152,9 @@ class RiftReviewTests(unittest.TestCase):
         self.assertEqual(restored.rift_bonds, simulation.rift_bonds)
         self.assertEqual(restored.rift_systems, simulation.rift_systems)
         self.assertEqual(restored.rift_mechanics, simulation.rift_mechanics)
-        self.assertEqual(set(restored.rift_pending), set(simulation.rift_pending))
+        # No rift is pending in this world: the engine holds None, not an empty mapping.
+        self.assertEqual(restored.rift_pending is None, simulation.rift_pending is None)
+        self.assertEqual(set(restored.rift_pending or ()), set(simulation.rift_pending or ()))
         simulation.step(2);restored.step(2)
         actual, expected = restored.snapshot(), simulation.snapshot()
         self.assertEqual(set(actual), set(expected))

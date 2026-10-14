@@ -155,7 +155,7 @@ class BurialRegionalPrecisionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'cached overlap areas'):
                 collision_interface.regions(state)
 
-    def test_thin_region_refines_even_when_both_source_triangles_are_resolved(self):
+    def test_thin_region_between_resolved_triangles_refines_under_exact_clipping(self):
         triangles = unit([[[1., -.03, 0.], [1., .03, 0.], [1., 0., .03]],
                           [[1., .03, 1e-10], [1., -.03, 1e-10], [1., 0., -.03]]])
         self.assertFalse(mesh_coverage._triangle_area_condition(triangles).any())
@@ -166,12 +166,29 @@ class BurialRegionalPrecisionTests(unittest.TestCase):
         reference = mesh_coverage._polygon_area(triangles[0], RADIUS)
         self.assertLess(abs(sum(mesh_coverage._polygon_area(polygon, RADIUS)
                                 for polygon in ordinary)-reference)/reference, 2e-10)
-        with patch.object(burial_depth, '_precise_partition', wraps=burial_depth._precise_partition) as precise:
-            regions, areas, _ = burial_depth.partition_face(
-                triangles, 0, np.array([0]), np.array([1]), reference, RADIUS)
+        with patch.object(burial_depth, '_standing_regions', return_value=None):
+            with patch.object(burial_depth, '_precise_partition', wraps=burial_depth._precise_partition) as precise:
+                regions, areas, _ = burial_depth.partition_face(
+                    triangles, 0, np.array([0]), np.array([1]), reference, RADIUS)
         precise.assert_called_once()
         covered = sum(weight for (_, cover), weight in zip(regions, areas) if cover)
         self.assertAlmostEqual(covered/decimal_overlap(*triangles), 1., delta=2e-13)
+
+    def test_thin_region_between_resolved_triangles_stands_in_binary64(self):
+        # The strip is 1e-10 of the face wide. Its binary64 area is not good to 2e-10 of
+        # itself, which is why it used to be reclipped exactly; it is good to far less than
+        # the 2e-11 of the lower face the consumers allow, which is what they read.
+        triangles = unit([[[1., -.03, 0.], [1., .03, 0.], [1., 0., .03]],
+                          [[1., .03, 1e-10], [1., -.03, 1e-10], [1., 0., -.03]]])
+        reference = mesh_coverage._polygon_area(triangles[0], RADIUS)
+        with patch.object(burial_depth, '_precise_partition', side_effect=AssertionError('the regions stand')):
+            regions, areas, error = burial_depth.partition_face(
+                triangles, 0, np.array([0]), np.array([1]), reference, RADIUS)
+        self.assertLess(error, 2e-10)
+        covered = sum(weight for (_, cover), weight in zip(regions, areas) if cover)
+        expected = decimal_overlap(*triangles)
+        self.assertAlmostEqual(covered, expected, delta=reference*2e-13)
+        self.assertAlmostEqual(covered/expected, 1., delta=1e-6)
 
     def test_resolved_partition_keeps_ordinary_path(self):
         triangles = unit([[[1., -.03, -.02], [1., .03, -.02], [1., .02, .03]],
