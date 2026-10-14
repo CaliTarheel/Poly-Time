@@ -152,24 +152,25 @@ class BurialPartitionPrecisionTests(unittest.TestCase):
             collision_interface.rotation_metric(thin,.001))>0.))
         self.assertFalse(burial_depth._positive_binary64_winding(thin[::-1]))
 
-    def test_52_myr_guard_digit_partition_returns_only_representable_regions(self):
+    def test_52_myr_guard_digit_partition_retains_every_exact_positive_region(self):
         regions,areas,error=burial_depth.partition_face(
             RUN_52_TRIANGLES,0,np.arange(2),np.array([1,2]),
             5673.2372536289995,6371.)
         # True halfspaces retain a representable positive uncovered sliver
         # that the former -5e-14 band swallowed. Its interface remains passive.
-        self.assertEqual(len(regions),5)
+        self.assertEqual(len(regions),6)
         tiny=int(np.argmin(areas))
         self.assertEqual(regions[tiny][1],())
         self.assertGreater(areas[tiny],0.)
         self.assertLess(areas[tiny],2e-11)
-        # Independently evaluating the returned binary64 geometry at 80 digits
-        # gives 3.046e-15 source/sum rounding. This is a floating-point budget,
-        # not a change to the production footprint gate (still 2e-10).
+        # The formerly unrepresentable positive region now keeps exact rays;
+        # no vertex cast discards area, even below the source rounding budget.
+        self.assertIsInstance(regions[tiny][0],burial_depth.ExactPolygon)
         self.assertLess(error,16*np.finfo(float).eps)
         represented=np.zeros(2)
         for (polygon,cover),area in zip(regions,areas):
-            self.assertTrue(burial_depth._positive_binary64_winding(polygon))
+            if isinstance(polygon,burial_depth.ExactPolygon):self.assertGreater(polygon.solid_angle(),0.)
+            else:self.assertTrue(burial_depth._positive_binary64_winding(polygon))
             self.assertTrue(np.isfinite(collision_interface.rotation_metric(polygon,6371.)).all())
             represented[list(cover)]+=area
         np.testing.assert_allclose(represented,[139.5918501186568,161.6081539824471],
@@ -188,7 +189,7 @@ class BurialPartitionPrecisionTests(unittest.TestCase):
         pairs=(np.array([1,2]),np.array([0,0]),pair_area,np.array([10,10]))
         eligible,scope,attribution=burial_depth.integrate(
             s,np.array([30.,10.,10.]),pairs,depth_km=20.,heating_delay_myr=5.)
-        self.assertEqual(scope['local_stack_regions'],5)
+        self.assertEqual(scope['local_stack_regions'],6)
         self.assertLess(scope['maximum_region_area_relative_error'],16*np.finfo(float).eps)
         self.assertAlmostEqual(scope['covered_union_area_km2'],float(pair_area.sum()),places=9)
         self.assertTrue(np.isfinite(eligible).all())

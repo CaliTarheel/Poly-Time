@@ -17,6 +17,7 @@ import dense_crust as phase
 import eclogite_sink
 import crust_inventory
 from deforming_regions import IncompleteContactStepError
+from exact_polygon import ExactPolygon
 
 VERSION = 1
 FLOOR_VERSION = phase.FLOOR_VERSION
@@ -375,6 +376,22 @@ def _region_contains(polygon, point):
     reject. No geometric welding distance or new containment tolerance is
     introduced. Prepared regions have positive fan winding (burial_depth).
     """
+    if isinstance(polygon, ExactPolygon):
+        # A rounded projection can collapse an exact positive region. Test
+        # its oriented source-ray halfspaces directly, keeping the existing
+        # 1e-11 normalized-plane tolerance without rounding the edge normals.
+        from fractions import Fraction
+        ray = tuple(Fraction.from_float(float(value)) for value in point)
+        tolerance_squared = Fraction.from_float(1e-11)**2
+        points = polygon.homogeneous
+        for a, b in zip(points, points[1:]+points[:1]):
+            normal = (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2],
+                      a[0]*b[1]-a[1]*b[0])
+            signed = sum(value*coordinate for value, coordinate in zip(normal, ray))
+            if signed < 0 and signed*signed > tolerance_squared*sum(value*value for value in normal):
+                return False
+        return True
+
     def inside(vertices):
         planes=np.cross(vertices,np.roll(vertices,-1,axis=0)-vertices)
         planes/=np.maximum(np.linalg.norm(planes,axis=1,keepdims=True),1e-300)
