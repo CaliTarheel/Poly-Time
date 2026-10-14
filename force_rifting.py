@@ -175,7 +175,7 @@ def _loaded_plates(s, balance, *, ledger=None):
     return sorted(p for p in owners if s.active[p] and np.any(s.plate == p))
 
 
-def _stable_cut(s, plate, found):
+def _stable_cut(s, plate, found, *, continuity=None):
     """Exact owner/control/material support identity; no overlap-based credit."""
     cells = np.asarray(found['cells'], dtype='<i8')
     piece = np.asarray(found['piece'], bool)
@@ -199,6 +199,8 @@ def _stable_cut(s, plate, found):
         pairs = np.column_stack((np.asarray(s.parcel_patch)[selected], patch_side[selected])).astype('<i8')
         pairs = np.unique(pairs, axis=0)
         digest.update(pairs.tobytes())
+        if continuity is not None:
+            continuity.update(_fixed_interface_proof(s, plate, found, side, pairs))
     return digest.hexdigest()
 
 
@@ -206,6 +208,91 @@ def _same_supported_cut(previous, identity, axis):
     if previous is None or previous.get('support_identity') != identity:
         return False
     old = np.asarray(previous['axis'], float); now = np.asarray(axis, float)
+    return old.shape == now.shape == (3,) and np.linalg.norm(old-now) <= 1e-10
+
+
+def _fixed_interface_proof(s, plate, found, side, material_pairs):
+    """Future-only proof for one fixed native virtual interface, not transport.
+
+    Remote complementary control labels do not enter the global piece indicator.
+    The finite-mode field is U + (I_piece-alpha)*q*axis: a changed support-area
+    fraction only shifts the freely solved common U. Exact oriented cut geometry
+    keeps its signed relative velocity and length-weighted opening coordinate.
+    Current forces, strengths and capacity still price every new increment.
+    """
+    if found.get('opening_mode_supported') is not True or found.get('common_motion_relaxed') is not True:
+        return {}
+    fields = ('edge_a', 'edge_b', 'edge_mid', 'edge_length')
+    if not all(hasattr(s, name) for name in fields):
+        return {}
+    cut = np.sort(np.asarray(found['cut_edges'], dtype='<i8'))
+    a, b = np.asarray(s.edge_a), np.asarray(s.edge_b)
+    mid, length = np.asarray(s.edge_mid), np.asarray(s.edge_length)
+    xyz = np.asarray(s.xyz)
+    if (not len(cut) or cut.ndim != 1 or len(np.unique(cut)) != len(cut)
+            or a.ndim != 1 or b.shape != a.shape or mid.shape != (len(a), 3)
+            or length.shape != a.shape or xyz.ndim != 2 or xyz.shape[1] != 3
+            or np.any(cut < 0) or np.any(cut >= len(a))):
+        return {}
+    endpoints = np.column_stack((a[cut], b[cut])).astype('<i8')
+    if np.any(endpoints < 0) or np.any(endpoints >= len(xyz)):
+        return {}
+    selected = np.zeros(len(xyz), bool)
+    selected[side] = True
+    signs = selected[endpoints[:, 1]].astype('<i8')-selected[endpoints[:, 0]].astype('<i8')
+    geometry = (np.asarray(xyz[endpoints], dtype='<f8'),
+                np.asarray(mid[cut], dtype='<f8'), np.asarray(length[cut], dtype='<f8'))
+    # Every edge must cross this oriented partition. A patch must have exactly
+    # one assigned side; ambiguous represented material never gains continuity.
+    if (np.any(signs == 0) or not all(np.isfinite(v).all() for v in geometry)
+            or np.any(geometry[-1] <= 0.)
+            or len(np.unique(material_pairs[:, 0])) != len(material_pairs)):
+        return {}
+    # Apply the existing _cut geometric validity thresholds; hashing a
+    # degenerate contour must never qualify continuity on its own.
+    axis = np.asarray(found['axis'], float)
+    radial_norm = np.linalg.norm(geometry[1], axis=1)
+    if (axis.shape != (3,) or not np.isfinite(axis).all() or np.linalg.norm(axis) <= 0.
+            or np.any(radial_norm <= 0.)):
+        return {}
+    radial = geometry[1]/radial_norm[:, None]
+    normal = geometry[0][:, 1]-geometry[0][:, 0]
+    normal -= radial*np.sum(normal*radial, axis=1)[:, None]
+    if (np.any(np.linalg.norm(normal, axis=1) <= 1e-14)
+            or float(np.average(np.linalg.norm(np.cross(axis/np.linalg.norm(axis), radial), axis=1),
+                                weights=geometry[2])) <= 1e-14):
+        return {}
+    digest = hashlib.sha256()
+    for value in (np.array([int(s.plate_uid[plate])], dtype='<i8'), side, cut,
+                  endpoints, signs, *geometry, material_pairs):
+        digest.update(str(value.dtype).encode('ascii'))
+        digest.update(np.asarray(value.shape, dtype='<i8').tobytes())
+        digest.update(value.tobytes())
+    return dict(version=1, scope='fixed_native_virtual_interface', identity=digest.hexdigest(),
+                owner_uid=int(s.plate_uid[plate]), piece_count=len(side),
+                cut_edge_count=len(cut), material_patch_count=len(material_pairs))
+
+
+def _valid_fixed_interface_proof(proof):
+    keys = {'version', 'scope', 'identity', 'owner_uid', 'piece_count', 'cut_edge_count', 'material_patch_count'}
+    if (not isinstance(proof, dict) or set(proof) != keys or type(proof['version']) is not int
+            or proof['version'] != 1 or proof['scope'] != 'fixed_native_virtual_interface'
+            or not isinstance(proof['identity'], str) or len(proof['identity']) != 64
+            or any(c not in '0123456789abcdef' for c in proof['identity'])):
+        return False
+    return all(type(proof[name]) is int and proof[name] >= minimum for name, minimum in
+               (('owner_uid', 0), ('piece_count', 1), ('cut_edge_count', 1), ('material_patch_count', 0)))
+
+
+def _same_fixed_interface(previous, continuity, axis):
+    """No legacy reconstruction, overlap match, reversal or retired-path lookup."""
+    if previous is None:
+        return False
+    before = previous.get('fixed_interface_continuity')
+    if (not _valid_fixed_interface_proof(before) or not _valid_fixed_interface_proof(continuity)
+            or before != continuity):
+        return False
+    old, now = np.asarray(previous['axis'], float), np.asarray(axis, float)
     return old.shape == now.shape == (3,) and np.linalg.norm(old-now) <= 1e-10
 
 
@@ -356,9 +443,11 @@ def update(s, dt):
             continue
         piece = found['cells'][found['piece']].tolist()
         cells = found['cells'].tolist()
-        identity = _stable_cut(s, p, found) if policy is not None else None
+        continuity = {}
+        identity = _stable_cut(s, p, found, continuity=continuity) if policy is not None else None
         same = (previous is not None and previous.get('last_observation_myr') == policy['epoch_myr']
-                and _same_supported_cut(previous, identity, found['axis']) if policy is not None else
+                and (_same_supported_cut(previous, identity, found['axis'])
+                     or balance.uses_force_ledger and _same_fixed_interface(previous, continuity, found['axis'])) if policy is not None else
                 previous is not None and _overlap(
                     _smaller_side(piece, cells), _smaller_side(previous['piece_cells'], cells)) >= SAME_MECHANISM_OVERLAP)
         if balance.uses_force_ledger and scale is not None and not same:
@@ -377,7 +466,8 @@ def update(s, dt):
                 continue
             piece = found['cells'][found['piece']].tolist()
             cells = found['cells'].tolist()
-            identity = _stable_cut(s, p, found) if policy is not None else None
+            continuity = {}
+            identity = _stable_cut(s, p, found, continuity=continuity) if policy is not None else None
             same = False
         if previous is not None and not same:
             _retire_mode(diagnostics, uid, previous, s.t, 'mechanism changed; conservative intact reset')
@@ -408,7 +498,10 @@ def update(s, dt):
             scanned_myr=float(s.t) if coarse else previous['scanned_myr'],
             since_myr=previous['since_myr'] if same else float(s.t))
         if policy is not None:
-            state[uid].update(support_identity=identity, last_observation_myr=float(s.t),
+            state[uid].update(support_identity=identity, fixed_interface_continuity=continuity,
+                support_match_kind=('exact' if same and _same_supported_cut(previous, identity, found['axis'])
+                    else 'fixed_interface' if same else 'new_observation'),
+                last_observation_myr=float(s.t),
                 supported_elapsed_myr=(previous.get('supported_elapsed_myr', 0.) if same else 0.)+supported_dt,
                 search_policy=found.get('search_policy'), searched_axis_count=found.get('searched_axis_count'),
                 search_scope=found.get('search_scope'), candidate_axis_sources=deepcopy(found.get('candidate_axis_sources')),
@@ -553,7 +646,8 @@ def validate_frame(frame):
     if 'force_rifting_policy' not in frame:
         rows = frame.get('force_rifting_plates', {})
         if ('force_rifting_policy_version' in frame or isinstance(rows, dict)
-                and any(isinstance(row, dict) and ('support_identity' in row or 'search_policy' in row)
+                and any(isinstance(row, dict) and ('support_identity' in row or 'search_policy' in row
+                    or 'fixed_interface_continuity' in row or 'support_match_kind' in row)
                         for row in rows.values())):
             raise ValueError('Bounded force-breakup frame lost its declared policy.')
         return
@@ -607,11 +701,20 @@ def validate_frame(frame):
         identity = row.get('support_identity')
         if not isinstance(identity, str) or len(identity) != 64 or any(c not in '0123456789abcdef' for c in identity):
             reject()
+        if 'fixed_interface_continuity' in row or 'support_match_kind' in row:
+            proof = row.get('fixed_interface_continuity')
+            kind = row.get('support_match_kind')
+            if (not isinstance(proof, dict) or kind not in ('exact', 'fixed_interface', 'new_observation')
+                    or proof and (not _valid_fixed_interface_proof(proof) or proof['owner_uid'] != int(uid))
+                    or kind == 'fixed_interface' and not proof):
+                reject()
         axis = np.asarray(row.get('axis'), float)
         if axis.shape != (3,) or not np.isfinite(axis).all() or abs(np.linalg.norm(axis)-1.) > 1e-8:
             reject()
         since, observation = number(row.get('since_myr')), number(row.get('last_observation_myr'))
         elapsed = number(row.get('supported_elapsed_myr'))
+        if row.get('support_match_kind') == 'fixed_interface' and elapsed <= 0.:
+            reject()
         if not activation <= since <= observation == epoch or elapsed > observation-since+1e-9:
             reject()
         for name in ('ratio', 'opened_km', 'opening_km_myr', 'cut_length_km',
