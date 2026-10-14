@@ -21,6 +21,8 @@ Inherited Lite configuration defaults and the included historical launchers do n
 
 ## What is included
 
+New reviewed Lite worlds select **Start with several ocean plates and ridges** by default (four water regions, with the existing ridge cooling-age settings). Explicitly disabling it, loading a saved configuration, or choosing the alternative supercontinent-ring initializer preserves that choice. Detailed-slab and legacy defaults are unchanged. Continental attachments still require explicit region-to-plate choices for the particular starting map; enabling ocean splitting alone does not attach the new ocean regions to continents. Seeded ridges describe the inherited ocean geometry and ages, while active spreading and displayed boundary types follow the solved motion.
+
 | Location | Contents |
 | --- | --- |
 | Root Python modules and `web/` | The recorded runtime baseline, with this branch's source changes described in [Coarse handoff](docs/COARSE_HANDOFF.md). |
