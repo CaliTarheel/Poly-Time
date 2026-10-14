@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "dataset": "asein-lite-start",
+  "epoch_myr": 0,
+  "primary_files": {
+    "initial": "initial.json",
+    "config": "config.json"
+  },
+  "files": {
+    "initial.json": {
+      "bytes": 262844,
+      "sha256": "113f9933bfa6b7dc6c2a0e8c3dadae013ce7906a5f4b31cd19ffb8d95fcf53d5",
+      "role": "Normalized initial map actually saved by the ancestor run."
+    },
+    "config.json": {
+      "bytes": 2336,
+      "sha256": "9de20879fc98bc77b07002c00c37b09b59f004c2ecb56a8058d12ac897fee1a9",
+      "role": "Normalized configuration actually saved by the ancestor run."
+    },
+    "original-artwork.json": {
+      "bytes": 263160,
+      "sha256": "fb7e95d714428c0716148ab456a6f84f1fa08c5902b75bee5ac94ec099fe9110",
+      "role": "Original input artwork, including historical metadata ignored by the Lite validator."
+    },
+    "requested-config.json": {
+      "bytes": 3195,
+      "sha256": "b9aae40a699ab0c29bbb2ffe6fc30c9ef6074f319712d05ff3fb1c6978a1863f",
+      "role": "Original human-selected 3e13 configuration request before compact serialization."
+    }
+  },
+  "provenance": {
+    "artwork_source_run_id": "20261001-153852-27d072",
+    "history_ancestor_run_id": "20261002-122914-072bbc",
+    "history_ancestor_created_utc": "2026-10-02T19:29:14.713551+00:00",
+    "history_ancestor_source_commit": "a645f277fbc79197df189279bae98003d5a6afa6",
+    "history_ancestor_engine_sha256": "09dd4183ea0900e70297f8f7f772280a048564a8aa689642bc4765b9c6fd851b",
+    "history_ancestor_numpy_version": "2.3.5",
+    "history_ancestor_manifest_sha256": "491b52a0c162914809520fd4ee5614e3ee3078ef1ff6256d155b3bb4cd3fa0d5",
+    "descendant_run_id_at_publication": "20261012-coarse-winding-recovery-history",
+    "lineage_evidence": "The descendant manifest frame_sources[0].parent_frame_source chain terminates at the ancestor run and its time-zero frame.",
+    "local_evidence_sha256": {
+      "lite-initial-input-proof.json": "6d7e18565042be6703791bdc1767ec5b11ae40de145c3c94801baba4cd4d3848",
+      "lite-3e13-input-proof.json": "fe8fdcf4e66a9e8d5ef29ddba88af8e0ee36eaf87e054f6ea3edc0d6be44b074",
+      "lite-3e13-production-launch.json": "5661daa0f3e25449f80e52c71ba186ffcd3d591deb7328d70fa91a26936a684a"
+    },
+    "packaging_base_commit": "6f2b2ccdc3ef09320dd6febfb635fa6ed0b813f6"
+  },
+  "reproducibility_scope": {
+    "original_file_bytes_preserved": true,
+    "initial_crust_array_exact": true,
+    "config_request_equals_saved_config": true,
+    "fresh_simulation_started_for_publication": false,
+    "evolved_history_replayed": false,
+    "includes_checkpoint": false,
+    "note": "Initial inputs only. Exact evolved history also depends on historical runtime versions, accepted source transitions, and numerical environment. The current guarded server requires a separately supported startup and controller; these data do not provide those bindings."
+  }
+}

@@ -1,0 +1,130 @@
+{
+  "seed": 37,
+  "width": 512,
+  "height": 256,
+  "duration_myr": 1000.0,
+  "dt_myr": 1.0,
+  "snapshot_myr": 2.0,
+  "plate_count": 7,
+  "slab_pull": 1.0,
+  "ridge_push": 0.25,
+  "erosion": 1.0,
+  "rift_strength": 1.0,
+  "mechanics_nodes": 1024,
+  "mesh_level": 4,
+  "retained_phases": "disabled",
+  "physics_profile": "reviewed_v1",
+  "subduction_response": "fixed_trench",
+  "primordial_ocean": {
+    "enabled": true,
+    "plate_count": 8,
+    "half_spreading_rate_cm_yr": 2.0,
+    "maximum_age_myr": 180.0,
+    "continental_attachments": [
+      {
+        "region_index": 0,
+        "continental_plate_uid": 6
+      },
+      {
+        "region_index": 1,
+        "continental_plate_uid": 2
+      },
+      {
+        "region_index": 2,
+        "continental_plate_uid": 3
+      },
+      {
+        "region_index": 3,
+        "continental_plate_uid": 5
+      },
+      {
+        "region_index": 4,
+        "continental_plate_uid": 7
+      },
+      {
+        "region_index": 5,
+        "continental_plate_uid": 4
+      }
+    ]
+  },
+  "primordial_subduction": {
+    "enabled": true,
+    "initial_slab_depth_km": 100.0,
+    "target_margin_fraction": 0.45,
+    "selection_seed": 37
+  },
+  "supercontinent_ring": {
+    "enabled": false,
+    "ring_radius_deg": 90.0,
+    "pole_lat_lon_deg": null,
+    "minimum_skirt_km": 300.0,
+    "skirt_age_at_margin_myr": 150.0,
+    "skirt_age_at_trench_myr": 100.0,
+    "far_ocean_age_myr": 100.0
+  },
+  "world_design": {
+    "version": 1,
+    "enabled": false,
+    "revision": 0,
+    "interventions": []
+  },
+  "trench_persistence": "kinematic",
+  "slab_allocation": "uniform",
+  "enhanced_rifting": {
+    "version": 1,
+    "enabled": false,
+    "seed": 37,
+    "amplitude": 0.25,
+    "correlation_km": 350.0,
+    "craton_margin_km": 150.0
+  },
+  "force_limit_rifting": {
+    "enabled": false,
+    "rift_width_km": 150.0,
+    "breakup_stretch": 3.0,
+    "ocean_breakup_opening_km": 30.0,
+    "rescan_interval_myr": 10.0,
+    "heal_myr": 50.0,
+    "forbid_cratons": true,
+    "inherited_weakness": false
+  },
+  "lip_events": {
+    "version": 1,
+    "enabled": false,
+    "seed": 37001,
+    "generated_count": 0,
+    "events": []
+  },
+  "continental_lifecycle": {
+    "version": 1,
+    "enabled": false,
+    "neck_viscosity_pa_s": 1e+23,
+    "neck_thickness_km": 80.0,
+    "neck_length_km": 100.0,
+    "failure_opening_km": 80.0,
+    "support_radius_km": 1500.0,
+    "max_source_step_myr": 0.25,
+    "replacement_delay_myr": 20.0,
+    "replacement_exclusion_km": 600.0
+  },
+  "rift_traction": {
+    "version": 1,
+    "enabled": false,
+    "reference_strength_n_per_m": 10000000000000.0,
+    "mobility_km_myr": 12.0,
+    "reach_km": 900.0,
+    "max_equivalent_speed_km_myr": 40.0,
+    "boundary_motion_fraction": 0.25
+  },
+  "effective_subduction": {
+    "enabled": true,
+    "force_n_per_m": 30000000000000.0
+  },
+  "deforming_regions": 1,
+  "adaptive_refinement": 1,
+  "deformation_width_km": 400.0,
+  "material_face_budget": 0,
+  "coast_geometry_level": 4,
+  "continental_margin_width_km": 150.0,
+  "continental_shelf_depth_m": 180.0
+}

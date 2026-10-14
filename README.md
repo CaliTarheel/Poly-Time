@@ -21,6 +21,11 @@ Inherited Lite configuration defaults and the included historical launchers do n
 
 ## What is included
 
+The original map and configuration for the Asein Lite history are archived in
+[Asein Lite starting conditions](datasets/asein-lite-start/README.md), with
+checksums and retrieval instructions. These are the 0 Myr inputs, not an evolved
+checkpoint or a portable production launcher.
+
 New reviewed Lite worlds use an effective slab pull of **3 × 10¹³ N per metre of active trench**, including the Highland preset and command-line fresh defaults. The form shows **30** in units of 10¹² N/m. Explicit force settings and recorded worlds retain their values; the engine's historical missing-force default remains 5 × 10¹² N/m. This changes fresh configuration only, leaving boundary resistance and the force solver unchanged.
 
 New reviewed Lite worlds select **Start with several ocean plates and ridges** by default (four water regions, with the existing ridge cooling-age settings). Explicitly disabling it, loading a saved configuration, or choosing the alternative supercontinent-ring initializer preserves that choice. Detailed-slab and legacy defaults are unchanged. Continental attachments still require explicit region-to-plate choices for the particular starting map; enabling ocean splitting alone does not attach the new ocean regions to continents. Seeded ridges describe the inherited ocean geometry and ages, while active spreading and displayed boundary types follow the solved motion.
