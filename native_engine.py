@@ -303,6 +303,7 @@ class Simulation(legacy.Simulation):
         self.native_arc_birth_profile_version = 1
         self.native_arc_deposition_version = 1
         self.native_arc_footprint_version = 1
+        self.native_arc_point_version = 1
         self.native_locator = geometry.build_locator(self.native_mesh['vertices'], self.native_mesh['faces'])
         self.native_stencil = transport.face_vertex_stencil(self.native_mesh)
         xyz = self.native_mesh['xyz']

@@ -73,6 +73,8 @@ def snapshot_fields(s):
     result.update(arc_birth_footprint.snapshot_fields(s))
     import arc_local_deposition
     result.update(arc_local_deposition.snapshot_fields(s))
+    import arc_point_nucleation
+    result.update(arc_point_nucleation.snapshot_fields(s))
     return result
 
 
@@ -488,6 +490,8 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
     profile_version=arc_birth_profile.version(s)
     import arc_local_deposition
     deposition_version=arc_local_deposition.version(s)
+    import arc_point_nucleation
+    point_version=arc_point_nucleation.version(s)
     if isinstance(policy,(bool,np.bool_)) or not isinstance(policy,(int,np.integer)) or policy not in (0,1):
         raise ValueError('Unsupported juvenile emplacement policy.')
     if positions is None:
@@ -569,15 +573,23 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
     import arc_birth_footprint
     footprint_version=arc_birth_footprint.version(s)
     birth_candidates={}
-    def birth_candidate(anchor,amount):
+    def birth_candidate(anchor,amount,strategy=None):
         # Shared cohort and admission queries reuse the exact funded proposal.
         # The cache lasts only this immutable routing batch, not later epochs.
-        identity=(int(anchor),float(amount))
+        if strategy is None:
+            if point_version and all_provenance[anchor]['valid']:
+                compact=birth_candidate(anchor,amount,'point')
+                if compact['profile']['diagnostics']['admissible']:return compact
+            strategy='legacy'
+        identity=(int(anchor),float(amount),strategy)
         if identity not in birth_candidates:
             position=all_points[anchor];cell=int(s._indices(position[None])[0])
             strike=_strike(s,cell,int(all_owners[anchor]),position)
             factory=lambda physical_area:_patch(position,strike,physical_area)
-            if footprint_version:
+            if strategy=='point':
+                seed=arc_point_nucleation.seed_key(s,[all_provenance[anchor]])
+                proposal=arc_point_nucleation.propose(position,strike,amount,basal[anchor],seed)
+            elif footprint_version:
                 proposal=arc_birth_footprint.propose(factory,amount,basal[anchor])
             else:
                 patch=factory(amount)
@@ -607,6 +619,62 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
         component=int(component_at_face[route['material_index'][i]]) if arc else -1
         key=('arc',arc,component) if arc else ('point',owner,*map(float,all_points[i]))
         groups.setdefault(key,[]).append(int(i))
+    def point_birth_attempt(take,key):
+        first=int(take[0]);owner=int(all_owners[first]);area=float(all_area[take].sum())
+        evaluations=0;attempts=[]
+        for strategy in ('point','legacy'):
+            proposal=birth_candidate(first,area,strategy)
+            row=dict(version=1,mode='birth',arc_id=0,owner=owner,
+                source_indices=take.tolist(),geometry_xyz=all_points[take].tolist(),
+                requested_area_km2=area,accepted_area_km2=0.,pending_area_km2=area,
+                geometry_evaluations=evaluations,relocation_km=0.,requested_footprint=None,
+                accepted_footprint=None,last_examined_footprint=None,
+                profile_capacity=proposal['profile']['diagnostics'],footprint_capacity=proposal['search'])
+            plan=None;spending=take.copy()
+            if proposal['profile']['diagnostics']['admissible']:
+                target=area
+                while True:
+                    admission=emplacement.admit(placement,
+                        lambda amount:birth_candidate(first,amount,strategy)['plan'],target,owner,
+                        minimum_area_km2=MIN_PATCH_AREA_KM2)
+                    evaluations+=admission['diagnostics']['geometry_evaluations']
+                    if admission['accepted_area_km2']<=0:break
+                    inside=spending[cohort_geometry.contained(admission['plan'],all_points[spending])]
+                    inside=cohort_geometry.connected(inside,group_links.get(key),first)
+                    if len(inside)==len(spending):break
+                    spending=inside
+                    if not len(inside):
+                        admission['accepted_area_km2']=0.;admission['plan']=None;break
+                    target=float(all_area[inside].sum())
+                accepted=float(admission['accepted_area_km2']);plan=admission['plan']
+                row.update(admission['diagnostics'],requested_area_km2=area,accepted_area_km2=accepted,
+                           pending_area_km2=area-accepted,geometry_evaluations=evaluations)
+                if accepted>0:
+                    chosen=birth_candidate(first,accepted,strategy)
+                    row['profile_capacity']=arc_birth_profile.birth(plan,accepted,basal[first])['diagnostics']
+                    row['footprint_capacity']=chosen['search']
+                    if not row['profile_capacity']['admissible']:
+                        row.update(accepted_area_km2=0.,pending_area_km2=area,
+                                   physical_emplacement_rejected='constructive_profile_capacity')
+                        plan=None
+                else:
+                    row['profile_capacity']=dict(version=1,admissible=False,
+                        reason='source_containment' if not len(spending) else 'no_geographic_footprint')
+            if row['accepted_area_km2']<=0.:row['accepted_footprint']=None
+            attempts.append(dict(strategy=strategy,accepted_area_km2=float(row['accepted_area_km2']),
+                reason=row['profile_capacity']['reason']))
+            if row['accepted_area_km2']>0:
+                if strategy=='point':
+                    volume=25.*float(row['accepted_area_km2']);footprint=float(plan['area_km2'].sum())
+                    row['point_promotion']=dict(version=1,
+                        seed_key=str(arc_point_nucleation.seed_key(s,[all_provenance[first]])),
+                        source_origin_ids=[int(all_provenance[i]['origin_id']) for i in take if i in set(spending)],
+                        source_volume_km3=volume,footprint_area_km2=footprint,
+                        volume_density_km=volume/footprint)
+                break
+        row['point_attempts']=attempts
+        return row,plan,spending
+
     before_volume=float(s.material_surface['area_km2']@s.structure['thickness_km'])
     before_mass=float(s.mass.sum())
     before_footprint=float(s.material_surface['area_km2'].sum())
@@ -684,52 +752,58 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
             # geometry and basal height use the original geographic position.
             cell=int(s._indices(point[None])[0])
             plan=None;accepted=area;start=len(s.mass)
-            if placement is not None:
-                strike=_strike(s,cell,owner,point)
-                if profile_version:
-                    proposal=birth_candidate(first,area)
-                    requested_profile=proposal['profile']
-                    if not requested_profile['diagnostics']['admissible']:
-                        placement_rows.append(dict(version=1,mode='birth',arc_id=0,owner=owner,
-                            source_indices=take.tolist(),geometry_xyz=all_points[take].tolist(),
-                            requested_area_km2=area,accepted_area_km2=0.,pending_area_km2=area,
-                            geometry_evaluations=0,relocation_km=0.,requested_footprint=None,
-                            accepted_footprint=None,last_examined_footprint=None,
-                            profile_capacity=requested_profile['diagnostics']))
-                        if footprint_version:placement_rows[-1]['footprint_capacity']=proposal['search']
-                        unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
-                target=area;evaluations=0
-                while True:
-                    factory=(lambda amount:birth_candidate(first,amount)['plan']) if profile_version else (lambda amount:_patch(point,strike,amount))
-                    admission=emplacement.admit(placement,factory,target,owner,
-                                                 minimum_area_km2=MIN_PATCH_AREA_KM2)
-                    evaluations+=admission['diagnostics']['geometry_evaluations']
-                    if not profile_version or admission['accepted_area_km2']<=0:break
-                    inside=spending_take[cohort_geometry.contained(admission['plan'],all_points[spending_take])]
-                    inside=cohort_geometry.connected(inside,group_links.get(key),first)
-                    if len(inside)==len(spending_take):break
-                    spending_take=inside
-                    if not len(inside):
-                        admission['accepted_area_km2']=0.;admission['plan']=None;break
-                    target=float(all_area[inside].sum())
-                admission['diagnostics'].update(requested_area_km2=area,
-                    pending_area_km2=area-admission['accepted_area_km2'],geometry_evaluations=evaluations)
-                placement_rows.append(dict(mode='birth',arc_id=0,owner=owner,source_indices=take.tolist(),
-                                           geometry_xyz=all_points[take].tolist(),
-                                           **admission['diagnostics']))
-                accepted=float(admission['accepted_area_km2']);plan=admission['plan']
+            if point_version and all_provenance[first]['valid']:
+                row,plan,spending_take=point_birth_attempt(take,key)
+                placement_rows.append(row);accepted=float(row['accepted_area_km2'])
                 if accepted<=0.:
-                    if profile_version:
-                        placement_rows[-1]['profile_capacity']=dict(version=1,admissible=False,reason='no_geographic_footprint')
                     unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
-                if profile_version:
-                    capacity=arc_birth_profile.birth(plan,accepted,basal[first])['diagnostics']
-                    placement_rows[-1]['profile_capacity']=capacity
-                    if footprint_version:placement_rows[-1]['footprint_capacity']=birth_candidate(first,accepted)['search']
-                    if not capacity['admissible']:
-                        placement_rows[-1].update(accepted_area_km2=0.,pending_area_km2=area,
-                            physical_emplacement_rejected='constructive_profile_capacity')
+            else:
+                if placement is not None:
+                    strike=_strike(s,cell,owner,point)
+                    if profile_version:
+                        proposal=birth_candidate(first,area)
+                        requested_profile=proposal['profile']
+                        if not requested_profile['diagnostics']['admissible']:
+                            placement_rows.append(dict(version=1,mode='birth',arc_id=0,owner=owner,
+                                source_indices=take.tolist(),geometry_xyz=all_points[take].tolist(),
+                                requested_area_km2=area,accepted_area_km2=0.,pending_area_km2=area,
+                                geometry_evaluations=0,relocation_km=0.,requested_footprint=None,
+                                accepted_footprint=None,last_examined_footprint=None,
+                                profile_capacity=requested_profile['diagnostics']))
+                            if footprint_version:placement_rows[-1]['footprint_capacity']=proposal['search']
+                            unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
+                    target=area;evaluations=0
+                    while True:
+                        factory=(lambda amount:birth_candidate(first,amount)['plan']) if profile_version else (lambda amount:_patch(point,strike,amount))
+                        admission=emplacement.admit(placement,factory,target,owner,
+                                                     minimum_area_km2=MIN_PATCH_AREA_KM2)
+                        evaluations+=admission['diagnostics']['geometry_evaluations']
+                        if not profile_version or admission['accepted_area_km2']<=0:break
+                        inside=spending_take[cohort_geometry.contained(admission['plan'],all_points[spending_take])]
+                        inside=cohort_geometry.connected(inside,group_links.get(key),first)
+                        if len(inside)==len(spending_take):break
+                        spending_take=inside
+                        if not len(inside):
+                            admission['accepted_area_km2']=0.;admission['plan']=None;break
+                        target=float(all_area[inside].sum())
+                    admission['diagnostics'].update(requested_area_km2=area,
+                        pending_area_km2=area-admission['accepted_area_km2'],geometry_evaluations=evaluations)
+                    placement_rows.append(dict(mode='birth',arc_id=0,owner=owner,source_indices=take.tolist(),
+                                               geometry_xyz=all_points[take].tolist(),
+                                               **admission['diagnostics']))
+                    accepted=float(admission['accepted_area_km2']);plan=admission['plan']
+                    if accepted<=0.:
+                        if profile_version:
+                            placement_rows[-1]['profile_capacity']=dict(version=1,admissible=False,reason='no_geographic_footprint')
                         unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
+                    if profile_version:
+                        capacity=arc_birth_profile.birth(plan,accepted,basal[first])['diagnostics']
+                        placement_rows[-1]['profile_capacity']=capacity
+                        if footprint_version:placement_rows[-1]['footprint_capacity']=birth_candidate(first,accepted)['search']
+                        if not capacity['admissible']:
+                            placement_rows[-1].update(accepted_area_km2=0.,pending_area_km2=area,
+                                physical_emplacement_rejected='constructive_profile_capacity')
+                            unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
             result=_birth(s,cell,owner,accepted,position=point,basal_m=basal[first],
                           fixed_source_volume=True,prepared_patch=plan)
             if placement is not None:

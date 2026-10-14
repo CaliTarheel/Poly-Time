@@ -42,6 +42,8 @@ The production continuation used an independent Windows Job controller with an *
 
 A completed, validated 1000 Myr history is not included in this release. Read [Current mode](docs/CURRENT_MODE.md) and [Known limitations](KNOWN_LIMITATIONS.md) alongside the inherited scientific documents when extending the model.
 
+The volcanic-point development is described in [Volcanic points and compact foundations](docs/ARC_POINT_NUCLEATION.md), including pending-volume accounting and the limits of point-to-polygon promotion.
+
 ## Attribution and licensing
 
 Super-Light-Time retains code and documentation from the Asein Lite / Deep Time project. Existing author and reference attributions remain applicable. No new license is assigned by this snapshot; public availability alone should not be read as an additional license grant.

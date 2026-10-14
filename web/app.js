@@ -400,6 +400,7 @@
     if (!globeView.active || !state.frame || globeView.textureFrame !== state.frame) return;
     globeView.renderer.draw(globeView.pose);
     if ($("show-motion").checked) drawMotion(state.frame, true);
+    if ($("show-volcanic-points").checked) drawVolcanicPoints(state.frame, true);
     updateGlobePlayback();
     const {lon, lat} = globeView.pose;
     $("globe-center").textContent = `Centered on ${Math.abs(lat).toFixed(0)}° ${lat < 0 ? "S" : "N"}, ${Math.abs(lon).toFixed(0)}° ${lon < 0 ? "W" : "E"}`;
@@ -537,6 +538,7 @@
       state.rendering = false;
       const data = state.mode === "initial" ? state.initial : state.frame;
       updateSlabWindowNote(data);
+      updateVolcanicPointNote(data);
       if (!data) return;
       const w = data.width, h = data.height;
       const initial = state.mode === "initial";
@@ -683,6 +685,7 @@
       context.restore();
       }
       if (!initial && !globeView.active && $("show-motion").checked) drawMotion(data);
+      if (!initial && !globeView.active && $("show-volcanic-points").checked) drawVolcanicPoints(data);
       if (globeView.active) { globeView.renderer.setTexture(canvas); globeView.textureFrame = data; drawGlobe(); }
       $("map-empty").hidden = true;
     });
@@ -797,6 +800,98 @@
       }
     }
     context.restore();
+  }
+
+  function volcanicPoints(data) {
+    if (data?.arc_point_version !== 1 || !Array.isArray(data.volcanic_point_features)) return [];
+    return data.volcanic_point_features.filter(row => {
+      const point = row?.geometry_xyz?.[0];
+      return row?.status === "pending" && Number.isSafeInteger(row.id) && row.id > 0 &&
+        Number.isSafeInteger(row.owner) && row.owner >= 0 && Number.isFinite(row.volume_km3) && row.volume_km3 > 0 &&
+        Array.isArray(row.geometry_xyz) && row.geometry_xyz.length === 1 && Array.isArray(point) && point.length === 3 &&
+        point.every(Number.isFinite) && Math.abs(Math.hypot(...point) - 1) < 1e-6;
+    });
+  }
+
+  function updateVolcanicPointNote(data) {
+    const recorded = state.mode === "history" && data?.arc_point_version === 1 && Array.isArray(data.volcanic_point_features);
+    const control = $("show-volcanic-points"), note = $("volcanic-point-note");
+    control.disabled = !recorded;
+    note.hidden = !recorded;
+    if (!recorded) { note.textContent = ""; return; }
+    const count = volcanicPoints(data).length;
+    note.textContent = count ? `${count.toLocaleString()} volcanic center${count === 1 ? "" : "s"} with pending magma · ${control.checked ? "Amber rings mark unresolved centers, not island size or height. Hover for volume." : "Turn on Volcanic centers to show them."} Nearby centers can become a crust patch when their magma funds an admissible footprint.` : "No unresolved volcanic centers at this saved time.";
+  }
+
+  // Screen-space symbols are independent of review-grid resolution, map zoom
+  // and the globe texture; they do not paint land into the elevation raster.
+  function volcanicScreenPoints(point, globe, target, rect) {
+    const lon = Math.atan2(point[1], point[0]) * 180 / Math.PI;
+    const lat = Math.asin(Math.max(-1, Math.min(1, point[2]))) * 180 / Math.PI;
+    if (globe) {
+      const projected = DeepTimeGlobe.project(lon, lat, globeView.pose);
+      if (!projected?.visible) return [];
+      const radius = .44 * Math.min(target.width, target.height) * globeView.pose.zoom;
+      const x = rect.width / 2 + projected.x * radius * rect.width / target.width;
+      const y = rect.height / 2 - projected.y * radius * rect.height / target.height;
+      return x >= -8 && x <= rect.width + 8 && y >= -8 && y <= rect.height + 8 ? [{x, y}] : [];
+    }
+    const u = (lon + 180) / 360, v = .5 - lat / 180;
+    const copy = Math.round(mapView.cx - u), result = [];
+    for (const offset of [-1, 0, 1]) {
+      const x = ((u + copy + offset - mapView.cx) * mapView.zoom + .5) * rect.width;
+      const y = ((v - mapView.cy) * mapView.zoom + .5) * rect.height;
+      if (x >= -8 && x <= rect.width + 8 && y >= -8 && y <= rect.height + 8) result.push({x, y});
+    }
+    return result;
+  }
+
+  function projectedVolcanicPoints(data, globe = false) {
+    const target = globe ? globeCanvas : canvas, rect = target.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return [];
+    return volcanicPoints(data).flatMap(feature => volcanicScreenPoints(feature.geometry_xyz[0], globe, target, rect).map(p => ({...p, feature})));
+  }
+
+  function drawVolcanicPoints(data, globe = false) {
+    const rows = projectedVolcanicPoints(data, globe);
+    if (!rows.length) return;
+    const target = globe ? globeCanvas : canvas, ctx = target.getContext("2d"), rect = target.getBoundingClientRect();
+    ctx.save(); ctx.setTransform(target.width / rect.width, 0, 0, target.height / rect.height, 0, 0);
+    if (globe) {
+      const radius = .44 * Math.min(target.width, target.height) * globeView.pose.zoom;
+      ctx.beginPath(); ctx.ellipse(rect.width / 2, rect.height / 2, radius * rect.width / target.width, radius * rect.height / target.height, 0, 0, 2 * Math.PI); ctx.clip();
+    }
+    ctx.setLineDash([]);
+    for (const {x, y} of rows) {
+      ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 2 * Math.PI);
+      ctx.strokeStyle = "rgba(7,23,33,.9)"; ctx.lineWidth = 3.4; ctx.stroke();
+      ctx.strokeStyle = "#ffc66d"; ctx.lineWidth = 1.4; ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, .9, 0, 2 * Math.PI); ctx.fillStyle = "#ffc66d"; ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function volcanicPointHover(data, point) {
+    if (!$("show-volcanic-points").checked || state.mode !== "history") return [];
+    const target = globeView.active ? globeCanvas : canvas, rect = target.getBoundingClientRect();
+    const u = Number.isFinite(point.u) ? point.u : (point.x + .5) / data.width;
+    const v = Number.isFinite(point.v) ? point.v : (point.y + .5) / data.height;
+    const lon = u * 2 * Math.PI - Math.PI, lat = Math.PI / 2 - v * Math.PI;
+    const cursor = volcanicScreenPoints([Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)], globeView.active, target, rect);
+    let selected = null, distance = 8;
+    for (const row of projectedVolcanicPoints(data, globeView.active)) for (const p of cursor) {
+      const delta = Math.hypot(row.x - p.x, row.y - p.y);
+      if (delta < distance || (delta === distance && row.feature.id < selected?.id)) { selected = row.feature; distance = delta; }
+    }
+    if (!selected) return [];
+    const identifiedHost = Number.isSafeInteger(selected.owner_uid) && selected.owner_uid > 0;
+    const plate = identifiedHost ? data.plates?.find(p => p.uid === selected.owner_uid) : data.plates?.find(p => p.id === selected.owner);
+    const host = plate ? plate.name || `Plate ${plate.id}` : identifiedHost ? `Former host UID ${selected.owner_uid}` : `Plate ${selected.owner}`;
+    const amount = selected.volume_km3 < .01 ? "<0.01" : selected.volume_km3.toLocaleString(undefined, {maximumFractionDigits: 2});
+    const values = [`Volcanic center ${selected.id} · pending magma: ${amount} km³`, `Host: ${host}`, "Unresolved center · no island height recorded"];
+    if (Number.isFinite(selected.source_time_myr)) values.push(`Source supplied: ${formatTime(selected.source_time_myr)} Myr`);
+    if (typeof selected.reason === "string" && selected.reason) values.push(`Source lineage: ${selected.reason.replaceAll("_", " ")}`);
+    return values;
   }
 
   function updateLipDraft() {
@@ -2295,6 +2390,7 @@
         if (trench) values.push(`Trench ${trench.id}${trench.phase ? ` · ${String(trench.phase).replaceAll("_", " ")}` : ""}`);
       }
       if (state.layer === "loading") values.push(...riftLoadingHover(plate));
+      values.push(...volcanicPointHover(data, point));
     }
     $("map-hover").classList.toggle("loading-hover", state.mode === "history" && state.layer === "loading");
     $("map-hover").textContent = state.mode === "history" && state.layer === "loading" ? values.join("\n") : values.join("  /  "); $("map-hover").hidden = false;
@@ -2994,6 +3090,7 @@
   for (const button of document.querySelectorAll("[data-layer]")) button.addEventListener("click", () => { if (button.disabled) return; if (state.mode === "initial") { if (button.dataset.layer !== "crust") toast("The starting map shows crust materials. Run a simulation to inspect the other layers."); return; } state.layer = button.dataset.layer; setMode("history"); });
   $("show-boundaries").addEventListener("change", render); $("show-grid").addEventListener("change", render);
   $("show-slab-windows").addEventListener("change", render);
+  $("show-volcanic-points").addEventListener("change", () => { $("map-hover").hidden = true; render(); });
   $("show-lip").addEventListener("change", render);
   $("lip-add").addEventListener("click", addLipEvent);
   $("lip-remove").addEventListener("click", () => {

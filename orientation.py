@@ -271,7 +271,7 @@ def orient_frame(frame, orientation=None):
                    'backarc_basins', 'trench_systems', 'rift_systems', 'local_accretion_contacts',
                    'collision_contacts', 'collision_resistance_diagnostics', 'native_accretion_diagnostics',
                    'arc_material_diagnostics', 'arc_pending_source', 'arc_source_placements',
-                   'arc_source_cohort_state', 'world_design'):
+                   'arc_source_cohort_state', 'volcanic_point_features', 'world_design'):
             result[key] = _metadata(value, matrix)
         elif key in ('trace_xyz', 'mesh_vertices', 'material_vertices'):
             points = np.asarray(value, dtype=np.float64)

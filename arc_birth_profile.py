@@ -169,6 +169,8 @@ def snapshot_fields(s):
 
 
 def validate_frame(frame):
+    import arc_point_nucleation
+    arc_point_nucleation.validate_frame(frame)
     import arc_birth_footprint
     arc_birth_footprint.validate_frame(frame)
     from arc_emplacement_geometry import validate_deposition_policy
