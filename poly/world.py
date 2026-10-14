@@ -38,6 +38,9 @@ COLLISION_KM2 = 500.
 SAMPLE_KM = 150.
 # A plate smaller than this is absorbed by the neighbour it shares the most boundary with.
 MINIMUM_PLATE_KM2 = 1e6
+# Two boundaries of one plate closer than this (away from a junction they share) are a neck: the
+# plate is cut across it before they can meet, and the far side becomes a plate of its own.
+NECK_KM = 150.
 
 
 @dataclass
@@ -57,6 +60,7 @@ class World:
     crust: list
     frames: dict = field(default_factory=dict)  # plate -> rotation from its own frame to the world
     names: dict = field(default_factory=dict)
+    parents: dict = field(default_factory=dict)  # plate made by a split -> the plate it came from
     time_myr: float = 0.
     ledger: list = field(default_factory=list)
     overriding_rule: object = staticmethod(lambda left, right: max(left, right))
@@ -74,6 +78,13 @@ class World:
 
     def step(self, rotations_per_myr: dict, dt: float = 1.) -> dict:
         """Advance by `dt` Myr; `rotations_per_myr` maps plate -> rotation vector (rad/Myr)."""
+        rotations_per_myr = dict(rotations_per_myr)
+        for plate in self.network.plates():
+            ancestor = plate
+            while ancestor not in rotations_per_myr and ancestor in self.parents:
+                ancestor = self.parents[ancestor]
+            # A plate made by a split moves with its parent until its own motion is given.
+            rotations_per_myr.setdefault(plate, rotations_per_myr.get(ancestor, np.zeros(3)))
         rotations = {p: np.asarray(v, float) * dt for p, v in rotations_per_myr.items()}
         for plate, vector in rotations.items():
             self.frames[plate] = sphere.rotation(vector) @ self.frame(plate)
@@ -104,9 +115,12 @@ class World:
                                           % (collision.first, collision.second)))
         else:
             raise ValueError('Plate outlines still cross after absorbing pinched plates.')
-        small = self._absorb_small()
-        if small:
-            events += small
+        # Cut necks first, so that a sliver cut off is absorbed in the same pass, before it moves.
+        changed = self._split_necks()
+        changed += self._absorb_small()
+        changed += self._absorb_inverted()
+        if changed:
+            events += changed
             repairs += self.network.repair()
         plates = self.network.plates()
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
@@ -177,6 +191,61 @@ class World:
         self.network.absorb(plate, into)
         self.frames.pop(plate, None)
         return dict(kind='plate_absorbed', plate=plate, into=into, area_km2=area, reason=reason)
+
+    def split(self, plate, neck) -> dict:
+        """Cut a plate across a neck; the far side becomes a new plate with the same frame.
+
+        The new plate starts with its parent's frame and motion, so its crust is the parent's crust
+        on that side, unmoved: nothing is created or destroyed.
+        """
+        _, first, point_a, second, point_b = neck
+        new = max(self.network.plates() + list(self.frames) + list(self.parents)) + 1
+        boundary = self.network.split_plate(plate, new, first, point_a, second, point_b)
+        self.frames[new] = self.frame(plate).copy()
+        self.parents[new] = plate
+        self.names[new] = '%s (split)' % self.names.get(plate, 'Plate %d' % plate)
+        region = self.network.polygon(new, self.frames[new])
+        moved = []
+        for piece in list(self.crust):
+            if piece.plate != plate:
+                continue
+            there = sphere.intersection(piece.shape, region)
+            if sphere.area_km2(there) <= 0.:
+                continue
+            here = sphere.difference(piece.shape, region)
+            piece.shape = here
+            moved.append(Crust(new, piece.kind, there, piece.born_myr))
+        self.crust = [c for c in self.crust if sphere.area_km2(c.shape) > 0.] + moved
+        return dict(kind='plate_split', plate=plate, new=new, boundary=boundary, neck_km=neck[0],
+                    area_km2=sphere.area_km2(self.network.polygon(new)))
+
+    def _split_necks(self) -> list:
+        events = []
+        for plate in list(self.network.plates()):
+            necks = self.network.necks(plate, NECK_KM)
+            if not necks:
+                continue
+            area = sphere.area_km2(self.network.polygon(plate))
+            if area < 4. * MINIMUM_PLATE_KM2:
+                continue
+            events.append(self.split(plate, necks[0]))
+        return events
+
+    def _absorb_inverted(self) -> list:
+        """Absorb a plate whose outline has turned inside out (degenerate), if there is one.
+
+        Plates then cover the sphere about twice; the inside-out plate is the one with about half
+        of the total. It is a sliver whose ring flipped, so it goes to a neighbour like a tiny plate.
+        """
+        events = []
+        for _ in range(3):
+            areas = {p: sphere.area_km2(self.network.polygon(p)) for p in self.network.plates()}
+            total = sum(areas.values())
+            if abs(total - sphere.SPHERE_KM2) < .5 * sphere.SPHERE_KM2:
+                break
+            plate = min(areas, key=lambda p: abs(areas[p] - .5 * total))
+            events.append(self.absorb(plate, reason='outline turned inside out (%.0f km2 of %.0f)' % (areas[plate], total)))
+        return events
 
     def _valid(self, plate) -> bool:
         try:

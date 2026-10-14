@@ -46,5 +46,32 @@ class AbsorptionTests(unittest.TestCase):
         self.assertLess(abs(entry['balance_error_km2']), 1e-3)
 
 
+class SplitTests(unittest.TestCase):
+    def test_a_fresh_world_has_no_necks(self):
+        world, _ = voronoi_world(count=6, seed=5)
+        for plate in world.network.plates():
+            self.assertEqual(world.network.necks(plate, 150.), [])
+
+    def test_cutting_a_plate_keeps_the_tiling_and_the_crust(self):
+        world, omegas = voronoi_world(count=6, seed=5, continents=2)
+        net = world.network
+        crust = sum(c.area_km2() for c in world.crust)
+        plate = max(net.plates(), key=lambda p: sphere.area_km2(net.polygon(p)))
+        mine = [i for i, s in net.sections.items() if plate in (s.left, s.right)]
+        a, b = next((a, b) for a in mine for b in mine if a < b and not (
+            {net.sections[a].start, net.sections[a].end} & {net.sections[b].start, net.sections[b].end}))
+        pa, pb = net.points(a)[len(net.points(a)) // 2], net.points(b)[len(net.points(b)) // 2]
+        whole = sphere.area_km2(net.polygon(plate))
+        event = world.split(plate, (float(sphere.arc_km(pa, pb)), a, pa, b, pb))
+        new = event['new']
+        self.assertAlmostEqual((sphere.area_km2(net.polygon(plate)) + sphere.area_km2(net.polygon(new))) / whole, 1., places=9)
+        self.assertAlmostEqual(sum(c.area_km2() for c in world.crust) / crust, 1., places=9)
+        np.testing.assert_array_equal(world.frame(new), world.frame(plate))
+        for _ in range(2):
+            entry = world.step(omegas, 1.)  # the new plate moves with its parent until told otherwise
+            self.assertLess(abs(entry['balance_error_km2']), 1e-3)
+            self.assertLess(entry['crust_vs_plate_error_km2'], 1e-3)
+
+
 if __name__ == '__main__':
     unittest.main()

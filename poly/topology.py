@@ -238,6 +238,106 @@ class Network:
             del self.junctions[junction]
         return self.join_alike()
 
+    def split_section(self, ident, point) -> int:
+        """Put a junction on a section at (the point of it nearest) `point`; returns the junction."""
+        s = self.sections[ident]
+        line = self.points(ident)
+        nearest = int(np.argmin(sphere.arc_km(line, point[None])))
+        if float(sphere.arc_km(line[nearest], point)) < 1.:
+            # On (or within a km of) an existing point: cut there, or use the junction it is.
+            if nearest == 0:
+                return s.start
+            if nearest == len(line) - 1:
+                return s.end
+            junction = self.add_junction(line[nearest])
+            end = s.end
+            first, second = line[1:nearest], line[nearest + 1:-1]
+            s.interior, s.end = np.array(first).reshape(-1, 3), junction
+            new = self.add_section(junction, end, np.array(second).reshape(-1, 3), s.left, s.right, s.kind, s.overriding)
+            self.sections[new].closed_km = s.closed_km
+            return junction
+        k = min(range(len(line) - 1), key=lambda i: _segment_km(point, line[i], line[i + 1]))
+        a, b = line[k], line[k + 1]
+        pole = np.cross(a, b)
+        norm = float(np.linalg.norm(pole))
+        foot = sphere.unit(point - (point @ (pole / norm)) * (pole / norm)) if norm > 1e-15 else a
+        if not _on_arc(foot, a, b):
+            foot = a if float(sphere.arc_km(point, a)) < float(sphere.arc_km(point, b)) else b
+        junction = self.add_junction(foot)
+        first, second = line[1:k + 1], line[k + 1:-1]
+        end = s.end
+        s.interior, s.end = np.array(first).reshape(-1, 3), junction
+        new = self.add_section(junction, end, np.array(second).reshape(-1, 3), s.left, s.right, s.kind, s.overriding)
+        self.sections[new].closed_km = s.closed_km
+        return junction
+
+    def necks(self, plate, within_km, apart_km=1000., ratio=5.) -> list:
+        """Places where a plate's outline comes back within `within_km` of itself: necks.
+
+        Two points of the outline count only if, going round the outline, they are more than
+        `apart_km` and more than `ratio` times their distance apart; points near each other along
+        the outline (either side of a junction, round a bend) are not a neck. Returns
+        (km, section, point, section, point), nearest first.
+        """
+        found = []
+        for ring, mapping in self.rings(plate, with_map=True):
+            if len(ring) < 4:
+                continue
+            step = sphere.arc_km(ring, np.roll(ring, -1, axis=0))
+            along = np.r_[0., np.cumsum(step)[:-1]]
+            total = float(step.sum())
+            distance = sphere.RADIUS_KM * np.arccos(np.clip(ring @ ring.T, -1., 1.))
+            gap = np.abs(along[:, None] - along[None, :])
+            gap = np.minimum(gap, total - gap)
+            ok = (gap > apart_km) & (gap > ratio * distance) & (distance < within_km)
+            if not ok.any():
+                continue
+            masked = np.where(ok, distance, np.inf)
+            i, j = np.unravel_index(int(np.argmin(masked)), masked.shape)
+            found.append((float(distance[i, j]), mapping[i][0], ring[i], mapping[j][0], ring[j]))
+        return sorted(found, key=lambda f: f[0])
+
+    def split_plate(self, plate, new, first, point_a, second, point_b) -> int:
+        """Cut `plate` from a point on one of its boundaries to a point on another.
+
+        The new boundary runs from the first point to the second with `plate` on its left; the
+        part of the plate on its right becomes `new`. Returns the new boundary's identity.
+        """
+        start = self.split_section(first, point_a)
+        # The second section may have been the first one, now split in two: find the piece that
+        # holds the second point.
+        candidates = [i for i, s in self.sections.items() if plate in (s.left, s.right)]
+        second = min(candidates, key=lambda i: min(_segment_km(point_b, q, r) for q, r in
+                                                    zip(self.points(i)[:-1], self.points(i)[1:])))
+        end = self.split_section(second, point_b)
+        # Walk the plate's boundary (plate on the left) from the first cut to the second: those
+        # boundaries face the new boundary's right side and go to `new`.
+        walks = {}
+        for ident, s in self.sections.items():
+            if s.left == plate:
+                walks.setdefault(s.start, []).append((ident, s.end))
+            elif s.right == plate:
+                walks.setdefault(s.end, []).append((ident, s.start))
+        chain, here, seen = [], start, set()
+        while here != end:
+            options = [w for w in walks.get(here, []) if w[0] not in seen]
+            if not options:
+                raise ValueError('Cannot walk plate %d from the first cut to the second.' % plate)
+            ident, here = options[0]
+            seen.add(ident)
+            chain.append(ident)
+        for ident in chain:
+            s = self.sections[ident]
+            if s.left == plate:
+                s.left = new
+            if s.right == plate:
+                s.right = new
+            if s.overriding == plate:
+                s.overriding = new
+        from poly.build import densify
+        line = densify(np.array([self.junctions[start], self.junctions[end]]), 100.)
+        return self.add_section(start, end, line[1:-1], plate, new, 'transform')
+
     def shared_km(self, a, b) -> float:
         return sum(self.length_km(i) for i, s in self.sections.items() if {s.left, s.right} == {a, b})
 
