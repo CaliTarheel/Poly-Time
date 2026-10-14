@@ -48,6 +48,20 @@ def _partition(poly,planes):
 def _planes(blocker,basis):
     return [tuple(_dot(_cross(a,b),p) for p in basis) for a,b in zip(blocker,blocker[1:]+blocker[:1])]
 
+
+def _excludes_reference(planes):
+    """Exact empty-area certificate on the uncut barycentric triangle.
+
+    A plane's three stored values are its values at (0,0), (1,0), and
+    (0,1). Affinity makes the interior values convex combinations of them.
+    If all are nonpositive and at least one is negative, the positive
+    half-plane reaches at most an edge or vertex: it cannot enclose area.
+    Check every plane before constructing potentially large rational cut
+    vertices. An identically zero plane imposes no constraint.
+    """
+    return any(all(value <= 0 for value in plane) and any(value < 0 for value in plane)
+               for plane in planes)
+
 def _box(triangle, *, rays=None):
     # For any unit normalized positive ray combination q, c.q>=d/L>0.
     # Thus |q-c|²<=1+|c|²-2d/L. The squared certificate below is exact.
@@ -113,11 +127,21 @@ class _Index:
     def exact(self,i):
         if i not in self.rational:self.rational[i]=_rays(self.triangles[i])
         return self.rational[i]
-    def planes(self,i,basis):
+    def _plane_normals(self,i):
         if i not in self.normals:
             blocker=self.exact(i)
             self.normals[i]=tuple(_cross(a,b) for a,b in zip(blocker,blocker[1:]+blocker[:1]))
-        return [tuple(_dot(normal,p) for p in basis) for normal in self.normals[i]]
+        return self.normals[i]
+    def planes(self,i,basis):
+        return [tuple(_dot(normal,p) for p in basis) for normal in self._plane_normals(i)]
+    def reference_planes(self,i,basis):
+        """Preserve plane order, stopping only on an exact empty-area proof."""
+        result=[]
+        for normal in self._plane_normals(i):
+            plane=tuple(_dot(normal,p) for p in basis)
+            if _excludes_reference((plane,)):return None
+            result.append(plane)
+        return result
 
 def _index(context):
     cache=context.setdefault('_exact_material_cache',{})
@@ -158,7 +182,9 @@ def obstruction(triangles,contexts,old=None):
             if active is not None:selected=selected[active[selected]]
             if excluded is not None:selected=selected[~np.isin(selected,excluded)]
             for face in selected:
-                inside,_=_partition(reference,index.planes(int(face),basis))
+                planes=index.reference_planes(int(face),basis)
+                if planes is None:continue
+                inside,_=_partition(reference,planes)
                 if not inside:continue
                 parts=[inside]
                 for planes in old_planes:
