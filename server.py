@@ -93,7 +93,7 @@ OPTIONAL_GRID_DTYPES = {"domain": np.int32, "trench": np.int32,
 DTYPES = {"elevation": np.float32, "plate": np.int32, "crust": np.uint8,
           "age": np.float32, "boundary": np.uint8}
 BOUNDARIES = {0: "none", 1: "spreading ridge", 2: "subduction", 3: "transform",
-              4: "continental collision", 5: "continental rift"}
+              4: "continental collision", 5: "continental rift", 6: "converging, no trench"}
 
 
 def native(value):

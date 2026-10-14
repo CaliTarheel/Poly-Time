@@ -25,6 +25,22 @@ The boundary reconstruction can retain a raw mesh contact when a continuous boun
 
 Names also need interpretation. In this state, **Ocean Basin 17** was assigned to an already disconnected oceanic region. Its recorded isolation event did not demonstrate newly opened seafloor or establish that it would evolve like Earth's Pacific Plate.
 
+## New trenches form by a rule with uncalibrated thresholds
+
+A trench is either inherited from the starting world or born by induced initiation on a fault between two plates. The first initiation policy took the slowest piece of a whole connected fault as its convergence, zeroed its clock and its shortening at any lapse, and required accumulated shear slip of every fault. In the Asein35 run it bore one trench in 287 Myr while several thousand kilometres of old ocean closed without one.
+
+Policy version 2 is opt-in (`effective_subduction.initiation.version = 2` for a new world, `upgrade_local` for a saved one). It keeps the history on each stretch of a fault, so a boundary that closes along part of its length can qualify there; a lapse of up to 5 Myr pauses a stretch rather than starting it again; and 200 km of shortening qualifies without shear. Its thresholds (2 km/Myr of guaranteed convergence, 10 Myr of loading, 100 km of shortening with 100 km of shear slip or 200 km alone, 300 km of length, incoming ocean older than 20 Myr and at least 80% wet) are starting values. They have not been calibrated against observed initiation or tested across seeds. Each qualifying stretch is born as its own trench record, so neighbouring stretches that qualify in different steps remain separate trenches, and a qualifying stretch shorter than the minimum length waits for its neighbours.
+
+An induced trench keeps the finite trace it was born with, carried with its overriding plate; it does not lengthen along strike. Under version 2 a boundary contact carries the trench's pull by the share of its length that lies on that trace. The megathrust resistance, the intake of ocean floor and the map label are still those of a whole contact, so at the ends of a trace they cover somewhat more boundary than the pull does.
+
+A trench that ends while its plates still converge is not replaced: there is no step-back behind an arrived block and no reversal of polarity.
+
+## Ocean that closes without a trench leaves no trace
+
+Where two plates close across ocean and no trench has formed, the force balance charges them the integrated strength of the lithosphere for shortening it, but the surface model makes nothing of that shortening. The overlapping ocean support is removed when cell supports are normalised; the floor is neither thickened nor raised, and nothing is recorded as subducted. In the Asein35 run at 287 Myr this was the state of 7,475 km of boundary closing at a mean of 5 km/Myr.
+
+Boundary label version 2 is opt-in (`boundary_labels.upgrade(s, 2)`). It draws such boundaries as "converging, no trench" where version 1 drew a transform, and counts them separately in the length statistics. It changes the map, the statistics and the exports only.
+
 ## Collision columns and relief need further validation
 
 The retained stack supports overlapping material and associated buoyancy accounting. Large combined stack thicknesses should not be read as the thickness of one intact crustal sheet. The current approximation does not resolve the full vertical deformation, pressure-temperature evolution, or gravitational relaxation of a deep collision stack.

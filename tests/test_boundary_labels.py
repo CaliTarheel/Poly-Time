@@ -46,7 +46,7 @@ class BoundaryLabelTests(unittest.TestCase):
         s = world()
         s.boundary_label_version = 0
         np.testing.assert_array_equal(boundary_labels.codes(s), s.bcode)
-        for bad in (True, 2, 'yes'):
+        for bad in (True, 3, 'yes'):
             s.boundary_label_version = bad
             with self.assertRaises(ValueError):
                 boundary_labels.codes(s)
@@ -117,6 +117,86 @@ class BoundaryLabelTests(unittest.TestCase):
         self.assertEqual(report['by_label']['collision']['from_kinematic'], {'3': 1})
         s.boundary_label_version = 0
         self.assertEqual(boundary_labels.disagreement(s)['relabelled_contacts'], 0)
+
+    def test_version_two_names_closing_that_no_trench_or_collision_takes_up(self):
+        # Contact 4: ocean on both sides, no downgoing plate declared. Sliding with a little
+        # closing is a transform; closing the gate calls convergent is not.
+        s = world()
+        s.normal_speed[4] = -1.
+        for selected, expected in ((1, boundary_labels.TRANSFORM), (2, boundary_labels.TRANSFORM)):
+            s.boundary_label_version = selected
+            self.assertEqual(boundary_labels.codes(s)[4], expected)
+        s.normal_speed[4] = -6.
+        s.bcode[4] = 2
+        for selected, expected in ((1, boundary_labels.TRANSFORM), (2, boundary_labels.CONVERGING)):
+            s.boundary_label_version = selected
+            display = boundary_labels.codes(s)
+            self.assertEqual(display[4], expected)
+            # Nothing else moves: a running trench, both collisions, the ridge, the dead edge.
+            self.assertEqual(list(display[[0, 1, 2, 3, 5]]),
+                             [boundary_labels.SUBDUCTION, boundary_labels.COLLISION,
+                              boundary_labels.COLLISION, boundary_labels.RIDGE, boundary_labels.NONE])
+        self.assertEqual(list(s.bcode), [3, 4, 3, 1, 2, 0])
+        # A trench that is declared and fed is subduction, not this.
+        s.down[4] = 4
+        self.assertEqual(boundary_labels.codes(s)[4], boundary_labels.SUBDUCTION)
+        # The gate's collision with no continental material found on either side.
+        s.down[4] = -1
+        s.bcode[4] = 4
+        self.assertEqual(boundary_labels.codes(s)[4], boundary_labels.CONVERGING)
+
+    def test_version_two_counts_and_reports_the_new_label(self):
+        s = world()
+        s.normal_speed[4] = -6.
+        s.bcode[4] = 2
+        self.assertNotIn('converging', boundary_labels.lengths(s))
+        self.assertEqual(boundary_labels.lengths(s)['transform'], 100.)
+        s.boundary_label_version = 2
+        lengths = boundary_labels.lengths(s)
+        self.assertEqual((lengths['converging'], lengths['transform']), (100., 0.))
+        self.assertEqual(sum(lengths.values()), float(s.bl.sum()))
+        report = boundary_labels.disagreement(s)
+        self.assertEqual(report['version'], 2)
+        self.assertEqual(report['by_label']['converging'], dict(contacts=1, length_km=100., from_kinematic={'2': 1}))
+
+    def test_upgrade_to_version_two_is_recorded_and_never_stepped_back(self):
+        s = world()
+        s.boundary_label_version = 0
+        first = boundary_labels.upgrade(s)
+        self.assertEqual((boundary_labels.version(s), first['version']), (1, 1))
+        s.t = 300.
+        second = boundary_labels.upgrade(s, boundary_labels.CONVERGING_VERSION)
+        self.assertEqual((boundary_labels.version(s), second['version'], second['time_myr']), (2, 2, 300.))
+        self.assertEqual(second['predecessor'], first)
+        self.assertEqual((second['physical_state_changed'], second['kinematic_code_retained']), (False, True))
+        self.assertEqual(boundary_labels.upgrade(s, 2), second)      # idempotent
+        self.assertEqual(boundary_labels.upgrade(s), second)         # asking for less changes nothing
+        self.assertEqual(boundary_labels.version(s), 2)
+        fresh = world()
+        fresh.boundary_label_version = 0
+        self.assertNotIn('predecessor', boundary_labels.upgrade(fresh, 2))
+        for bad in (0, 3, True):
+            with self.assertRaises(ValueError):
+                boundary_labels.upgrade(world(), bad)
+
+    def test_a_cell_shows_the_highest_ranked_label_among_its_contacts(self):
+        # Three contacts around cell 0, and one alone on cells 4 and 5.
+        s = SimpleNamespace(ba=np.array([0, 0, 0, 4]), bb=np.array([1, 2, 3, 5]))
+        show = lambda *display: list(boundary_labels.cells(s, np.array(display, np.uint8), 6))
+        L = boundary_labels
+        self.assertEqual(show(L.TRANSFORM, L.CONVERGING, L.RIDGE, L.CONVERGING),
+                         [L.CONVERGING, L.TRANSFORM, L.CONVERGING, L.RIDGE, L.CONVERGING, L.CONVERGING])
+        self.assertEqual(show(L.SUBDUCTION, L.CONVERGING, L.NONE, L.NONE)[0], L.SUBDUCTION)
+        self.assertEqual(show(L.COLLISION, L.CONVERGING, L.RIFT, L.NONE)[0], L.COLLISION)
+        # The first six labels rank exactly as they did before the seventh existed.
+        priority, ranked = np.array([0, 2, 4, 1, 6, 5], np.uint8), np.array([0, 3, 1, 0, 2, 5, 4], np.uint8)
+        rng = np.random.default_rng(7)
+        wide = SimpleNamespace(ba=rng.integers(0, 40, 300), bb=rng.integers(0, 40, 300))
+        display = rng.integers(0, 6, 300).astype(np.uint8)
+        ranks = np.zeros(40, np.uint8)
+        np.maximum.at(ranks, wide.ba, priority[display])
+        np.maximum.at(ranks, wide.bb, priority[display])
+        np.testing.assert_array_equal(boundary_labels.cells(wide, display, 40), ranked[ranks])
 
     def test_zero_length_contacts_carry_no_label(self):
         s = world()

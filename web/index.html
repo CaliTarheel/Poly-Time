@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101a21">
   <title>Deep Time Lite · Tectonic laboratory</title>
-  <link rel="stylesheet" href="/style.css?v=motion-visibility-1">
+  <link rel="stylesheet" href="/style.css?v=converging-1">
 </head>
 <body>
   <header class="app-header">
@@ -199,7 +199,7 @@
       <p id="slab-window-note" class="hint slab-window-note" role="status" hidden></p>
       <div class="layer-tabs" role="group" aria-label="Large igneous province layers"><button id="layer-lip" data-layer="lip" aria-pressed="false" hidden disabled>LIP provinces</button><button id="layer-lipheat" data-layer="lipheat" aria-pressed="false" hidden disabled>LIP thermal support</button><label><input id="show-lip" type="checkbox" checked> Active LIP sources</label></div>
       <details id="lip-history" hidden><summary>Large igneous province history</summary><p class="hint">Province colours show cumulative intrusive and extrusive construction carried by the crust, not the amount of uneroded lava remaining. Thermal support fades separately. Source rings stay at their authored locations while the deposits move.</p><div id="lip-history-rows" class="hint"></div></details>
-      <div class="legend-row"><div id="layer-legend" class="layer-legend"></div><div class="boundary-legend" id="boundary-legend"><span><i class="ridge"></i>Ridge</span><span title="Teeth are on the overriding plate"><i class="subduction"></i>Subduction</span><span><i class="transform"></i>Transform</span><span><i class="collision"></i>Collision</span><span><i class="rift"></i>Rift</span></div></div>
+      <div class="legend-row"><div id="layer-legend" class="layer-legend"></div><div class="boundary-legend" id="boundary-legend"><span><i class="ridge"></i>Ridge</span><span title="Teeth are on the overriding plate"><i class="subduction"></i>Subduction</span><span><i class="transform"></i>Transform</span><span title="Plates closing where no trench has formed and nothing is colliding"><i class="converging"></i>Converging, no trench</span><span><i class="collision"></i>Collision</span><span><i class="rift"></i>Rift</span></div></div>
       <p id="subduction-note" class="hint" hidden></p>
       <p id="recorded-physics-note" class="hint" role="status"></p>
 
@@ -314,8 +314,8 @@
   <dialog id="about-dialog"><button class="dialog-close icon-button" id="close-about" aria-label="Close model notes">×</button><span class="eyebrow">ABOUT THE EXPERIMENT</span><h2>A useful approximation<br>of a restless planet.</h2><p>Deep Time evolves an Earth-scale world using simplified rules for plate motion, rifting, oceanic crust creation and aging, subduction, island arcs, terrane accretion, continental collision, uplift, and erosion.</p><p>The input map marks oceanic crust, continental crust, and stronger cratonic cores. A random seed makes an experiment repeatable. One Myr is one million years.</p><p>This is a procedural, process-based tectonic model, not a solution of mantle convection or a reconstruction of real Earth. Its spherical mesh and rule choices set the detail and plausibility of the result. Review-map resolution changes the projection; tectonic mesh detail controls the simulation. A billion years is a scenario to explore.</p><p>Height maps use metres relative to the model's sea level. For 16-bit PNGs, elevation in metres equals the pixel value minus 12,000. The full experiment export includes the scientific grids, configuration, event history, and elevation encoding information.</p><div class="note-callout">Start with the Pangaea-like world, or paint an arbitrary distribution of continents and cratons. Run, scrub through time, and compare how each process leaves its mark.</div></dialog>
   <dialog id="terrain-dialog" class="terrain-dialog" aria-labelledby="terrain-view-title"><button class="dialog-close icon-button" id="close-terrain" aria-label="Close terrain viewer">×</button><div class="terrain-view-heading"><span class="eyebrow">DETAILED TERRAIN / SAVED EPOCH</span><h2 id="terrain-view-title">Your world in detail</h2><p id="terrain-view-source"></p></div><div class="terrain-view-toolbar"><div><button class="secondary-button" id="terrain-zoom-out" aria-label="Zoom out of terrain">−</button><output id="terrain-zoom-label">Fit</output><button class="secondary-button" id="terrain-zoom-in" aria-label="Zoom into terrain">+</button><button class="secondary-button" id="terrain-fit">Fit world</button><button class="secondary-button" id="terrain-native">1:1 pixels</button></div><span>Scroll to zoom · drag to pan · click to sample elevation</span></div><div class="terrain-viewport"><canvas id="terrain-map" role="img" tabindex="0" aria-label="Detailed terrain. Scroll or use plus and minus to zoom, drag or use arrow keys to pan, click to sample elevation."></canvas><div id="terrain-view-loading" class="terrain-view-loading" role="status">Loading terrain preview…</div></div><div class="terrain-view-footer"><span id="terrain-sample">Coordinates and elevation appear here when you click the map.</span><span id="terrain-tile-status"></span></div><p class="terrain-view-note">This surface belongs to its saved tectonic or solver epoch. Review the tectonic timeline separately for plate boundaries and material history.</p></dialog>
   <script src="/subduction.js?v=2" defer></script>
-  <script src="/native_boundaries.js?v=2" defer></script>
+  <script src="/native_boundaries.js?v=3" defer></script>
   <script src="/globe.js?v=1" defer></script>
-  <script src="/app.js?v=arc-points-1" defer></script>
+  <script src="/app.js?v=converging-1" defer></script>
 </body>
 </html>

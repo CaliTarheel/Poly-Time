@@ -69,6 +69,16 @@ class NativeSpreadingSchemaTests(unittest.TestCase):
             with self.subTest(value=value),self.assertRaises(ValueError):
                 native_spreading.validate_frame(f)
 
+    def test_the_converging_label_is_a_valid_segment_code_only_under_label_version_two(self):
+        f=deepcopy(self.frame)
+        row=next(r for r in f['boundary_segments'] if r['code'] not in (1,5))
+        row['code']=6
+        with self.assertRaisesRegex(ValueError,'classification'):native_spreading.validate_frame(f)
+        f['boundary_label_version']=2
+        native_spreading.validate_frame(f)
+        row['code']=7
+        with self.assertRaisesRegex(ValueError,'classification'):native_spreading.validate_frame(f)
+
     def test_local_policy_markers_require_spreading_version_even_without_segments(self):
         f=deepcopy(self.frame);f.pop('native_spreading_version');f['boundary_segments']=[]
         with self.assertRaises(ValueError):native_frame_sampling.prepare(f)

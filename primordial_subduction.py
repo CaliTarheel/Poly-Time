@@ -319,11 +319,7 @@ def annotate_snapshot(s, frame, control):
             if valid[parent] and row['code'] not in (1, 5):
                 row.update(code=2, mechanism='inherited_subduction',
                            normal_speed_km_myr=float(s.normal_speed[parent]))
-        ranks = np.zeros(s.n, np.uint8)
-        priority = np.array([0, 2, 4, 1, 6, 5], np.uint8)
-        np.maximum.at(ranks, s.ba, priority[codes])
-        np.maximum.at(ranks, s.bb, priority[codes])
-        frame['boundary'] = np.array([0, 3, 1, 0, 2, 5, 4], np.uint8)[ranks][control]
+        frame['boundary'] = boundary_labels.cells(s, codes, s.n)[control]
     frame['primordial_subduction_review'] = dict(
         declared_initial_mechanism=s.t == 0., active_mechanism_edges=int(valid.sum()),
         classification=('Inherited initial interfaces at t=0; mechanism labels thereafter.' if labels else
