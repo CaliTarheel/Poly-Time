@@ -11,7 +11,10 @@ import viscous_sheet as sheet
 from numerical_accuracy import NumericalPolicy,allowance
 from material_surface import spherical_face_areas
 
+# A reviewed capture of the contact problem at 105 Myr. tmp/ is git-ignored and the capture was
+# not published with the source, so the tests that load it skip where it is absent.
 CAPTURE=Path(__file__).resolve().parents[1]/'tmp/contact105-original-capture-reviewed'
+NO_CAPTURE='The contact-105 capture is not part of the published source.'
 
 def captured():
     with np.load(CAPTURE/'contact-input.npz',allow_pickle=False) as z:
@@ -19,6 +22,7 @@ def captured():
 
 def policy(A,lo,hi):return NumericalPolicy(A,allowance(A),np.zeros_like(A),A,lo,hi,reference_identity='independent_local_fixture')
 
+@unittest.skipUnless((CAPTURE/'contact-input.npz').is_file(),NO_CAPTURE)
 class JointContactTests(unittest.TestCase):
     def test_captured_joint_area_quality_stationarity_and_original_guards(self):
         args=captured();p,f,A,v,rigid,lo,hi=args;before=[x.copy() for x in args]

@@ -37,8 +37,14 @@ check('saved polarity places teeth on the overriding side',()=>{
   }
 });
 check('non-subduction and missing polarity never create teeth',()=>{
-  for(const extra of [{code:1},{code:3},{code:4},{code:5},{down:-1}])
+  for(const extra of [{code:1},{code:3},{code:4},{code:5},{code:6},{down:-1}])
     assert.equal(triangles(data([0,-30],[0,30],extra),{width:720,height:360}).length,0);
+});
+check('a closing boundary without a trench is drawn under its own code',()=>{
+  const lines=paths(data([12,30],[33,48],{code:6,down:-1}));
+  assert.equal(lines.length,1);
+  assert.equal(lines[0].code,6);
+  assert.deepEqual(paths(data([12,30],[33,48],{code:7})),[]);
 });
 check('invalid and empty history geometry is harmless',()=>{
   assert.deepEqual(paths({boundary_segments:[]}),[]);

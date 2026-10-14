@@ -36,8 +36,12 @@ def _stack(level=1, angle=.11):
 
 def _same(first, second):
     (regions_a, areas_a, error_a), (regions_b, areas_b, error_b) = first, second
+    def same_polygon(a,b):
+        if isinstance(a,burial_depth.ExactPolygon) or isinstance(b,burial_depth.ExactPolygon):
+            return type(a) is type(b) and a.homogeneous==b.homogeneous
+        return a.dtype==b.dtype and a.shape==b.shape and a.tobytes()==b.tobytes()
     return (len(regions_a) == len(regions_b)
-            and all(pa.dtype == pb.dtype and pa.shape == pb.shape and pa.tobytes() == pb.tobytes() and ca == cb
+            and all(same_polygon(pa,pb) and ca == cb
                     for (pa, ca), (pb, cb) in zip(regions_a, regions_b))
             and areas_a.dtype == areas_b.dtype and areas_a.tobytes() == areas_b.tobytes()
             and np.float64(error_a).tobytes() == np.float64(error_b).tobytes())

@@ -6,6 +6,9 @@ overlaps remain separate intersections: choosing the exposed sheet is the
 engine's policy, not an implicit area normalization in this geometry helper.
 """
 from __future__ import annotations
+from decimal import Decimal, localcontext
+from fractions import Fraction
+from math import atan2, fsum
 import numpy as np
 
 from mesh_geometry import RADIUS_KM, _triangles, build_locator
@@ -97,6 +100,71 @@ def _clip_planes(subject,planes,clipper=None,*,edge_pairs=None):
     return polygon
 
 
+def _precise_intersection_area(subject, clipper, radius_km):
+    """Measure the original represented rays without rounding new vertices.
+
+    Halfspace decisions and crossings are exact rationals. Normalize only for
+    the solid-angle integral, at 80 digits; no cached area or closure target
+    enters the calculation. This is the same physical great-circle geometry
+    as the vectorized path, with its coordinate-return roundoff removed.
+    """
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+    def dot(a, b):
+        return sum(x*y for x, y in zip(a, b))
+
+    polygon = [tuple(Fraction(float(value)) for value in point) for point in subject]
+    triangle = [tuple(Fraction(float(value)) for value in point) for point in clipper]
+    for a, b in zip(triangle, triangle[1:]+triangle[:1]):
+        if len(polygon) < 3:
+            return 0.
+        plane = cross(a, b)
+        distances = [dot(plane, point) for point in polygon]
+        inside = [distance >= 0 for distance in distances]
+        output = []
+        for index, point in enumerate(polygon):
+            previous = (index-1) % len(polygon)
+            if inside[index] != inside[previous]:
+                before, after = distances[previous], distances[index]
+                output.append(tuple((x*before-y*after)/(before-after)
+                                    for x, y in zip(point, polygon[previous])))
+            if inside[index]:
+                output.append(point)
+        polygon = [point for index, point in enumerate(output) if point != output[index-1]]
+    if len(polygon) < 3:
+        return 0.
+    with localcontext() as context:
+        context.prec = 80
+        points = []
+        for point in polygon:
+            ray = [Decimal(value.numerator)/Decimal(value.denominator) for value in point]
+            length = dot(ray, ray).sqrt()
+            points.append([value/length for value in ray])
+        a = points[0]
+        angles = []
+        for index, (b, c) in enumerate(zip(points[1:-1], points[2:]), 1):
+            winding = dot(polygon[0], cross(polygon[index], polygon[index+1]))
+            if winding == 0:
+                continue
+            numerator = dot(a, cross(b, c))
+            denominator = 1+dot(a, b)+dot(b, c)+dot(c, a)
+            if denominator <= 0 or winding < 0 or numerator <= 0:
+                raise ValueError('Exact intersection needs a positively wound minor convex polygon.')
+            angles.append(2*atan2(float(numerator), float(denominator)))
+        return fsum(angles)*float(radius_km)**2
+
+
+def _triangle_area_condition(triangles):
+    """Filter coordinate rounding relative to each source solid angle."""
+    a, b, c = np.moveaxis(triangles, 1, 0)
+    numerator = np.abs(np.einsum('ni,ni->n', a, np.cross(b-a, c-a)))
+    denominator = 1+np.einsum('ni,ni->n', b+c, a)+np.einsum('ni,ni->n', b, c)
+    angle = 2*np.arctan2(numerator, denominator)
+    perimeter = np.linalg.norm(triangles-np.roll(triangles, 1, axis=1), axis=2).sum(axis=1)
+    return 32*np.finfo(float).eps*perimeter > 2e-10*angle
+
+
 def _intersection_areas(subjects,clippers,radius_km):
     """Vectorized paired triangle clipping with a bounded polygon buffer.
 
@@ -110,6 +178,7 @@ def _intersection_areas(subjects,clippers,radius_km):
     polygon=np.zeros((count,capacity,3))
     polygon[:,:3]=subjects
     sizes=np.full(count,3,int)
+    cut=np.zeros(count,bool)
     rows=np.arange(count)[:,None]
     slots=np.arange(capacity)[None,:]
     for k in range(3):
@@ -121,6 +190,7 @@ def _intersection_areas(subjects,clippers,radius_km):
         before=polygon[rows,previous]
         before_distance=distance[rows,previous]
         crossing=(inside!=inside[rows,previous])&valid
+        cut |= np.any(crossing,axis=1)
         fraction=np.divide(before_distance,before_distance-distance,
                            out=np.zeros_like(distance),where=before_distance!=distance)
         fraction=np.clip(fraction,0.,1.)
@@ -149,7 +219,20 @@ def _intersection_areas(subjects,clippers,radius_km):
     numerator=np.abs(np.einsum('ni,nvi->nv',a,np.cross(b-a[:,None],c-a[:,None])))
     denominator=1+np.einsum('nvi,ni->nv',b+c,a)+np.einsum('nvi,nvi->nv',b,c)
     valid=np.arange(capacity-2)[None,:]<sizes[:,None]-2
-    return np.sum(np.where(valid,2*np.arctan2(numerator,denominator),0.),axis=1)*radius_km**2
+    angle=np.sum(np.where(valid,2*np.arctan2(numerator,denominator),0.),axis=1)
+    areas=angle*radius_km**2
+    # Moving a returned unit coordinate by roundoff sweeps an area proportional
+    # to polygon perimeter. Thin source faces and thin intersections amplify
+    # that error even when every orientation predicate is confidently positive.
+    # Refine the measurement, not the geometry or any acceptance tolerance.
+    previous=(slots-1)%np.maximum(sizes[:,None],1)
+    length=np.linalg.norm(polygon-polygon[rows,previous],axis=2)
+    perimeter=np.sum(np.where(slots<sizes[:,None],length,0.),axis=1)
+    sensitive=(angle>0.) & (32*np.finfo(float).eps*perimeter > 2e-10*angle)
+    sensitive |= cut & (_triangle_area_condition(subjects)|_triangle_area_condition(clippers))
+    for index in np.flatnonzero(sensitive):
+        areas[index]=_precise_intersection_area(subjects[index],clippers[index],radius_km)
+    return areas
 
 
 def _candidates(triangle,centre,chord_radius,locator):

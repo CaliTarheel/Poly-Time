@@ -59,6 +59,7 @@ with coefficient CONTINENTAL_SLAB_PULL of zero.
 from __future__ import annotations
 
 from copy import copy, deepcopy
+import math
 import numpy as np
 
 import crustal_structure as columns
@@ -380,6 +381,66 @@ def trace_values(s, parcel_values):
     return values[order[at]].copy()
 
 
+def ordinary_loss_diagnostics(state, eligible_km, dt, *, area_km2, attribution=None):
+    """Observe the ordinary sink's next transaction without changing its inputs.
+
+    This reports the existing face-mean law, not a resolved spatial depletion
+    model. Volumes are physical km3. Limiter losses are disjoint: inventory is
+    applied first, then the residual floor to the inventory-admitted request.
+    Thus the two blocked volumes are not independent counterfactual losses.
+    Exact partial-cover classification needs the union footprint already found
+    by burial integration; summed pair areas cannot supply it for triple stacks.
+    """
+    thickness = np.asarray(state['thickness_km'], float)
+    eligible = np.asarray(eligible_km, float)
+    area = np.asarray(area_km2, float)
+    if (thickness.ndim != 1 or eligible.shape != thickness.shape or area.shape != thickness.shape
+            or not np.isfinite(thickness).all() or np.any(thickness <= 0)
+            or not np.isfinite(eligible).all() or np.any(eligible < 0)
+            or not np.isfinite(area).all() or np.any(area <= 0)
+            or not np.isfinite(dt) or dt < 0):
+        raise ValueError('Ordinary foundering diagnostics need finite aligned nonnegative inputs.')
+    foundered = np.asarray(state[COLUMN_FIELD], float)/1000.
+    cap = np.maximum(RETURNED_FRACTION*thickness-(1.-RETURNED_FRACTION)*foundered, 0.)
+    inventory_present = crust_inventory.present(state)
+    if inventory_present:
+        cap = np.asarray(state[crust_inventory.REMAINING], float)/state['area_factor']
+    requested = eligible*(-np.expm1(-dt/FOUNDERING_TAU_MYR))
+    inventory_admitted = np.minimum(requested, cap)
+    floor_capacity = np.maximum(thickness-RESIDUAL_FLOOR_KM, 0.)
+    admitted = np.minimum(inventory_admitted, floor_capacity)
+    inventory_blocked = requested-inventory_admitted
+    floor_blocked = inventory_admitted-admitted
+    total = lambda values: float(area@values)
+    report = dict(version=1, column_assignment='uniform whole-face thickness decrement',
+        spatial_depletion_resolved=False, limiter_attribution_order='inventory_then_residual_floor',
+        removable_volume_inventory=inventory_present, eligible_km3=total(eligible),
+        requested_loss_km3=total(requested), admitted_loss_km3=total(admitted),
+        inventory_blocked_requested_loss_km3=total(inventory_blocked),
+        residual_floor_blocked_requested_loss_km3=total(floor_blocked),
+        inventory_limited_faces=int(np.count_nonzero(inventory_blocked > 0)),
+        residual_floor_limited_faces=int(np.count_nonzero(floor_blocked > 0)),
+        eligible_faces_at_residual_floor=int(np.count_nonzero((eligible > 0)&(floor_capacity == 0))),
+        exact_partial_cover_available=False)
+    union = attribution.get('covered_union_area_km2') if isinstance(attribution, dict) else None
+    if union is not None:
+        union = np.asarray(union, float)
+        tolerance = 2e-10
+        if (union.shape != area.shape or not np.isfinite(union).all()
+                or np.any(union < -tolerance*area) or np.any(union > (1.+tolerance)*area)):
+            raise ValueError('Invalid exact covered-union footprint for foundering diagnostics.')
+        fraction = np.clip(union/area, 0., 1.)
+        partial = (fraction > tolerance)&(fraction < 1.-tolerance)
+        report.update(exact_partial_cover_available=True,
+            partial_cover_fraction_tolerance=tolerance,
+            partially_covered_faces=int(np.count_nonzero(partial)),
+            eligible_on_partially_covered_faces_km3=total(np.where(partial, eligible, 0.)),
+            removed_on_partially_covered_faces_km3=total(np.where(partial, admitted, 0.)),
+            uniform_removal_assigned_to_uncovered_area_km3=total(
+                np.where(partial, (1.-fraction)*admitted, 0.)))
+    return report
+
+
 def apply(state, eligible_km, dt):
     """Founder eligible crust from one column set. Returns (removed_km, lowering_m).
 
@@ -431,25 +492,74 @@ def record(s, removed_km, attribution=None):
     no suture -- an exposed column's own root. All three sum to the total.
     """
     area = np.asarray(s.material_surface['area_km2'], float)
-    volume = area*np.asarray(removed_km, float)
+    removed = np.asarray(removed_km, float)
+    if (removed.shape != area.shape or not np.isfinite(area).all()
+            or np.any(area <= 0) or not np.isfinite(removed).all() or np.any(removed < 0)):
+        raise ValueError('Mantle return needs aligned finite nonnegative removal and positive areas.')
+    volume = area*removed
+    if not np.isfinite(volume).all():
+        raise ValueError('Mantle return volume must be finite.')
     total = float(volume.sum())
     ledger = s.mantle_return_km3
-    ledger['total'] += total
+    validate_ledger(ledger)
+    # Validate every attribution before committing any reservoir or process
+    # total. A failed contact split must not leave a partly booked transaction.
+    additions = {}
     for key, index in (('by_plate_uid', np.asarray(s.plate_uid)[np.asarray(s.parcel_plate)]),
                        ('by_sheet', np.asarray(s.parcel_collision_sheet))):
-        bucket = ledger.setdefault(key, {})
-        for value, share in _grouped(index, volume).items():
-            bucket[str(value)] = bucket.get(str(value), 0.)+share
-    bucket = ledger.setdefault('by_contact', {})
-    for value, share in _contact_shares(s, volume, attribution).items():
-        bucket[str(value)] = bucket.get(str(value), 0.)+float(share)
+        additions[key] = _grouped(index, volume)
+    additions['by_contact'] = _contact_shares(s, volume, attribution)
+    validate_ledger(dict(total=total, **additions), require_closure=True)
+    staged = deepcopy(ledger)
+    staged['total'] += total
+    for key, shares in additions.items():
+        for value, share in shares.items():
+            staged[key][str(value)] = staged[key].get(str(value), 0.)+float(share)
     # The key's zero default is declared beside the other process totals in
     # raster_engine; read it defensively so an older state that predates the
     # declaration still books the volume rather than raising mid-step.
     totals = getattr(s, 'process_totals', None)
+    process_returned = None
     if totals is not None:
-        totals['crust_returned_to_mantle_km3'] = totals.get('crust_returned_to_mantle_km3', 0.)+total
+        previous = totals.get('crust_returned_to_mantle_km3', 0.)
+        if not isinstance(previous, (float, int, np.floating)) or not np.isfinite(previous) or previous < 0:
+            raise ValueError('Invalid process mantle-return total.')
+        process_returned = previous+total
+        if not np.isfinite(process_returned):
+            raise ValueError('Invalid process mantle-return total.')
+    validate_ledger(staged)
+    ledger.clear()
+    ledger.update(staged)
+    if totals is not None:
+        totals['crust_returned_to_mantle_km3'] = process_returned
     return total
+
+
+def validate_ledger(ledger, *, require_closure=False):
+    """Validate finite returns; optionally require complete attribution.
+
+    Older ledgers can have an inherited gap, including a contact bucket added
+    after some mantle return was already recorded. Never reconstruct that past.
+    Every new increment closes; a frame explicitly marked ledger version 1 also
+    promises full cumulative closure in all three attribution buckets.
+    """
+    if (not isinstance(ledger, dict)
+            or set(ledger) != {'total', 'by_plate_uid', 'by_sheet', 'by_contact'}
+            or not isinstance(ledger['total'], float)
+            or not math.isfinite(ledger['total']) or ledger['total'] < 0):
+        raise ValueError('Invalid mantle return ledger.')
+    for key in ('by_plate_uid', 'by_sheet', 'by_contact'):
+        bucket = ledger[key]
+        if not isinstance(bucket, dict) or any(
+                not isinstance(value, float) or not math.isfinite(value) or value < 0
+                for value in bucket.values()):
+            raise ValueError('Invalid mantle return ledger: '+key)
+        try:
+            subtotal = math.fsum(bucket.values())
+        except OverflowError as error:
+            raise ValueError('Invalid mantle return ledger: '+key) from error
+        if require_closure and not math.isclose(subtotal, ledger['total'], rel_tol=2e-10, abs_tol=1e-9):
+            raise ValueError('Mantle return attribution does not close: '+key)
 
 
 def _grouped(index, values):
@@ -598,6 +708,13 @@ def snapshot_fields(s):
                 material_foundered_m=np.asarray(s.structure[COLUMN_FIELD], float).copy(),
                 mantle_return_km3=deepcopy(s.mantle_return_km3),
                 foundering_diagnostics=deepcopy(getattr(s, 'foundering_diagnostics', {})))
+    validate_ledger(s.mantle_return_km3)
+    # An inherited attribution gap stays legacy; emitting a new frame must not
+    # silently assert that missing historical contact accounting is complete.
+    result['mantle_return_ledger_version'] = int(all(math.isclose(
+        math.fsum(s.mantle_return_km3[key].values()), s.mantle_return_km3['total'],
+        rel_tol=2e-10, abs_tol=1e-9)
+        for key in ('by_plate_uid', 'by_sheet', 'by_contact')))
     if s.foundering_version == VERSION:
         result.update({name: s.structure[field].copy() for name, field in INVENTORY_ARRAY_FIELDS.items()})
         result['foundering_inventory_migration'] = deepcopy(getattr(s, 'foundering_inventory_migration', {}))
@@ -614,11 +731,20 @@ def validate_frame(frame):
     phase_evolution.validate_frame(frame)
     version = frame.get('foundering_version', 0)
     depth_version = frame.get('foundering_depth_version', 0)
+    ledger_version = frame.get('mantle_return_ledger_version', 0)
+    if (isinstance(ledger_version, (bool, np.bool_)) or ledger_version not in (0, 1)
+            or (ledger_version and not version)):
+        raise ValueError('Unsupported or unversioned mantle-return ledger closure.')
     if (isinstance(depth_version, (bool, np.bool_)) or depth_version not in (0, 1)
             or (depth_version and not version)):
         raise ValueError('Unsupported or unversioned local burial integration.')
     if isinstance(version, (bool, np.bool_)) or version not in (0, 1, VERSION):
         raise ValueError('Unsupported foundering version.')
+    for name, selected, required in (
+            ('foundering_inventory_migration', version, VERSION),
+            ('foundering_depth_migration', depth_version, 1)):
+        if name in frame and (selected != required or not isinstance(frame[name], dict)):
+            raise ValueError('Foundering migration record requires its matching version: '+name)
     if not version:
         if set(ARRAY_FIELDS).intersection(frame) or 'mantle_return_km3' in frame:
             raise ValueError('Foundering fields need their version.')
@@ -641,12 +767,4 @@ def validate_frame(frame):
                            inventory[crust_inventory.ERODED]+inventory[crust_inventory.RETURNED]+inventory[crust_inventory.REMAINING],
                            rtol=2e-12, atol=1e-12):
             raise ValueError('Saved removable-crust inventory does not close.')
-    ledger = frame.get('mantle_return_km3')
-    if (not isinstance(ledger, dict) or set(ledger) != {'total', 'by_plate_uid', 'by_sheet', 'by_contact'}
-            or not isinstance(ledger['total'], float) or ledger['total'] < 0):
-        raise ValueError('Invalid mantle return ledger.')
-    for key in ('by_plate_uid', 'by_sheet', 'by_contact'):
-        bucket = ledger[key]
-        if not isinstance(bucket, dict) or any(not isinstance(value, float) or value < 0
-                                               for value in bucket.values()):
-            raise ValueError('Invalid mantle return ledger: '+key)
+    validate_ledger(frame.get('mantle_return_km3'), require_closure=ledger_version == 1)

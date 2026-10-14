@@ -15,6 +15,7 @@ import numpy as np
 import mesh_geometry
 import native_boundary_geometry
 import convex_partition
+import vector_norm
 import native_spreading as clipping
 
 VERSION = 1
@@ -102,7 +103,7 @@ def _candidates(polygon, context):
 
 def _cap(vertices):
     center=clipping._unit(np.sum(vertices,axis=0))
-    if not len(vertices) or np.linalg.norm(center)<.5: return center,2.
+    if not len(vertices) or vector_norm.length(center)<.5: return center,2.
     angle=np.arccos(np.clip(vertices@center,-1.,1.)).max(initial=0.)
     # A sub-hemisphere spherical cap contains the minor arcs and all convex
     # face interiors, not just their vertices. Otherwise use the whole sphere.
@@ -140,7 +141,7 @@ def _remaining(polygon, contexts):
     parts=[polygon]
     center,chord_radius=_cap(polygon)
     for context in contexts:
-        if np.linalg.norm(center-context['cap_center'])>chord_radius+context['cap_chord_radius']+1e-11:
+        if vector_norm.length(center-context['cap_center'])>chord_radius+context['cap_chord_radius']+1e-11:
             continue
         candidates=_candidates(polygon, context)
         if 'active' in context:
@@ -235,9 +236,7 @@ def _owner_area(polygons, context, owner):
     return math.fsum(result)
 
 
-def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=None, old_indices=None,
-            _old_cache=None):
-    """Measure candidate-minus-old area and its independent material/owner losses."""
+def _candidate_triangles(vertices, faces):
     vertices=np.asarray(vertices,float); faces=np.asarray(faces)
     if (vertices.ndim!=2 or vertices.shape[1:]!=(3,) or not np.isfinite(vertices).all()
             or faces.ndim!=2 or faces.shape[1:]!=(3,) or faces.dtype.kind not in 'iu'
@@ -246,21 +245,70 @@ def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=Non
     triangles=vertices[faces]
     if np.any(np.einsum('ij,ij->i',triangles[:,0],np.cross(triangles[:,1],triangles[:,2]))<=0):
         raise ValueError('Arc admission requires outward material triangles.')
+    return triangles
+
+
+def _old_footprint(context, old_vertices, old_faces, _old_cache):
+    if old_vertices is None: return None
+    if old_faces is None: raise ValueError('An old growth footprint requires faces.')
+    if _old_cache is None:
+        return _context(old_vertices,old_faces,context['radius_km'])
+    # The factory may mutate its inputs. Reuse only byte-identical old
+    # geometry, with the same radius; never freeze a changed footprint.
+    v=np.asarray(old_vertices,float); f=np.asarray(old_faces,np.int64)
+    key=(v.shape,v.tobytes(),f.shape,f.tobytes(),context['radius_km'])
+    if _old_cache.get('key')!=key:
+        _old_cache.clear()
+        _old_cache.update(key=key,context=_context(v,f,context['radius_km']))
+    return _old_cache['context']
+
+
+def _material_contexts(context, old_indices):
+    base=context['material']
+    if old_indices is not None:
+        # Prime the caps on the shared lookup before copying it, so a growth
+        # shell inherits them instead of rebuilding them for every candidate.
+        _face_caps(base)
+        # Indices are in the current surface. Same-batch births are represented
+        # by updates below, so only original-context indices belong in base.
+        indices=np.asarray(old_indices,int)
+        base=dict(base,exclude=indices[indices<len(base['triangles'])])
+    material_contexts=[base]
+    for row in context['updates']:
+        if old_indices is not None and np.all(np.isin(row['indices'],old_indices)): continue
+        material_contexts.append(row['context'])
+    return material_contexts
+
+
+_UNEXAMINED=object()
+_SCREENED='screened_exact_material_obstruction'
+
+
+def _exact_obstruction(context, vertices, faces, *, old_vertices=None, old_faces=None, old_indices=None,
+                       _old_cache=None):
+    """The exact new-footprint/material test that ends `inspect`, run on its own.
+
+    A witness makes the candidate inadmissible whatever its areas measure, so a
+    caller that needs only that verdict can stop there. None is the test finding
+    nothing; `inspect` may be given it instead of repeating the test. If the test
+    cannot be evaluated the answer is _UNEXAMINED, and `inspect` decides (and
+    raises, where it would have) exactly as before.
+    """
+    triangles=_candidate_triangles(vertices,faces)
+    old=_old_footprint(context,old_vertices,old_faces,_old_cache)
+    import arc_material_exclusion
+    try:
+        return arc_material_exclusion.obstruction(triangles,_material_contexts(context,old_indices),old)
+    except ValueError:
+        return _UNEXAMINED
+
+
+def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=None, old_indices=None,
+            _old_cache=None, _exact=_UNEXAMINED):
+    """Measure candidate-minus-old area and its independent material/owner losses."""
+    triangles=_candidate_triangles(vertices,faces)
     candidate_area=math.fsum(clipping._area(p,context) for p in triangles)
-    old=None
-    if old_vertices is not None:
-        if old_faces is None: raise ValueError('An old growth footprint requires faces.')
-        if _old_cache is None:
-            old=_context(old_vertices,old_faces,context['radius_km'])
-        else:
-            # The factory may mutate its inputs. Reuse only byte-identical old
-            # geometry, with the same radius; never freeze a changed footprint.
-            v=np.asarray(old_vertices,float); f=np.asarray(old_faces,np.int64)
-            key=(v.shape,v.tobytes(),f.shape,f.tobytes(),context['radius_km'])
-            if _old_cache.get('key')!=key:
-                _old_cache.clear()
-                _old_cache.update(key=key,context=_context(v,f,context['radius_km']))
-            old=_old_cache['context']
+    old=_old_footprint(context,old_vertices,old_faces,_old_cache)
     shell=[]
     for polygon in triangles:
         shell.extend(_remaining(polygon,[old]) if old is not None else [polygon])
@@ -275,19 +323,7 @@ def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=Non
     # outer footprint. Signed area gain alone could conceal lost old terrain.
     lost=max(0.,old_area+new_area-candidate_area)
     water=[]
-    base=context['material']
-    if old_indices is not None:
-        # Prime the caps on the shared lookup before copying it, so a growth
-        # shell inherits them instead of rebuilding them for every candidate.
-        _face_caps(base)
-        # Indices are in the current surface. Same-batch births are represented
-        # by updates below, so only original-context indices belong in base.
-        indices=np.asarray(old_indices,int)
-        base=dict(base,exclude=indices[indices<len(base['triangles'])])
-    material_contexts=[base]
-    for row in context['updates']:
-        if old_indices is not None and np.all(np.isin(row['indices'],old_indices)): continue
-        material_contexts.append(row['context'])
+    material_contexts=_material_contexts(context,old_indices)
     for polygon in shell: water.extend(_remaining(polygon,material_contexts))
     water_area=math.fsum(clipping._area(p,context) for p in water)
     own_area=_owner_area(water,context,owner)
@@ -310,8 +346,12 @@ def inspect(context, vertices, faces, owner, *, old_vertices=None, old_faces=Non
                     and foreign_vertices==0)
     exact_obstruction=None
     if admissible:
-        import arc_material_exclusion
-        exact_obstruction=arc_material_exclusion.obstruction(triangles,material_contexts,old)
+        if _exact is _UNEXAMINED:
+            import arc_material_exclusion
+            exact_obstruction=arc_material_exclusion.obstruction(triangles,material_contexts,old)
+        else:
+            # Already evaluated for this very candidate by _exact_obstruction.
+            exact_obstruction=_exact
         admissible=exact_obstruction is None
     return dict(candidate_area_km2=candidate_area,old_area_km2=old_area,new_footprint_area_km2=new_area,
         lost_old_footprint_area_km2=lost,material_obstruction_km2=material_loss,
@@ -328,12 +368,20 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
     Coarse backtracking finds a feasible lower amount. Subsequent bisection
     improves utilization but claims no global optimum for deformed footprints.
     Every returned positive amount has itself passed the exact geometry test.
+
+    Only three measurements leave this function: the first trial, the last one,
+    and the accepted one. A blocked source is typically rejected at twenty or so
+    amounts in between, where nothing but the verdict is used. Those trials are
+    screened with the exact material test alone: a witness is the same rejection
+    `inspect` would reach, without measuring areas nobody reads. The amounts tried,
+    their verdicts and every reported measurement are unchanged.
     """
     requested=float(requested_area_km2)
     if not np.isfinite(requested) or requested<0.: raise ValueError('Arc source area must be finite and nonnegative.')
-    count=0; first=None; best=None; last=None; old_cache={}
-    def evaluate(amount):
-        nonlocal count, first, last
+    count=0; first=None; best=None; last=None; old_cache={}; screening=True
+    def evaluate(amount, reported=True):
+        """`reported` is False when a rejection here cannot be the last trial."""
+        nonlocal count, first, last, screening
         count+=1; plan=factory(amount)
         if plan is None:
             value=dict(admissible=False, reason='unrepresentable_shared_mesh')
@@ -343,9 +391,20 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
             # modifying the original plan or normalizing growth a second time.
             vertices=np.asarray(plan['vertices'],float)
             if old_vertices is None:vertices=vertices/np.linalg.norm(vertices,axis=1)[:,None]
-            value=inspect(context,vertices,plan['faces'],owner,
-                          old_vertices=old_vertices,old_faces=old_faces,old_indices=old_indices,
-                          _old_cache=old_cache)
+            growth=dict(old_vertices=old_vertices,old_faces=old_faces,old_indices=old_indices,
+                        _old_cache=old_cache)
+            exact=_UNEXAMINED
+            if screening and not reported and first is not None:
+                exact=_exact_obstruction(context,vertices,plan['faces'],**growth)
+            if exact is not _UNEXAMINED and exact is not None:
+                # Never reported: a later trial replaces `last` before this function returns.
+                value=dict(admissible=False, reason=_SCREENED)
+            else:
+                value=inspect(context,vertices,plan['faces'],owner,_exact=exact,**growth)
+                if exact is None and not value['admissible']:
+                    # Blocked by something the exact material test cannot see (an owner
+                    # boundary, lost old footprint): screening further trials only adds cost.
+                    screening=False
             if value['admissible'] and old_vertices is None:
                 plan=dict(plan)
                 plan['_emplacement_stored_triangle_sha256']=hashlib.sha256(
@@ -355,18 +414,24 @@ def admit(context, factory, requested_area_km2, owner, *, minimum_area_km2=.001,
         return plan,value
     amount=requested; rejected=requested
     while amount>=minimum_area_km2 and count<32:
-        plan,measurement=evaluate(amount)
+        # A rejection is the last trial exactly when the loop cannot run again.
+        plan,measurement=evaluate(amount,reported=not (amount*.5>=minimum_area_km2 and count+1<32))
         if measurement['admissible']:
             best=(amount,plan,measurement); break
         rejected=amount; amount*=.5
     if best is not None and best[0]<requested:
         lower=best[0]; upper=rejected
-        for _ in range(20):
-            if upper-lower<=max(minimum_area_km2*1e-3,requested*1e-6): break
-            middle=(lower+upper)*.5; plan,measurement=evaluate(middle)
+        for step in range(20):
+            resolution=max(minimum_area_km2*1e-3,requested*1e-6)
+            if upper-lower<=resolution: break
+            middle=(lower+upper)*.5
+            # A rejection makes `middle` the upper end; it is the last trial if that closes the bracket.
+            plan,measurement=evaluate(middle,reported=step==19 or middle-lower<=resolution)
             if measurement['admissible']:
                 lower=middle; best=(middle,plan,measurement)
             else: upper=middle
+    if any(value is not None and value.get('reason')==_SCREENED for value in (first,last)):
+        raise ValueError('Arc admission would report a trial it never measured.')
     accepted=0. if best is None else best[0]
     return dict(accepted_area_km2=accepted,pending_area_km2=requested-accepted,
         plan=None if best is None else best[1],
@@ -394,10 +459,120 @@ def commit(context, surface, indices):
     context['updates']=retained
 
 
+def validate_deposition_policy(frame):
+    """Require explicit fixed-footprint source-volume semantics in saved frames."""
+    tag=frame.get('arc_deposition_version',0)
+    if isinstance(tag,(bool,np.bool_)) or not isinstance(tag,Integral) or tag not in (0,1):
+        raise ValueError('Unsupported saved juvenile column deposition version.')
+    policy=frame.get('arc_deposition_policy')
+    if not tag:
+        if policy is not None:
+            raise ValueError('Juvenile column deposition policy requires its version.')
+        arc=frame.get('arc_material_diagnostics',{})
+        if isinstance(arc,dict):
+            for key in ('deposited_source_area_km2','deposited_volume_km3','deposited_patches'):
+                if key in arc:
+                    value=arc[key]
+                    if (isinstance(value,(bool,np.bool_)) or not isinstance(value,Real)
+                            or not np.isfinite(value) or value!=0.):
+                        raise ValueError('Juvenile deposition totals require their saved version.')
+        stats=frame.get('stats',{})
+        if isinstance(stats,dict):
+            for key in ('arc_deposited_source_area_km2','arc_deposited_volume_km3'):
+                if key in stats:
+                    value=stats[key]
+                    if (isinstance(value,(bool,np.bool_)) or not isinstance(value,Real)
+                            or not np.isfinite(value) or value!=0.):
+                        raise ValueError('Cumulative juvenile deposition requires its saved version.')
+        return 0
+    expected=dict(version=1,source_column_km=25.,maximum_column_km=75.,
+        minimum_source_area_km2=.001,routing='source_containing_native_face',
+        fallback='failed_lateral_growth')
+    if (not isinstance(policy,dict) or set(policy)!=set(expected)
+            or any(isinstance(policy.get(key),(bool,np.bool_)) or policy.get(key)!=value
+                   for key,value in expected.items())
+            or not isinstance(policy.get('version'),Integral)):
+        raise ValueError('Invalid fixed-footprint juvenile deposition policy.')
+    if any(isinstance(frame.get(key),(bool,np.bool_)) or not isinstance(frame.get(key),Integral)
+           or frame[key]!=1 for key in ('arc_material_version','arc_emplacement_version',
+                                       'arc_birth_profile_version','arc_source_cohort_version')):
+        raise ValueError('Juvenile deposition requires physical profiles and source provenance.')
+    return int(tag)
+
+
+def _validate_column_deposition(row, placed):
+    """Check a local volume receipt without reinterpreting source area as land."""
+    receipt=row.get('column_deposition')
+    if (not isinstance(receipt,dict) or type(receipt.get('version')) is not int
+            or receipt['version']!=1 or receipt.get('geometry_unchanged') is not True):
+        raise ValueError('Juvenile deposition requires an unchanged-geometry receipt.')
+    def scalar(key):
+        value=receipt.get(key)
+        if isinstance(value,(bool,np.bool_)) or not isinstance(value,Real) or not np.isfinite(value) or value<0:
+            raise ValueError('Invalid juvenile deposition scalar: '+key)
+        return float(value)
+    def integers(key, count=None, *, positive=False):
+        value=receipt.get(key)
+        if (not isinstance(value,list) or (count is not None and len(value)!=count)
+                or any(isinstance(x,(bool,np.bool_)) or not isinstance(x,Integral)
+                       or x<(1 if positive else 0) for x in value)):
+            raise ValueError('Invalid juvenile deposition identity: '+key)
+        return value
+    count=len(row['source_indices'])
+    source_faces=integers('source_faces',count)
+    source_ids=integers('source_face_ids',count,positive=True)
+    receiving=integers('receiving_faces')
+    receiving_ids=integers('receiving_face_ids',len(receiving),positive=True)
+    if len(set(receiving))!=len(receiving) or len(set(receiving_ids))!=len(receiving_ids):
+        raise ValueError('A juvenile deposition receipt cannot repeat a receiving face.')
+    forward={};reverse={}
+    for face,identity in zip(source_faces,source_ids):
+        if forward.setdefault(face,identity)!=identity or reverse.setdefault(identity,face)!=face:
+            raise ValueError('Juvenile source face indices and persistent identities disagree.')
+    if any(forward.get(face)!=identity for face,identity in zip(receiving,receiving_ids)):
+        raise ValueError('Juvenile deposition left its actual source-containing faces.')
+    arrays={}
+    for key in ('face_area_km2','face_reference_area_km2','face_volume_added_km3',
+                'face_thickness_before_km','face_thickness_after_km'):
+        raw=receipt.get(key)
+        if not isinstance(raw,list) or any(isinstance(x,(bool,np.bool_)) or not isinstance(x,Real) for x in raw):
+            raise ValueError('Invalid juvenile deposition face array: '+key)
+        value=np.asarray(raw,float)
+        if value.shape!=(len(receiving),) or not np.isfinite(value).all() or np.any(value<=0):
+            raise ValueError('Juvenile deposition face amounts must be finite and positive.')
+        arrays[key]=value
+    area=arrays['face_area_km2'];volume=arrays['face_volume_added_km3']
+    before=arrays['face_thickness_before_km'];after=arrays['face_thickness_after_km']
+    if (np.any(after<before) or np.any(after>75.) or np.any(volume<.025-1e-7)
+            or not np.allclose(area*(after-before),volume,rtol=2e-11,atol=1e-7)):
+        raise ValueError('Juvenile deposited columns do not conserve their admitted source volume.')
+    spent=np.asarray(row.get('source_placed_area_km2'),float)
+    if spent.shape!=(count,) or not np.isfinite(spent).all() or np.any(spent<0):
+        raise ValueError('Juvenile deposition needs aligned per-origin spending.')
+    by_face={}
+    for face,amount in zip(source_faces,spent):
+        by_face[face]=by_face.get(face,0.)+25.*float(amount)
+    actual_by_face=dict(zip(receiving,volume))
+    if any(not np.isclose(amount,actual_by_face.get(face,0.),rtol=2e-11,atol=1e-7)
+           for face,amount in by_face.items()):
+        raise ValueError('Juvenile deposition borrowed volume from a different source face.')
+    actual=scalar('actual_added_volume_km3');source=scalar('source_volume_km3')
+    if (scalar('reference_area_change_km2')!=0. or scalar('footprint_area_change_km2')!=0.
+            or not np.isclose(actual,float(volume.sum()),rtol=2e-11,atol=1e-7)
+            or not np.isclose(source,25.*placed,rtol=2e-11,atol=1e-7)
+            or not np.isclose(actual,source,rtol=2e-11,atol=1e-7)
+            or not np.isclose(float(spent.sum()),placed,rtol=1e-11,atol=1e-7)
+            or (placed>0.)!=bool(receiving)):
+        raise ValueError('Juvenile deposition changed its footprint or failed its source-volume ledger.')
+    if placed==0. and (actual!=0. or source!=0.):
+        raise ValueError('Rejected juvenile deposition cannot consume source volume.')
+
+
 def validate_frame(frame):
     """Validate marked saved policy ledgers without rerunning footprint geometry."""
     import arc_birth_footprint
     footprint_version=arc_birth_footprint.validate_frame(frame)
+    deposition_version=validate_deposition_policy(frame)
     version=frame.get('arc_emplacement_version',0)
     if isinstance(version,(bool,np.bool_)) or not isinstance(version,Integral) or version not in (0,VERSION):
         raise ValueError('Unsupported saved juvenile emplacement version.')
@@ -452,7 +627,8 @@ def validate_frame(frame):
         amount=scalar(row,'requested_area_km2'); placed=scalar(row,'accepted_area_km2')
         held=scalar(row,'pending_area_km2'); count=scalar(row,'geometry_evaluations',integer=True)
         scalar(row,'owner',integer=True); scalar(row,'arc_id',integer=True)
-        if row.get('mode') not in ('birth','growth') or not near(amount,placed+held):
+        modes=('birth','growth','deposition') if deposition_version else ('birth','growth')
+        if row.get('mode') not in modes or not near(amount,placed+held):
             raise ValueError('Invalid juvenile source mode or admission arithmetic.')
         if scalar(row,'relocation_km')!=0.:
             raise ValueError('Finite juvenile emplacement cannot relocate its source.')
@@ -461,6 +637,10 @@ def validate_frame(frame):
                 or len(set(indices))!=len(indices) or points.shape!=(len(indices),3) or points.dtype.kind not in 'fiu'
                 or not np.isfinite(points).all() or not np.allclose(np.linalg.norm(points,axis=1),1.,atol=2e-10,rtol=0.)):
             raise ValueError('Juvenile source positions and local batch indices must align.')
+        if row['mode']=='deposition':
+            _validate_column_deposition(row,placed)
+        elif 'column_deposition' in row:
+            raise ValueError('A column deposition receipt requires its explicit source mode.')
         measured=row.get('accepted_footprint')
         if placed>0.:
             if not isinstance(measured,dict) or measured.get('admissible') is not True:
@@ -491,6 +671,10 @@ def validate_frame(frame):
                         or candidate>25.*placed/8.+area_allowance
                         or candidate<placed-area_allowance):
                     raise ValueError('Juvenile birth footprint exceeds its fixed source volume or column bounds.')
+            elif row['mode']=='deposition':
+                if (candidate!=old or old<=0. or new!=0. or lost!=0. or obstruction!=0. or eligible!=0.
+                        or sum(row['column_deposition']['face_area_km2'])>old+area_allowance):
+                    raise ValueError('Juvenile column deposition must retain exactly the existing footprint.')
             elif not near(candidate-old,placed):
                 raise ValueError('Legacy juvenile footprint must match its source equivalent area.')
         totals+=amount,placed,held,count
@@ -498,3 +682,23 @@ def validate_frame(frame):
         raise ValueError('Finite juvenile aggregate does not equal its source records.')
     if not near(accepted,scalar(arc,'added_area_km2')) or not near(25.*accepted,scalar(arc,'added_volume_km3')):
         raise ValueError('Finite juvenile source ledger disagrees with actual emplacement.')
+    deposition_rows=[row for row in rows if row['mode']=='deposition']
+    summary=('deposited_source_area_km2','deposited_volume_km3','deposited_patches')
+    # A future-only activation can retain the preceding step's legacy report.
+    # Once deposition is attempted, its summary must reconcile independently.
+    if deposition_rows or any(key in arc for key in summary):
+        deposited=scalar(arc,summary[0]);deposited_volume=scalar(arc,summary[1])
+        deposited_patches=scalar(arc,summary[2],integer=True)
+        expected=sum(row['accepted_area_km2'] for row in deposition_rows)
+        expected_patches=sum(row['accepted_area_km2']>0. for row in deposition_rows)
+        if (not near(deposited,expected) or not near(deposited_volume,25.*expected)
+                or deposited_patches!=expected_patches
+                or (not deposition_version and (deposited!=0. or deposited_volume!=0. or deposited_patches!=0.))):
+            raise ValueError('Juvenile deposition aggregate disagrees with its source receipts or version.')
+        reference_gain=scalar(arc,'physical_mass_added_km2')
+        residual=arc.get('physical_mass_residual_km2')
+        expected_reference=accepted-deposited
+        if (isinstance(residual,(bool,np.bool_)) or not isinstance(residual,Real)
+                or not np.isfinite(residual) or not near(reference_gain,expected_reference)
+                or not near(residual,reference_gain-expected_reference) or not near(residual,0.)):
+            raise ValueError('Juvenile reference-area gain must exclude fixed-footprint deposition.')

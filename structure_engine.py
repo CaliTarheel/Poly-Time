@@ -394,6 +394,9 @@ def _evolve(s, shortening, extension, volcanic, dt, foreland, *, trace=False, be
         else:
             eligible_km, sink_scope, sink_attribution = eclogite_sink.eligible_thickness_km(
                 s, state['thickness_km'])
+            sink_scope['ordinary_loss_diagnostics'] = eclogite_sink.ordinary_loss_diagnostics(
+                state, eligible_km, dt, area_km2=s.material_surface['area_km2'],
+                attribution=sink_attribution)
         foundered_km, sink_loss = eclogite_sink.apply(state, eligible_km, dt)
         relief -= sink_loss
 

@@ -15,6 +15,15 @@ buoyant and jammed the margin, is collision. Spreading keeps the exact
 classification of the production path. Everything else that still exists is
 sliding. `s.bcode` is untouched, so no process changes; only what is displayed,
 counted and exported does. See IMPLEMENTATION_GAPS.md G116 and G117.
+
+Version 2 adds one label. "Everything else" above includes ocean floor that is
+closing where no trench runs: no downgoing plate has been declared, so nothing
+there is subducting, and no buoyant crust is involved, so it is not a collision.
+Version 1 draws it as a transform, which reads as a fault sliding sideways while
+the plates on either side approach by kilometres every million years. Version 2
+calls it converging without a trench. The test is the kinematic gate itself: such a
+boundary is relabelled only where `s.bcode` says the motion is convergent, so a
+fault that slides with a little closing across it is still a transform.
 """
 from __future__ import annotations
 
@@ -26,27 +35,55 @@ import numpy as np
 import normal_partition
 
 VERSION = 1
-NONE, RIDGE, SUBDUCTION, TRANSFORM, COLLISION, RIFT = range(6)
+CONVERGING_VERSION = 2
+NONE, RIDGE, SUBDUCTION, TRANSFORM, COLLISION, RIFT, CONVERGING = range(7)
 MINIMUM_LENGTH_KM = 1e-10
+# A control cell takes the label of highest rank among its contacts: collision over rift over
+# subduction over converging without a trench over ridge over transform. The second table reads
+# a rank back as its label.
+RANK = np.array([0, 2, 4, 1, 6, 5, 3], np.uint8)
+RANKED = np.array([0, 3, 1, 6, 2, 5, 4], np.uint8)
+
+
+def version(s):
+    value = getattr(s, 'boundary_label_version', 0)
+    if (isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral)
+            or value not in (0, VERSION, CONVERGING_VERSION)):
+        raise ValueError('Unsupported boundary label version.')
+    return int(value)
 
 
 def enabled(s):
-    version = getattr(s, 'boundary_label_version', 0)
-    if isinstance(version, (bool, np.bool_)) or not isinstance(version, Integral) or version not in (0, VERSION):
-        raise ValueError('Unsupported boundary label version.')
-    return int(version) == VERSION
+    return version(s) > 0
 
 
-def upgrade(s):
+def upgrade(s, target=VERSION):
     """Select mechanism labels. Display only: no physical state changes."""
-    if enabled(s):
+    if target not in (VERSION, CONVERGING_VERSION) or isinstance(target, (bool, np.bool_)):
+        raise ValueError('Unsupported boundary label version.')
+    current = version(s)
+    if current >= target:
         return deepcopy(getattr(s, 'boundary_label_migration', {}))
     report = dict(version=VERSION, time_myr=float(s.t),
                   selection='Map, statistics and exports label each boundary by the mechanism that runs on it.',
                   physical_state_changed=False, kinematic_code_retained=True)
-    s.boundary_label_version = VERSION
+    if target == CONVERGING_VERSION:
+        report = dict(report, version=CONVERGING_VERSION,
+                      selection=report['selection']+' Closing boundaries with no trench and no collision are'
+                                ' labelled converging without a trench rather than transform.')
+        if current:
+            report['predecessor'] = deepcopy(getattr(s, 'boundary_label_migration', {}))
+    s.boundary_label_version = target
     s.boundary_label_migration = report
     return deepcopy(report)
+
+
+def cells(s, display, count):
+    """The label each control cell shows: the highest-ranked label among its contacts."""
+    ranks = np.zeros(count, np.uint8)
+    np.maximum.at(ranks, s.ba, RANK[display])
+    np.maximum.at(ranks, s.bb, RANK[display])
+    return RANKED[ranks]
 
 
 def incoming_water(s, down=None):
@@ -76,9 +113,10 @@ def carries_material(s):
 
 
 def codes(s):
-    """Per-contact display codes, in the same 0-5 vocabulary as `s.bcode`."""
+    """Per-contact display codes: the 0-5 vocabulary of `s.bcode`, and 6 under version 2."""
     kinematic = np.asarray(s.bcode, np.uint8)
-    if not enabled(s):
+    selected = version(s)
+    if not selected:
         return kinematic.copy()
     live = np.asarray(s.bl, float) > MINIMUM_LENGTH_KM
     display = np.where(live, TRANSFORM, NONE).astype(np.uint8)
@@ -93,6 +131,10 @@ def codes(s):
     display[live & closing & carries_material(s)] = COLLISION
     polarity = (np.asarray(s.down) == np.asarray(s.bp)) | (np.asarray(s.down) == np.asarray(s.bq))
     display[live & closing & polarity & incoming_water(s)] = SUBDUCTION
+    if selected == CONVERGING_VERSION:
+        # What is left is neither a running trench nor a collision. Where the gate calls the
+        # motion convergent, it is not sliding either.
+        display[(display == TRANSFORM) & np.isin(kinematic, (SUBDUCTION, COLLISION))] = CONVERGING
     return display
 
 
@@ -100,9 +142,11 @@ def lengths(s, display=None):
     """Boundary length in km for each label, from the same codes the map shows."""
     display = codes(s) if display is None else np.asarray(display, np.uint8)
     length = np.asarray(s.bl, float)
-    return {name: float(length[display == code].sum()) for name, code in
-            (('ridge', RIDGE), ('subduction', SUBDUCTION), ('transform', TRANSFORM),
-             ('collision', COLLISION), ('rift', RIFT))}
+    labels = [('ridge', RIDGE), ('subduction', SUBDUCTION), ('transform', TRANSFORM),
+              ('collision', COLLISION), ('rift', RIFT)]
+    if version(s) == CONVERGING_VERSION:
+        labels.append(('converging', CONVERGING))
+    return {name: float(length[display == code].sum()) for name, code in labels}
 
 
 def disagreement(s, display=None):
@@ -116,13 +160,14 @@ def disagreement(s, display=None):
     moved = display != kinematic
     rows = {}
     for code, name in ((SUBDUCTION, 'subduction'), (COLLISION, 'collision'),
-                       (TRANSFORM, 'transform'), (RIDGE, 'ridge'), (RIFT, 'rift')):
+                       (TRANSFORM, 'transform'), (RIDGE, 'ridge'), (RIFT, 'rift'),
+                       (CONVERGING, 'converging')):
         gained = moved & (display == code)
         if np.any(gained):
             rows[name] = dict(contacts=int(np.count_nonzero(gained)),
                               length_km=float(length[gained].sum()),
                               from_kinematic={str(int(c)): int(np.count_nonzero(gained & (kinematic == c)))
                                               for c in np.unique(kinematic[gained])})
-    return dict(version=VERSION, relabelled_contacts=int(np.count_nonzero(moved)),
+    return dict(version=max(VERSION, version(s)), relabelled_contacts=int(np.count_nonzero(moved)),
                 relabelled_length_km=float(length[moved].sum()), by_label=rows,
                 policy='Labels follow the running mechanism; s.bcode remains the kinematic gate.')

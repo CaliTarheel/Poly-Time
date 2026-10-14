@@ -5,10 +5,10 @@ import unittest
 import numpy as np
 
 import continental_entry
-from experiments.channel_pair_zones import (
+from channel_pair_zones import (
     partition_entry_pair, partition_entry_stack)
-from experiments.channel_region_geometry import spherical_partition_intersections
-from experiments.entry_channel_pressure import ordered_top_pressure
+from channel_region_geometry import spherical_partition_intersections
+from entry_channel_pressure import ordered_top_pressure
 from ridge_geometry import rotate
 from tests.test_entry_stack_work_oracle import FACES, NORMAL, SHEETS, geometry
 

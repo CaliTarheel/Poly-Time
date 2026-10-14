@@ -101,7 +101,7 @@ class AutomaticEntryTests(unittest.TestCase):
         row=state.trench_systems[0]
         for index,channel in enumerate(row[slab_history.FIELD]):
             slab_history.rupture(row,index,replace(Neck(**channel['neck']),damage=1.))
-        with self.assertRaisesRegex(ValueError,'detachment work and rebound'):
+        with self.assertRaisesRegex(ValueError,'lost its attached source slab without a breakoff handoff'):
             entry_regions.energy_j(state)
 
     def test_native_rupture_with_registered_entry_rolls_back_without_handoff(self):
@@ -115,7 +115,7 @@ class AutomaticEntryTests(unittest.TestCase):
             channel['neck']['damage']=.99
         slab_history.validate(state.trench_systems[0])
         before=deepcopy(state)
-        with self.assertRaisesRegex(ValueError,'detachment work and rebound'):
+        with self.assertRaisesRegex(ValueError,'lost its attached source slab without a breakoff handoff'):
             native_advance(state,.00005,max_source_step_myr=.000005)
         self.assertEqual(state.t,before.t)
         self.assertEqual(state.trench_systems,before.trench_systems)

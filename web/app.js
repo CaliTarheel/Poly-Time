@@ -15,8 +15,8 @@
   const rasterWrap = document.createElement("canvas");
   const rasterWrapContext = rasterWrap.getContext("2d");
   const configKeys = ["seed", "width", "plate_count", "duration_myr", "dt_myr", "snapshot_myr", "slab_pull", "ridge_push", "erosion", "rift_strength", "mechanics_nodes", "mesh_level", "coast_geometry_level", "adaptive_refinement", "deforming_regions", "deformation_width_km", "material_face_budget"];
-  const boundaryNames = ["None", "Spreading ridge", "Subduction", "Transform", "Continental collision", "Continental rift"];
-  const boundaryColors = [null, [119, 212, 220], [239, 128, 108], [197, 161, 222], [244, 211, 138], [237, 155, 226]];
+  const boundaryNames = ["None", "Spreading ridge", "Subduction", "Transform", "Continental collision", "Continental rift", "Converging, no trench"];
+  const boundaryColors = [null, [119, 212, 220], [239, 128, 108], [197, 161, 222], [244, 211, 138], [237, 155, 226], [255, 255, 255]];
   const crustNames = ["Oceanic crust", "Continental crust", "Stable craton", "Island arc / terrane"];
   const crustColors = [[30, 65, 86], [148, 164, 126], [213, 177, 111], [175, 128, 104]];
   const elevationStops = [-11000, -6500, -4000, -1500, -1, 0, 400, 1200, 2400, 4200, 6500, 9000];
@@ -358,7 +358,7 @@
     }
     $("boundary-legend").style.opacity = mode === "initial" ? ".35" : "1";
     $("show-motion").disabled = mode === "initial";
-    $("motion-note").hidden = mode === "initial" || !$("show-motion").checked;
+    updateMotionLegend();
     updateLegend();
     updateExportButtons();
     updateStats();
@@ -399,6 +399,8 @@
   function drawGlobe() {
     if (!globeView.active || !state.frame || globeView.textureFrame !== state.frame) return;
     globeView.renderer.draw(globeView.pose);
+    if ($("show-motion").checked) drawMotion(state.frame, true);
+    if ($("show-volcanic-points").checked) drawVolcanicPoints(state.frame, true);
     updateGlobePlayback();
     const {lon, lat} = globeView.pose;
     $("globe-center").textContent = `Centered on ${Math.abs(lat).toFixed(0)}° ${lat < 0 ? "S" : "N"}, ${Math.abs(lon).toFixed(0)}° ${lon < 0 ? "W" : "E"}`;
@@ -536,6 +538,7 @@
       state.rendering = false;
       const data = state.mode === "initial" ? state.initial : state.frame;
       updateSlabWindowNote(data);
+      updateVolcanicPointNote(data);
       if (!data) return;
       const w = data.width, h = data.height;
       const initial = state.mode === "initial";
@@ -623,7 +626,7 @@
         const nativeBoundary = Array.isArray(data.boundary_segments);
         const subduction = nativeBoundary ? null : subductionGeometry(data);
         if (mapView.boundaryData !== data || mapView.boundaryWidth !== canvas.width) {
-        const paths = Array.from({ length: 6 }, () => new Path2D());
+        const paths = Array.from({ length: boundaryColors.length }, () => new Path2D());
         const sx = canvas.width / w, sy = canvas.height / h;
         if (nativeBoundary) {
           for (const line of DeepTimeNativeBoundaries.paths(data)) {
@@ -655,7 +658,8 @@
         context.save();
         context.lineWidth = Math.max(1, 1.1 * canvas.width / canvas.getBoundingClientRect().width) / mapView.zoom;
         context.lineJoin = "round"; context.globalAlpha = .9;
-        for (const code of [3, 1, 5, 2, 4]) { context.strokeStyle = `rgb(${boundaryColors[code].join(",")})`; context.stroke(mapView.boundaryPaths[code]); }
+        // Closing boundaries that no trench or collision takes up are dashed: nothing is declared there.
+        for (const code of [3, 6, 1, 5, 2, 4]) { context.strokeStyle = `rgb(${boundaryColors[code].join(",")})`; context.setLineDash(code === 6 ? [4 * context.lineWidth, 3 * context.lineWidth] : []); context.stroke(mapView.boundaryPaths[code]); }
         context.restore();
         drawSubductionTeeth(data);
       }
@@ -667,7 +671,6 @@
       }
       if (!initial && $("show-slab-windows").checked) drawSlabWindows(data);
       if (!initial && $("show-lip").checked) drawLipSources(data);
-      if (!initial && $("show-motion").checked) drawMotion(data);
       if (!initial && state.inspection) drawTrace();
       if (initial && state.hover && !isBusy()) {
         context.save(); context.fillStyle = "rgba(250,235,183,.24)"; context.strokeStyle = "rgba(245,237,214,.95)"; context.lineWidth = 1.2 * canvas.width / 1000;
@@ -682,6 +685,8 @@
       }
       context.restore();
       }
+      if (!initial && !globeView.active && $("show-motion").checked) drawMotion(data);
+      if (!initial && !globeView.active && $("show-volcanic-points").checked) drawVolcanicPoints(data);
       if (globeView.active) { globeView.renderer.setTexture(canvas); globeView.textureFrame = data; drawGlobe(); }
       $("map-empty").hidden = true;
     });
@@ -796,6 +801,98 @@
       }
     }
     context.restore();
+  }
+
+  function volcanicPoints(data) {
+    if (data?.arc_point_version !== 1 || !Array.isArray(data.volcanic_point_features)) return [];
+    return data.volcanic_point_features.filter(row => {
+      const point = row?.geometry_xyz?.[0];
+      return row?.status === "pending" && Number.isSafeInteger(row.id) && row.id > 0 &&
+        Number.isSafeInteger(row.owner) && row.owner >= 0 && Number.isFinite(row.volume_km3) && row.volume_km3 > 0 &&
+        Array.isArray(row.geometry_xyz) && row.geometry_xyz.length === 1 && Array.isArray(point) && point.length === 3 &&
+        point.every(Number.isFinite) && Math.abs(Math.hypot(...point) - 1) < 1e-6;
+    });
+  }
+
+  function updateVolcanicPointNote(data) {
+    const recorded = state.mode === "history" && data?.arc_point_version === 1 && Array.isArray(data.volcanic_point_features);
+    const control = $("show-volcanic-points"), note = $("volcanic-point-note");
+    control.disabled = !recorded;
+    note.hidden = !recorded;
+    if (!recorded) { note.textContent = ""; return; }
+    const count = volcanicPoints(data).length;
+    note.textContent = count ? `${count.toLocaleString()} volcanic center${count === 1 ? "" : "s"} with pending magma · ${control.checked ? "Amber rings mark unresolved centers, not island size or height. Hover for volume." : "Turn on Volcanic centers to show them."} Nearby centers can become a crust patch when their magma funds an admissible footprint.` : "No unresolved volcanic centers at this saved time.";
+  }
+
+  // Screen-space symbols are independent of review-grid resolution, map zoom
+  // and the globe texture; they do not paint land into the elevation raster.
+  function volcanicScreenPoints(point, globe, target, rect) {
+    const lon = Math.atan2(point[1], point[0]) * 180 / Math.PI;
+    const lat = Math.asin(Math.max(-1, Math.min(1, point[2]))) * 180 / Math.PI;
+    if (globe) {
+      const projected = DeepTimeGlobe.project(lon, lat, globeView.pose);
+      if (!projected?.visible) return [];
+      const radius = .44 * Math.min(target.width, target.height) * globeView.pose.zoom;
+      const x = rect.width / 2 + projected.x * radius * rect.width / target.width;
+      const y = rect.height / 2 - projected.y * radius * rect.height / target.height;
+      return x >= -8 && x <= rect.width + 8 && y >= -8 && y <= rect.height + 8 ? [{x, y}] : [];
+    }
+    const u = (lon + 180) / 360, v = .5 - lat / 180;
+    const copy = Math.round(mapView.cx - u), result = [];
+    for (const offset of [-1, 0, 1]) {
+      const x = ((u + copy + offset - mapView.cx) * mapView.zoom + .5) * rect.width;
+      const y = ((v - mapView.cy) * mapView.zoom + .5) * rect.height;
+      if (x >= -8 && x <= rect.width + 8 && y >= -8 && y <= rect.height + 8) result.push({x, y});
+    }
+    return result;
+  }
+
+  function projectedVolcanicPoints(data, globe = false) {
+    const target = globe ? globeCanvas : canvas, rect = target.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return [];
+    return volcanicPoints(data).flatMap(feature => volcanicScreenPoints(feature.geometry_xyz[0], globe, target, rect).map(p => ({...p, feature})));
+  }
+
+  function drawVolcanicPoints(data, globe = false) {
+    const rows = projectedVolcanicPoints(data, globe);
+    if (!rows.length) return;
+    const target = globe ? globeCanvas : canvas, ctx = target.getContext("2d"), rect = target.getBoundingClientRect();
+    ctx.save(); ctx.setTransform(target.width / rect.width, 0, 0, target.height / rect.height, 0, 0);
+    if (globe) {
+      const radius = .44 * Math.min(target.width, target.height) * globeView.pose.zoom;
+      ctx.beginPath(); ctx.ellipse(rect.width / 2, rect.height / 2, radius * rect.width / target.width, radius * rect.height / target.height, 0, 0, 2 * Math.PI); ctx.clip();
+    }
+    ctx.setLineDash([]);
+    for (const {x, y} of rows) {
+      ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 2 * Math.PI);
+      ctx.strokeStyle = "rgba(7,23,33,.9)"; ctx.lineWidth = 3.4; ctx.stroke();
+      ctx.strokeStyle = "#ffc66d"; ctx.lineWidth = 1.4; ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, .9, 0, 2 * Math.PI); ctx.fillStyle = "#ffc66d"; ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function volcanicPointHover(data, point) {
+    if (!$("show-volcanic-points").checked || state.mode !== "history") return [];
+    const target = globeView.active ? globeCanvas : canvas, rect = target.getBoundingClientRect();
+    const u = Number.isFinite(point.u) ? point.u : (point.x + .5) / data.width;
+    const v = Number.isFinite(point.v) ? point.v : (point.y + .5) / data.height;
+    const lon = u * 2 * Math.PI - Math.PI, lat = Math.PI / 2 - v * Math.PI;
+    const cursor = volcanicScreenPoints([Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)], globeView.active, target, rect);
+    let selected = null, distance = 8;
+    for (const row of projectedVolcanicPoints(data, globeView.active)) for (const p of cursor) {
+      const delta = Math.hypot(row.x - p.x, row.y - p.y);
+      if (delta < distance || (delta === distance && row.feature.id < selected?.id)) { selected = row.feature; distance = delta; }
+    }
+    if (!selected) return [];
+    const identifiedHost = Number.isSafeInteger(selected.owner_uid) && selected.owner_uid > 0;
+    const plate = identifiedHost ? data.plates?.find(p => p.uid === selected.owner_uid) : data.plates?.find(p => p.id === selected.owner);
+    const host = plate ? plate.name || `Plate ${plate.id}` : identifiedHost ? `Former host UID ${selected.owner_uid}` : `Plate ${selected.owner}`;
+    const amount = selected.volume_km3 < .01 ? "<0.01" : selected.volume_km3.toLocaleString(undefined, {maximumFractionDigits: 2});
+    const values = [`Volcanic center ${selected.id} · pending magma: ${amount} km³`, `Host: ${host}`, "Unresolved center · no island height recorded"];
+    if (Number.isFinite(selected.source_time_myr)) values.push(`Source supplied: ${formatTime(selected.source_time_myr)} Myr`);
+    if (typeof selected.reason === "string" && selected.reason) values.push(`Source lineage: ${selected.reason.replaceAll("_", " ")}`);
+    return values;
   }
 
   function updateLipDraft() {
@@ -1542,26 +1639,79 @@
     svg.dataset.maxTime = maxTime;
   }
 
-  function drawMotion(data) {
-    const plates = new Map((data.plates || []).map((p) => [p.id, p.angular_velocity]));
-    const scale = canvas.width / 1000;
-    context.save(); context.strokeStyle = "rgba(236,244,237,.8)"; context.lineWidth = 1.2 * scale; context.shadowColor = "#071721"; context.shadowBlur = 2 * scale;
-    for (let row = 1; row < 10; row++) for (let col = 0; col < 20; col++) {
-      const fx = (col + .5) / 20, fy = row / 10;
-      const cell = Math.min(data.height - 1, Math.floor(fy * data.height)) * data.width + Math.min(data.width - 1, Math.floor(fx * data.width));
-      const omega = plates.get(data.plate[cell]); if (!omega || omega.length !== 3) continue;
-      const lon = fx * 2 * Math.PI - Math.PI, lat = Math.PI / 2 - fy * Math.PI, c = Math.cos(lat), s = Math.sin(lat), cl = Math.cos(lon), sl = Math.sin(lon);
-      const r = [c * cl, c * sl, s], v = [omega[1] * r[2] - omega[2] * r[1], omega[2] * r[0] - omega[0] * r[2], omega[0] * r[1] - omega[1] * r[0]];
-      const east = -v[0] * sl + v[1] * cl, north = -v[0] * s * cl - v[1] * s * sl + v[2] * c;
-      let dx = east / Math.max(.15, c) * canvas.width / (2 * Math.PI) * 20, dy = -north * canvas.height / Math.PI * 20;
-      const magnitude = Math.hypot(dx, dy), speed = Math.hypot(...v) * 6371 * .1;
-      if (magnitude < 1e-8 || speed < .2) continue;
-      const length = Math.min(30, speed * 5) * scale; dx *= length / magnitude; dy *= length / magnitude;
-      const px = fx * canvas.width, py = fy * canvas.height, angle = Math.atan2(dy, dx), head = Math.min(5 * scale, Math.hypot(dx, dy) * .45);
-      context.beginPath(); context.moveTo(px - dx / 2, py - dy / 2); context.lineTo(px + dx / 2, py + dy / 2);
-      context.moveTo(px + dx / 2 - Math.cos(angle - .6) * head, py + dy / 2 - Math.sin(angle - .6) * head); context.lineTo(px + dx / 2, py + dy / 2); context.lineTo(px + dx / 2 - Math.cos(angle + .6) * head, py + dy / 2 - Math.sin(angle + .6) * head); context.stroke();
+  // CSS pixels, shared with the legend. The minimum and logarithmic scale reveal
+  // slow plates without letting a fast remnant fill the map.
+  function motionArrowLength(speed) {
+    return Number.isFinite(speed) && speed > 0 ? 10 + 7 * Math.log1p(Math.min(30, speed) / .2) : 0;
+  }
+
+  function updateMotionLegend() {
+    const legend = $("motion-legend");
+    legend.hidden = state.mode === "initial" || !$("show-motion").checked;
+    $("motion-fullscreen-legend").hidden = legend.hidden;
+    if (legend.hidden || legend.innerHTML) return;
+    const samples = [.1, .5, 1, 5, 30].map(speed => {
+      const length = motionArrowLength(speed), x = (52 - length) / 2, tip = x + length;
+      return `<span><svg width="52" height="16" aria-hidden="true"><path d="M${x},8 H${tip} M${tip-4},5 L${tip},8 L${tip-4},11"/></svg>${speed === 30 ? "30+" : speed}</span>`;
+    }).join("");
+    legend.innerHTML = `<strong>Plate motion · cm/year</strong><div class="motion-samples">${samples}</div><span>Slow motion enlarged · logarithmic arrow lengths · capped at 30 cm/year. Hover for exact speed.</span>`;
+    $("motion-fullscreen-legend").innerHTML = legend.innerHTML;
+  }
+
+  function motionAt(data, plates, u, v) {
+    if (v < 0 || v > 1) return null;
+    u = ((u % 1) + 1) % 1;
+    const cell = Math.min(data.height - 1, Math.floor(v * data.height)) * data.width + Math.min(data.width - 1, Math.floor(u * data.width));
+    const omega = plates.get(data.plate[cell]);
+    if (!omega || omega.length !== 3 || !omega.every(Number.isFinite)) return null;
+    const lon = u * 2 * Math.PI - Math.PI, lat = Math.PI / 2 - v * Math.PI;
+    const c = Math.cos(lat), s = Math.sin(lat), cl = Math.cos(lon), sl = Math.sin(lon);
+    const r = [c * cl, c * sl, s];
+    const velocity = [omega[1] * r[2] - omega[2] * r[1], omega[2] * r[0] - omega[0] * r[2], omega[0] * r[1] - omega[1] * r[0]];
+    return { velocity, speed: Math.hypot(...velocity) * 6371 * .1,
+      east: -velocity[0] * sl + velocity[1] * cl,
+      north: -velocity[0] * s * cl - velocity[1] * s * sl + velocity[2] * c, cosLat: c };
+  }
+
+  function drawMotion(data, globe = false) {
+    const target = globe ? globeCanvas : canvas, ctx = target.getContext("2d"), rect = target.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return;
+    const plates = new Map((data.plates || []).map(p => [p.id, p.angular_velocity]));
+    const camera = globe ? DeepTimeGlobe.basis(globeView.pose.lon, globeView.pose.lat) : null;
+    const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
+    ctx.save();
+    // Screen-space sizes and density stay readable at every zoom/DPR. Project
+    // globe tangents directly, rather than stretching arrows from its texture.
+    ctx.setTransform(target.width / rect.width, 0, 0, target.height / rect.height, 0, 0);
+    if (globe) {
+      const radius = .44 * Math.min(target.width, target.height) * globeView.pose.zoom;
+      ctx.beginPath();
+      ctx.ellipse(rect.width / 2, rect.height / 2, radius * rect.width / target.width, radius * rect.height / target.height, 0, 0, 2 * Math.PI);
+      ctx.clip();
     }
-    context.restore();
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    const cols = Math.max(1, Math.floor(rect.width / 60)), rows = Math.max(1, Math.floor(rect.height / 60));
+    for (let row = 0; row < rows; row++) for (let col = 0; col < cols; col++) {
+      const x = (col + .5) * rect.width / cols, y = (row + .5) * rect.height / rows;
+      const point = globe ? globeView.renderer.pick(rect.left + x, rect.top + y, globeView.pose) :
+        { u: (x / rect.width - .5) / mapView.zoom + mapView.cx, v: (y / rect.height - .5) / mapView.zoom + mapView.cy };
+      if (!point) continue;
+      const motion = motionAt(data, plates, point.u, point.v);
+      if (!motion || motion.speed < 1e-12) continue;
+      let dx = globe ? dot(motion.velocity, camera.east) : motion.east / Math.max(1e-8, motion.cosLat) * rect.width / (2 * Math.PI);
+      let dy = globe ? -dot(motion.velocity, camera.north) : -motion.north * rect.height / Math.PI;
+      const magnitude = Math.hypot(dx, dy);
+      if (!(magnitude > 1e-14)) continue;
+      const length = motionArrowLength(motion.speed);
+      dx *= length / magnitude; dy *= length / magnitude;
+      const angle = Math.atan2(dy, dx), tipX = x + dx / 2, tipY = y + dy / 2;
+      ctx.beginPath(); ctx.moveTo(x - dx / 2, y - dy / 2); ctx.lineTo(tipX, tipY);
+      ctx.moveTo(tipX - Math.cos(angle - .6) * 5, tipY - Math.sin(angle - .6) * 5);
+      ctx.lineTo(tipX, tipY); ctx.lineTo(tipX - Math.cos(angle + .6) * 5, tipY - Math.sin(angle + .6) * 5);
+      ctx.strokeStyle = "rgba(7,23,33,.85)"; ctx.lineWidth = 3.8; ctx.stroke();
+      ctx.strokeStyle = "#ecf4ed"; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+    ctx.restore();
   }
 
   function drawTrace() {
@@ -2241,6 +2391,7 @@
         if (trench) values.push(`Trench ${trench.id}${trench.phase ? ` · ${String(trench.phase).replaceAll("_", " ")}` : ""}`);
       }
       if (state.layer === "loading") values.push(...riftLoadingHover(plate));
+      values.push(...volcanicPointHover(data, point));
     }
     $("map-hover").classList.toggle("loading-hover", state.mode === "history" && state.layer === "loading");
     $("map-hover").textContent = state.mode === "history" && state.layer === "loading" ? values.join("\n") : values.join("  /  "); $("map-hover").hidden = false;
@@ -2940,12 +3091,13 @@
   for (const button of document.querySelectorAll("[data-layer]")) button.addEventListener("click", () => { if (button.disabled) return; if (state.mode === "initial") { if (button.dataset.layer !== "crust") toast("The starting map shows crust materials. Run a simulation to inspect the other layers."); return; } state.layer = button.dataset.layer; setMode("history"); });
   $("show-boundaries").addEventListener("change", render); $("show-grid").addEventListener("change", render);
   $("show-slab-windows").addEventListener("change", render);
+  $("show-volcanic-points").addEventListener("change", () => { $("map-hover").hidden = true; render(); });
   $("show-lip").addEventListener("change", render);
   $("lip-add").addEventListener("click", addLipEvent);
   $("lip-remove").addEventListener("click", () => {
     lipDraft.events = lipDraft.events.filter(row => row.id !== $("lip-authored").value); updateLipDraft();
   });
-  $("show-motion").addEventListener("change", () => { $("motion-note").hidden = !$("show-motion").checked; render(); });
+  $("show-motion").addEventListener("change", () => { updateMotionLegend(); render(); });
   $("event-type").addEventListener("change", updateEvents); $("event-search").addEventListener("input", updateEvents);
   $("trench-select").addEventListener("change", () => { const id = Number($("trench-select").value); trenchReview.selectedId = Number.isSafeInteger(id) && id > 0 ? id : null; updateTrenchHistory(); });
   $("rift-select").addEventListener("change", () => { const id = Number($("rift-select").value); riftReview.selectedId = Number.isSafeInteger(id) && id > 0 ? id : null; updateRiftHistory(); });

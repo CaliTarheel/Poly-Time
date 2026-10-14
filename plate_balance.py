@@ -849,6 +849,10 @@ class Balance:
         return float(reference*collision_contacts.weld_capacity_factor(row, self.s.t))
 
     # ------------------------------------------------------------------- solve
+    def _row_rates(self, operator, x):
+        """Constitutive velocities; reduced modes preserve native common width."""
+        return operator@x
+
     def _evaluate(self, x, delta, want_derivatives=True):
         value = .5*x@self.stiffness@x-self.torque@x
         gradient = self.stiffness@x-self.torque if want_derivatives else None
@@ -856,7 +860,7 @@ class Balance:
         hessian = self.stiffness.copy() if want_derivatives else None
         parts = {}
         if len(self.hinge_coefficient):
-            speed = self.hinge@x
+            speed = self._row_rates(self.hinge, x)
             closing = np.minimum(speed, 0.)
             weight = self.hinge_coefficient
             parts['hinge'] = float(.5*np.sum(weight*closing*closing))
@@ -874,7 +878,8 @@ class Balance:
                 import weld_geometry
                 work = 0.; count = 0
                 for operator, coefficient, (start, end) in zip(element['rows'][0], element['coefficient'], element['bounds']):
-                    term, first, second, opening = weld_geometry.integrate(operator, x, start, end, delta)
+                    term, first, second, opening = weld_geometry.integrate(operator, x, start, end, delta,
+                        velocity=self._row_rates(operator, x))
                     work += coefficient*term
                     count += int(opening > 3.*delta*(end-start))
                     if want_derivatives:
@@ -889,7 +894,7 @@ class Balance:
             coefficient = element['coefficient']
             if element['shape'] == 'cone':
                 normal, tangent = element['rows']
-                opening, tangential = normal@x, tangent@x
+                opening, tangential = self._row_rates(normal, x), self._row_rates(tangent, x)
                 closed, first, second = _cone_closing_terms(opening, width, version)
                 magnitude = np.sqrt(closed*closed+tangential*tangential+width*width)
                 # The quotient avoids subtracting nearly equal numbers at
@@ -911,7 +916,7 @@ class Balance:
                     hessian -= np.einsum('e,ei,ej->ij', coefficient/magnitude, direction, direction)
                 continue
             (operator,) = element['rows']
-            rate = operator@x
+            rate = self._row_rates(operator, x)
             if element['shape'] == 'abs':
                 term, first, second = _abs_terms(rate, width)
                 yielded[element['kind']] = int(np.count_nonzero(np.abs(rate) > 3.*width))
@@ -938,7 +943,7 @@ class Balance:
         """
         parts, local_work = {}, []
         if len(self.hinge_coefficient):
-            closing = np.minimum(self.hinge@x, 0.)
+            closing = np.minimum(self._row_rates(self.hinge, x), 0.)
             work = self.hinge_coefficient*closing*closing
             parts['hinge'] = float(work.sum())
             local_work.extend(work)
@@ -947,18 +952,19 @@ class Balance:
             coefficient = element['coefficient']
             if element['shape'] == 'arc_opening':
                 import weld_geometry
-                work = np.asarray([weight*(weld_geometry.integrate(operator, x, start, end, delta)[1]@x)
+                work = np.asarray([weight*(weld_geometry.integrate(operator, x, start, end, delta,
+                    velocity=self._row_rates(operator, x))[1]@x)
                     for operator, weight, (start, end) in zip(element['rows'][0], coefficient, element['bounds'])])
             else:
                 width = delta*element['scale']
                 if element['shape'] == 'cone':
                     normal, tangent = element['rows']
-                    opening, tangential = normal@x, tangent@x
+                    opening, tangential = self._row_rates(normal, x), self._row_rates(tangent, x)
                     closed, first, _ = _cone_closing_terms(opening, width, version)
                     magnitude = np.sqrt(closed*closed+tangential*tangential+width*width)
                     work = coefficient*(opening*closed*first+tangential*tangential)/magnitude
                 else:
-                    rate = element['rows'][0]@x
+                    rate = self._row_rates(element['rows'][0], x)
                     law = (_abs_terms if element['shape'] == 'abs' else
                            _passive_negative_terms if version == 1 else _negative_terms)
                     work = coefficient*rate*law(rate, width)[1]

@@ -31,6 +31,7 @@ class PlateBalanceRepairTests(unittest.TestCase):
 
     def fixture(self):
         model=balance.Balance.__new__(balance.Balance)
+        model.s=SimpleNamespace()
         model.size=3; model.stiffness=np.eye(3); model.torque=np.array([-4.,3.,1.])
         model.hinge=np.zeros((0,3)); model.hinge_coefficient=np.zeros(0)
         model.elements=[dict(kind='megathrust',shape='cone', rows=(np.array([[1.,0.,0.]]),

@@ -10,6 +10,7 @@ import numpy as np
 import burial_depth
 import finite_entry_arc
 import mesh_coverage
+from exact_polygon import ExactPolygon
 from channel_region_geometry import (
     _checked_polygon, spherical_partition_intersections,
     remove_roundoff_vertices as _remove_roundoff_vertices)
@@ -181,6 +182,9 @@ def partition_entry_stack(lower_triangle, upper_triangles, upper_sheet_ids,
         all_triangles, 0, selected, selected + 1, face_area, radius_km)
     final = []
     for (polygon, covering), stack_area in zip(stack_regions, stack_areas):
+        if isinstance(polygon, ExactPolygon):
+            raise ValueError('Ordered entry-stack clipping does not support exact-ray '
+                             'polygon precision; the stack region cannot be rounded to binary64.')
         covered_sheets = [int(sheets[pair]) for pair in covering]
         if len(set(covered_sheets)) != len(covered_sheets):
             if stack_area <= tolerance:

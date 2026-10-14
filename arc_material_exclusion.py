@@ -12,6 +12,11 @@ import math
 import numpy as np
 
 _RESOLUTION=64
+# Float64 side tests (see _Index.separated) accept a sign only beyond this multiple of the
+# absolute-term sum; the rounding error is under 1e-15 of it. The floor keeps every product
+# well above the subnormal range, where relative error bounds no longer hold.
+_FILTER_MARGIN=1e-14
+_FILTER_FLOOR=1e-250
 
 def _dot(a,b):return sum((x*y for x,y in zip(a,b)),F(0))
 def _cross(a,b):return (a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0])
@@ -47,6 +52,20 @@ def _partition(poly,planes):
 
 def _planes(blocker,basis):
     return [tuple(_dot(_cross(a,b),p) for p in basis) for a,b in zip(blocker,blocker[1:]+blocker[:1])]
+
+
+def _excludes_reference(planes):
+    """Exact empty-area certificate on the uncut barycentric triangle.
+
+    A plane's three stored values are its values at (0,0), (1,0), and
+    (0,1). Affinity makes the interior values convex combinations of them.
+    If all are nonpositive and at least one is negative, the positive
+    half-plane reaches at most an edge or vertex: it cannot enclose area.
+    Check every plane before constructing potentially large rational cut
+    vertices. An identically zero plane imposes no constraint.
+    """
+    return any(all(value <= 0 for value in plane) and any(value < 0 for value in plane)
+               for plane in planes)
 
 def _box(triangle, *, rays=None):
     # For any unit normalized positive ray combination q, c.q>=d/L>0.
@@ -84,7 +103,7 @@ class _Index:
             raise ValueError('Material exclusion needs finite unit original triangles.')
         self.triangles=triangles.copy();self.triangles.setflags(write=False)
         self.signature=hashlib.sha256(triangles.tobytes()).hexdigest();self.rational={}
-        self.normals={};self.candidate_boxes={}
+        self.normals={};self.candidate_boxes={};self._cross=None
         keys=[];faces=[];glob=[]
         for i,triangle in enumerate(triangles):
             lo,hi=_box(triangle)
@@ -113,11 +132,55 @@ class _Index:
     def exact(self,i):
         if i not in self.rational:self.rational[i]=_rays(self.triangles[i])
         return self.rational[i]
-    def planes(self,i,basis):
+    def _plane_normals(self,i):
         if i not in self.normals:
             blocker=self.exact(i)
             self.normals[i]=tuple(_cross(a,b) for a,b in zip(blocker,blocker[1:]+blocker[:1]))
-        return [tuple(_dot(normal,p) for p in basis) for normal in self.normals[i]]
+        return self.normals[i]
+    def planes(self,i,basis):
+        return [tuple(_dot(normal,p) for p in basis) for normal in self._plane_normals(i)]
+    def reference_planes(self,i,basis):
+        """Preserve plane order, stopping only on an exact empty-area proof."""
+        result=[]
+        for normal in self._plane_normals(i):
+            plane=tuple(_dot(normal,p) for p in basis)
+            if _excludes_reference((plane,)):return None
+            result.append(plane)
+        return result
+    def separated(self,faces,triangle):
+        """Which faces are *proved* to exclude the reference triangle, by float64.
+
+        Plane k of a blocker has the exact value p.(u x v) at each candidate ray p,
+        u and v being the blocker's k-th and next rays. Those are the same binary64
+        numbers `_rays` turns into Fractions, so the polynomial is identical. Here it
+        is evaluated once per face in rounded arithmetic. Only operations whose
+        every rounding is a single IEEE +, - or * are used, so the computed value is
+        within about 6e-16 of the sum of the absolute terms (the permanent) of the
+        exact one. A value is accepted as negative only when it is below minus 1e-14
+        of that permanent, so its sign is certain. Three certainly negative values on
+        one plane are exactly `_excludes_reference`; a result of True is therefore
+        exact, while False only means "not proved" and sends the face to the exact
+        path. Zeros (touching vertices), tiny values and non-finite input all stay
+        False.
+        """
+        if not len(faces):return np.zeros(0,bool)
+        if self._cross is None:
+            t=self.triangles;u=t;v=np.roll(t,-1,axis=1)
+            with np.errstate(all='ignore'):
+                a=u[...,1]*v[...,2];b=u[...,2]*v[...,1];c=u[...,2]*v[...,0]
+                d=u[...,0]*v[...,2];e=u[...,0]*v[...,1];f=u[...,1]*v[...,0]
+                cross=np.stack((a-b,c-d,e-f),axis=-1)
+                weight=np.stack((np.abs(a)+np.abs(b),np.abs(c)+np.abs(d),np.abs(e)+np.abs(f)),axis=-1)
+            self._cross=(cross,weight)
+        cross,weight=self._cross
+        p=np.asarray(triangle,float)
+        with np.errstate(all='ignore'):
+            c=cross[faces];w=weight[faces]
+            value=(p[:,0]*c[...,0,None]+p[:,1]*c[...,1,None])+p[:,2]*c[...,2,None]
+            scale=(np.abs(p[:,0])*w[...,0,None]+np.abs(p[:,1])*w[...,1,None])+np.abs(p[:,2])*w[...,2,None]
+            # `scale` keeps products far from the subnormal range, where relative bounds fail.
+            negative=(scale>_FILTER_FLOOR)&(value<-_FILTER_MARGIN*scale)
+        return negative.all(axis=2).any(axis=1)
 
 def _index(context):
     cache=context.setdefault('_exact_material_cache',{})
@@ -150,17 +213,28 @@ def obstruction(triangles,contexts,old=None):
     for candidate,triangle in enumerate(np.asarray(triangles,float)):
         basis=_rays(triangle)
         bounds=_box(triangle,rays=basis) if indices or old_index is not None else None
-        old_planes=[] if old_index is None else [old_index.planes(int(i),basis)
-                                                 for i in old_index.candidates(triangle,bounds=bounds)]
+        old_faces=[] if old_index is None else [int(i) for i in old_index.candidates(triangle,bounds=bounds)]
+        # Validating each old face (positive winding) stays eager so a bad one still raises
+        # here; only the exact dot products wait for a face that has something to subtract from.
+        for i in old_faces:old_index._plane_normals(i)
+        old_planes=None
         for context_number,(context,index) in enumerate(zip(contexts,indices)):
             selected=index.candidates(triangle,bounds=bounds)
             active,excluded=selections[context_number]
             if active is not None:selected=selected[active[selected]]
             if excluded is not None:selected=selected[~np.isin(selected,excluded)]
-            for face in selected:
-                inside,_=_partition(reference,index.planes(int(face),basis))
+            apart=index.separated(selected,triangle)
+            for face,proved in zip(selected,apart):
+                if proved:
+                    # Same first-touch validation and caching as the exact path; the exact
+                    # dot products it would have spent are what the float proof replaces.
+                    index._plane_normals(int(face));continue
+                planes=index.reference_planes(int(face),basis)
+                if planes is None:continue
+                inside,_=_partition(reference,planes)
                 if not inside:continue
                 parts=[inside]
+                if old_planes is None:old_planes=[old_index.planes(i,basis) for i in old_faces]
                 for planes in old_planes:
                     parts=[q for p in parts for q in _partition(p,planes)[1]]
                     if not parts:break

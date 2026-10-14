@@ -1,4 +1,4 @@
-"""A rounded tiny fan must not discard its large representable stack region."""
+"""Exact regions retain positive fans even when their binary64 projection fails."""
 import unittest
 
 import numpy as np
@@ -33,7 +33,9 @@ class BurialRoundoffFanTests(unittest.TestCase):
         self.assertAlmostEqual(covered,expected,delta=2e-8)
         self.assertGreater(sum(area for (_,cover),area in zip(regions,areas) if not cover),81000.)
         for polygon,cover in regions:
-            self.assertTrue(burial_depth._positive_binary64_winding(polygon))
+            if isinstance(polygon,burial_depth.ExactPolygon):
+                self.assertGreater(polygon.solid_angle(),0.)
+            else:self.assertTrue(burial_depth._positive_binary64_winding(polygon))
             metric=collision_interface.rotation_metric(polygon,6371.)
             self.assertGreaterEqual(np.linalg.eigvalsh(metric).min(),0.)
 

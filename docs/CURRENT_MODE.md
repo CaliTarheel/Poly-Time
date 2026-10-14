@@ -4,7 +4,7 @@
 
 The published runtime comes from run **`20261007-coarse-burial-speed-history`**, using **`coarse_rigid_sheet_history_v1`**. The continuation starts at an explicitly accepted **121 Myr** source boundary. Its prior saved history remains historical evidence rather than being recomputed or relabeled by this source snapshot.
 
-The root [SOURCE_MANIFEST.json](../SOURCE_MANIFEST.json) records the copied source. The runtime modules and browser assets represent that snapshot; supporting tests and inherited documents have their own provenance. Run-specific checkpoints, output frames, private receipts, and machine bindings are excluded.
+The root [SOURCE_MANIFEST.json](../SOURCE_MANIFEST.json) records the copied source in the original publication, commit `6f2b2ccd`. This development branch adds the diagnostic and validation changes described in [Coarse handoff](COARSE_HANDOFF.md); modified files must not be described as byte-identical to the sealed runtime, and the original manifest is not a current-branch checksum list. Supporting tests and inherited documents have their own provenance. Run-specific checkpoints, output frames, private receipts, and machine bindings are excluded.
 
 ## Mechanical choices
 

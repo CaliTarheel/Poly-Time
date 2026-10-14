@@ -22,10 +22,18 @@ import mesh_coverage as geometry
 from parallel_runtime import active_runtime, share_inputs, read_inputs
 from spherical_predicates import edge_distances, plane_distances
 from deforming_regions import IncompleteContactStepError
+from exact_polygon import ExactPolygon
 
 VERSION = 1
 # Below this many uncached faces the process dispatch costs more than it saves.
 MIN_PARALLEL_PARTITION_FACES = 16
+# Below this many regions one predicate call per region costs less than a shared one.
+MIN_SHARED_SIGN_REGIONS = 4
+# Binary64 regions stand when every cover's regions add up to that cover's own clip against
+# the lower face. The consumers allow a pair 2e-11 of the lower face against its cached overlap
+# area: half of it bounds the regions' sum, half the rounding of the clip they are summed to.
+COVER_CLOSURE = 1e-11
+FOOTPRINT_ROUNDING = 1e-11
 
 # Process-local pure geometry only. No Simulation/native-locator field is added.
 # These limits bound retained represented payload; entry/root counts also bound
@@ -57,6 +65,7 @@ def _geometry_arithmetic_key():
 
 
 def _geometry_clone(value):
+    if isinstance(value, ExactPolygon): return value  # All retained coordinates are immutable integers.
     if isinstance(value, np.ndarray): return value.copy()
     if isinstance(value, list): return [_geometry_clone(item) for item in value]
     if isinstance(value, tuple): return tuple(_geometry_clone(item) for item in value)
@@ -64,7 +73,9 @@ def _geometry_clone(value):
 
 
 def _geometry_payload(value):
+    if isinstance(value, ExactPolygon): return _geometry_payload(value.homogeneous)
     if isinstance(value, np.ndarray): return value.nbytes
+    if isinstance(value, int): return max(16, (value.bit_length()+7)//8)
     if isinstance(value, (bytes, str)): return len(value)
     if isinstance(value, (tuple, list)): return sum(_geometry_payload(x) for x in value)
     return 16
@@ -119,9 +130,11 @@ class _ExactGeometryReuse:
     def _generation(self, role, kernel):
         g = kernel.__globals__
         names = ('_split', '_precise_partition', '_positive_binary64_winding', '_uncertain_winding',
+                 '_sensitive_region_area',
                  'edge_distances', 'plane_distances', '_precise_rotation_integral')
         signature = (kernel,)+tuple(g.get(name) for name in names)+(geometry._unit,
-                     geometry._triangle_planes, geometry._polygon_area, np.__version__)
+                     geometry._triangle_planes, geometry._polygon_area, geometry._triangle_area_condition, ExactPolygon,
+                     ExactPolygon.solid_angle, np.__version__)
         with self.lock:
             old = self.generations.get(role)
             if old is not None and old != signature:
@@ -287,18 +300,30 @@ class _PartitionGeometrySession:
             _GEOMETRY_REUSE.bypass()
             return None
         try:
+            # A partition reads only its lower triangle and the selected upper
+            # triangles. Appending an unrelated arc foundation must not evict
+            # every unchanged continental stack. Retain the original indices
+            # and selection order because region covers expose those labels.
+            # Unsupported indexing stays on the original kernel/error path.
+            if (self.triangles.ndim != 3 or self.triangles.shape[1:] != (3, 3)
+                    or self.upper.ndim != 1 or self.upper.dtype.kind not in 'iu'
+                    or type(selected) is not np.ndarray or selected.ndim != 1
+                    or selected.dtype.kind not in 'iu'
+                    or isinstance(face, (bool, np.bool_))
+                    or not isinstance(face, (int, np.integer))):
+                raise TypeError('Local partition reuse requires ordinary integer indices.')
+            dependencies = (_array_geometry_key(self.triangles[face]),
+                            _array_geometry_key(self.upper[selected]),
+                            _array_geometry_key(self.triangles[self.upper[selected]]))
             arguments = (_scalar_geometry_key(face), _array_geometry_key(selected),
                          _scalar_geometry_key(reference_area), _scalar_geometry_key(radius), _geometry_arithmetic_key())
-        except TypeError:
+        except (TypeError, IndexError, ValueError):
             _GEOMETRY_REUSE.bypass()
             return None
-        # A source-generation change clears the old roots before interning.
+        # Exact local bytes, not identities or rounded geometry. The bounded
+        # entry payload includes these bytes; no whole-scene roots are retained.
         _GEOMETRY_REUSE._generation('partition', _partition_face_uncached)
-        records = _GEOMETRY_REUSE._intern_many(self.keys)
-        if records is None:
-            _GEOMETRY_REUSE.bypass()
-            return None
-        return ('partition', tuple(record[0] for record in records), arguments), (self.keys, arguments)
+        return ('partition-local-v1', dependencies, arguments), (dependencies, arguments)
 
     def partition_face(self, face, selected, reference_area, radius):
         cached = self._cache_key(face, selected, reference_area, radius)
@@ -329,20 +354,10 @@ class _PartitionGeometrySession:
             return
         # The same key partition_face builds; faces that cannot be keyed stay serial.
         keys, missing = [None]*len(jobs), []
-        _GEOMETRY_REUSE._generation('partition', _partition_face_uncached)
-        records = _GEOMETRY_REUSE._intern_many(self.keys)
-        if records is not None:
-            roots = tuple(record[0] for record in records)
-            for index, (face, selected, reference_area, radius) in enumerate(jobs):
-                try:
-                    arguments = (_scalar_geometry_key(face), _array_geometry_key(selected),
-                                 _scalar_geometry_key(reference_area), _scalar_geometry_key(radius),
-                                 _geometry_arithmetic_key())
-                except TypeError:
-                    continue
-                keys[index] = ('partition', roots, arguments), (self.keys, arguments)
-                if not _GEOMETRY_REUSE.contains(keys[index][0]):
-                    missing.append(index)
+        for index, job in enumerate(jobs):
+            keys[index] = self._cache_key(*job)
+            if keys[index] is not None and not _GEOMETRY_REUSE.contains(keys[index][0]):
+                missing.append(index)
         computed = {}
         if len(missing) >= MIN_PARALLEL_PARTITION_FACES:
             computed = self._parallel(runtime, [jobs[index] for index in missing], missing, modes)
@@ -380,7 +395,9 @@ def reuse_rotation_metric(polygon, radius, kernel):
     if not _REUSE_ENABLED.get():
         _GEOMETRY_REUSE.bypass(); return _GEOMETRY_REUSE.run(lambda: kernel(polygon, radius))
     try:
-        arguments = (_array_geometry_key(polygon), _scalar_geometry_key(radius), _geometry_arithmetic_key())
+        shape_key = (('exact-ray-polygon', polygon.homogeneous) if isinstance(polygon, ExactPolygon)
+                     else _array_geometry_key(polygon))
+        arguments = (shape_key, _scalar_geometry_key(radius), _geometry_arithmetic_key())
     except TypeError:
         _GEOMETRY_REUSE.bypass(); return _GEOMETRY_REUSE.run(lambda: kernel(polygon, radius))
     return _GEOMETRY_REUSE.get('metric', ('metric', arguments), arguments, kernel,
@@ -423,6 +440,18 @@ def _uncertain_winding(polygon):
     return bool(np.any(determinant<=roundoff))
 
 
+def _sensitive_region_area(polygon, area, radius):
+    """Filter coordinate-return roundoff before regional errors can cancel.
+
+    A rounded cut sweeps area in proportion to its perimeter. Whole-footprint
+    closure cannot detect opposite errors in covered and uncovered pieces.
+    Use the same conservative solid-angle filter as the overlap-area kernel;
+    this only selects exact clipping, never changes an acceptance tolerance.
+    """
+    perimeter=np.linalg.norm(polygon-np.roll(polygon,1,axis=0),axis=1).sum()
+    return bool(area>0. and 32*np.finfo(float).eps*perimeter > 2e-10*area/radius**2)
+
+
 def _homogeneous(point):
     """Binary64 point as exact integers [X, Y, Z, W], W > 0, value (X/W, Y/W, Z/W)."""
     ratios = [float(value).as_integer_ratio() for value in point]
@@ -440,8 +469,8 @@ def _homogeneous_equal(p, q):
     return p[0]*q[3] == q[0]*p[3] and p[1]*q[3] == q[1]*p[3] and p[2]*q[3] == q[2]*p[3]
 
 
-def _precise_partition(triangles,face,selected,upper):
-    """Reclip original represented triangles when repeated cuts lose winding.
+def _precise_partition(triangles,face,selected,upper,*,radius=None,reference_area=None):
+    """Reclip original represented triangles when binary64 cuts lose accuracy.
 
     This never reverses a polygon, changes material, or relaxes a conservation
     or interface-work check. Exact homogeneous coordinates retain incidence
@@ -456,6 +485,13 @@ def _precise_partition(triangles,face,selected,upper):
     the homogeneous form of the Fraction value (b*Da-a*Db)/(Da-Db).
     Decimal division is correctly rounded, so the returned 80-digit unit
     vectors depend only on those rational values.
+
+    When a radius is requested, integrate the exact regions and retain exact
+    rays wherever the binary64 projection fails the existing area/winding
+    contract. Safe projections keep the established array representation.
+    Every exact-positive region survives; an unrepresentable region is never
+    discarded or assigned a corrected area. The legacy radius-free diagnostic
+    path still returns only representable binary64 regions.
     """
     from decimal import Decimal,localcontext
 
@@ -482,6 +518,8 @@ def _precise_partition(triangles,face,selected,upper):
             if (a[3]*b[3]*c[3]+(a[0]*b[0]+a[1]*b[1]+a[2]*b[2])*c[3]
                     +(b[0]*c[0]+b[1]*c[1]+b[2]*c[2])*a[3]+(c[0]*a[0]+c[1]*a[1]+c[2]*a[2])*b[3])<=0:
                 raise ValueError('Burial partition requires minor convex source triangles.')
+        if radius is not None and reference_area is None:
+            reference_area=ExactPolygon(tuple(tuple(point) for point in source[int(face)])).solid_angle()*float(radius)**2
 
         def positive(polygon):
             if len(polygon)<3:return False
@@ -537,13 +575,24 @@ def _precise_partition(triangles,face,selected,upper):
                     if len(inside)<3:break
                 if positive(inside):next_regions.append((inside,cover+(int(pair),)))
             regions=next_regions
-        result = []
+        result, areas = [], []
         for polygon, cover in regions:
             # Original binary64 unit vectors define the source geometry and
             # cached area. Do not renormalize them a second time on return.
             keys = [rational(point) for point in polygon]
             represented = np.asarray([original_points[key] if key in original_points else unit(point)
                                       for key, point in zip(keys, polygon)], float)
+            if radius is not None:
+                exact=ExactPolygon(tuple(tuple(point) for point in polygon))
+                area=exact.solid_angle()*float(radius)**2
+                if (_positive_binary64_winding(represented)
+                        and np.isclose(geometry._polygon_area(represented,radius),area,
+                                       rtol=2e-9,atol=reference_area*2e-11)):
+                    result.append((represented,cover))
+                else:
+                    result.append((exact,cover))
+                areas.append(area)
+                continue
             if _positive_binary64_winding(represented):
                 result.append((represented, cover))
             else:
@@ -561,27 +610,29 @@ def _precise_partition(triangles,face,selected,upper):
                     triangle=represented[[0,index,index+1]]
                     if _positive_binary64_winding(triangle):
                         result.append((triangle,cover))
-        return result
+        return result if radius is None else (result,np.asarray(areas))
 
 
-def _split(polygon, planes, radius, clipper=None):
+def _split(polygon, planes, radius, clipper=None, *, crossed=False):
     """Disjoint intersection/complement of a convex spherical clipping triangle.
 
     A complement piece violates the first clipping plane it fails. The
     remainder satisfies all earlier planes, so later pieces cannot overlap it.
     Every retained polygon is convex and can use the same great-circle kernel.
+    crossed=True states that the caller has already ruled out both early exits.
     """
     inside = polygon
     outside = []
-    # Most regions in a refined cover are wholly outside the next triangle.
-    # Avoid allocating clipped polygons when a separating plane proves that.
-    distances=(plane_distances(polygon[:,None,:],np.asarray(planes)[None,:,:])
-               if clipper is None else edge_distances(
-                   polygon[:,None,:],clipper[None,:,:],np.roll(clipper,-1,axis=0)[None,:,:]))
-    if np.any(np.max(distances, axis=0) < 0.):
-        return np.empty((0, 3)), [polygon]
-    if np.all(distances >= 0.):
-        return polygon, []
+    if not crossed:
+        # Most regions in a refined cover are wholly outside the next triangle.
+        # Avoid allocating clipped polygons when a separating plane proves that.
+        distances=(plane_distances(polygon[:,None,:],np.asarray(planes)[None,:,:])
+                   if clipper is None else edge_distances(
+                       polygon[:,None,:],clipper[None,:,:],np.roll(clipper,-1,axis=0)[None,:,:]))
+        if np.any(np.max(distances, axis=0) < 0.):
+            return np.empty((0, 3)), [polygon]
+        if np.all(distances >= 0.):
+            return polygon, []
     for index,plane in enumerate(planes):
         d=(plane_distances(inside,plane) if clipper is None else
            edge_distances(inside,clipper[index],clipper[(index+1)%len(clipper)]))
@@ -607,25 +658,169 @@ def _split(polygon, planes, radius, clipper=None):
     return inside, outside
 
 
+def _cover_signs(polygons, triangle):
+    """For each region: whether one edge of the cover excludes it, and whether the cover holds it.
+
+    These are the two early exits of _split, decided for every region by one predicate call.
+    The signs are the same exact-filtered ones, so neither answer can differ from _split's own.
+    """
+    sizes = np.fromiter((len(polygon) for polygon in polygons), int, len(polygons))
+    points = np.empty((len(polygons), int(sizes.max()), 3))
+    for size in np.unique(sizes):
+        rows = np.flatnonzero(sizes == size)
+        block = np.stack([polygons[row] for row in rows])
+        points[rows, :size] = block
+        # Padding repeats a vertex of the same region and cannot change either answer.
+        points[rows, size:] = block[:, :1]
+    # Neighbouring regions share their vertices: each distinct point is decided once.
+    _, first, place = np.unique(points.reshape(-1, 3).view(np.dtype((np.void, 24))).ravel(),
+                                return_index=True, return_inverse=True)
+    distances = edge_distances(points.reshape(-1, 3)[first][:, None, :], triangle[None, :, :],
+                               np.roll(triangle, -1, axis=0)[None, :, :])[place].reshape(points.shape)
+    excluded = np.any(distances.max(axis=1) < 0., axis=1)
+    return excluded, np.all(distances >= 0., axis=(1, 2)) & ~excluded
+
+
+def _clipped_regions(triangles, face, selected, upper, radius):
+    """Binary64 stack regions of one lower face, cover by cover.
+
+    Every region meets every cover, and nearly all of those meetings end in one of _split's
+    early exits. Only regions that a cover's edges cross are clipped; the regions, their order
+    and their coordinates are those of clipping every region against every cover.
+    """
+    polygons, covers = [triangles[face]], [()]
+    for pair in selected:
+        triangle = triangles[upper[pair]]
+        planes = geometry._triangle_planes(triangle)
+        # Several regions exist only once the lower face has been cut, and every region cut
+        # from it entered this list with positive area.
+        shared = len(polygons) >= MIN_SHARED_SIGN_REGIONS
+        if shared:
+            excluded, held = _cover_signs(polygons, triangle)
+        else:
+            excluded = held = (False,)*len(polygons)
+        next_polygons, next_covers = [], []
+        for polygon, covering, out, within in zip(polygons, covers, excluded, held):
+            if out:
+                next_polygons.append(polygon)
+                next_covers.append(covering)
+            elif within:
+                next_polygons.append(polygon)
+                next_covers.append(covering+(int(pair),))
+            else:
+                inside, outside = _split(polygon, planes, radius, triangle, crossed=shared)
+                next_polygons.extend(outside)
+                next_covers.extend([covering]*len(outside))
+                if geometry._polygon_area(inside, radius) > 0.:
+                    next_polygons.append(inside)
+                    next_covers.append(covering+(int(pair),))
+        polygons, covers = next_polygons, next_covers
+    return list(zip(polygons, covers))
+
+
+def _convex_represented(polygon):
+    """The polygon without the vertices rounding left on or inside its own hull, or None.
+
+    Two cuts along nearly the same line leave vertices a few ulps apart, and a fan through
+    them can turn the wrong way although the region is large and sound. Signs are exact on
+    the binary64 coordinates and no distance threshold is used. What is returned turns left
+    at every vertex; a region with no such polygon has no represented interior.
+    """
+    points = [_homogeneous(point) for point in polygon]
+    keep = list(range(len(points)))
+    while len(keep) >= 3:
+        flat = next((slot for slot in range(len(keep))
+                     if _homogeneous_det(points[keep[slot-1]], points[keep[slot]],
+                                         points[keep[(slot+1) % len(keep)]]) <= 0), None)
+        if flat is None:
+            break
+        del keep[flat]
+    if len(keep) < 3:
+        return None
+    convex = polygon if len(keep) == len(polygon) else polygon[keep]
+    return convex if _positive_binary64_winding(convex) else None
+
+
+def _rounding_sweep(polygon, radius):
+    """Area that rounded cuts can sweep along a polygon's perimeter (as _sensitive_region_area)."""
+    perimeter = np.linalg.norm(polygon-np.roll(polygon, 1, axis=0), axis=1).sum()
+    return 32*np.finfo(float).eps*perimeter*radius**2
+
+
+def _standing_regions(triangles, face, selected, upper, regions, areas, reference_area, radius):
+    """(regions, areas, error) when the binary64 regions can be used as they are, else None.
+
+    Called when a region's own conditioning is in doubt. A region's area relative to itself is
+    not what the consumers read: they read each cover's area on the lower face, and whole-face
+    closure cannot see area moved between covered and uncovered regions. So each cover is
+    clipped against the lower face once, that clip must be resolved to FOOTPRINT_ROUNDING of
+    the lower face, and the cover's regions must add up to it within COVER_CLOSURE. Before those
+    sums are taken, a region whose fan is in doubt is reduced to its exactly convex vertices,
+    and a region no larger than rounding can sweep along its own perimeter is left out: binary64
+    cannot tell it from the zero-width strip two cuts along one line leave behind, and exact
+    clipping would not have made that strip. Anything else is left to exact clipping.
+    """
+    lower = triangles[face]
+    if any(_uncertain_winding(triangles[index]) for index in np.r_[face, upper[selected]]):
+        return None
+    footprints = {}
+    for pair in selected:
+        triangle = triangles[upper[pair]]
+        inside, _ = _split(lower, geometry._triangle_planes(triangle), radius, triangle)
+        footprints[int(pair)] = geometry._polygon_area(inside, radius)
+        if footprints[int(pair)] > 0. and _rounding_sweep(inside, radius) > FOOTPRINT_ROUNDING*reference_area:
+            return None
+    kept, values = [], []
+    held = dict.fromkeys(footprints, 0.)
+    for (polygon, covering), area in zip(regions, areas):
+        if _uncertain_winding(polygon):
+            polygon = _convex_represented(polygon)
+            if polygon is None:
+                continue
+            area = geometry._polygon_area(polygon, radius)
+        if area <= _rounding_sweep(polygon, radius):
+            continue
+        kept.append((polygon, covering))
+        values.append(area)
+        for pair in covering:
+            held[pair] += area
+    values = np.array(values, float)
+    error = abs(float(values.sum())-reference_area)/reference_area
+    if error > 2e-10 or any(abs(held[pair]-footprints[pair]) > COVER_CLOSURE*reference_area for pair in held):
+        return None
+    return kept, values, error
+
+
 def _partition_face_uncached(triangles, face, selected, upper, reference_area, radius):
     """Disjoint local stack geometry shared by depth and interface mechanics."""
     if len(np.unique(upper[selected])) != len(selected):
         raise ValueError('Duplicate covering pair in burial geometry.')
-    regions = [(triangles[face], ())]
-    for pair in selected:
-        triangle = triangles[upper[pair]]
-        planes = geometry._triangle_planes(triangle)
-        next_regions = []
-        for polygon, covering in regions:
-            inside, outside = _split(polygon, planes, radius,triangle)
-            next_regions.extend((piece, covering) for piece in outside)
-            if geometry._polygon_area(inside, radius) > 0.:
-                next_regions.append((inside, covering+(int(pair),)))
-        regions = next_regions
-    if any(_uncertain_winding(polygon) for polygon,_ in regions):
-        regions=_precise_partition(triangles,face,selected,upper)
+    regions = _clipped_regions(triangles, face, selected, upper, radius)
     areas = np.array([geometry._polygon_area(polygon, radius) for polygon, _ in regions])
     error = abs(float(areas.sum())-reference_area)/reference_area
+    # Thin original triangles may lose a region before it reaches this list.
+    # Inspect their conditioning as well as every surviving regional area.
+    sensitive_source=bool(len(selected) and np.any(geometry._triangle_area_condition(
+        triangles[np.r_[face,upper[selected]]])))
+    standing = None
+    if error <= 2e-10 and not sensitive_source:
+        standing = regions, areas, error
+        if any(_uncertain_winding(polygon) or _sensitive_region_area(polygon,area,radius)
+               for (polygon,_),area in zip(regions,areas)):
+            standing = _standing_regions(triangles, face, selected, upper, regions, areas, reference_area, radius)
+    if standing is not None:
+        regions, areas, error = standing
+    else:
+        regions,areas=_precise_partition(triangles,face,selected,upper,radius=radius,reference_area=reference_area)
+        # Unrepresentable regions carry exact rays shared by area and moments.
+        # Safe binary64 projections still pass the unchanged regional contract;
+        # an unrelated exact-area sidecar cannot legitimize a changed polygon.
+        represented=np.array([(polygon.solid_angle()*float(radius)**2
+                               if isinstance(polygon,ExactPolygon)
+                               else geometry._polygon_area(polygon,radius)) for polygon,_ in regions])
+        if not np.allclose(represented,areas,rtol=2e-9,atol=reference_area*2e-11):
+            raise ValueError('Exact burial regions exceed binary64 area representation accuracy.')
+        error = abs(float(areas.sum())-reference_area)/reference_area
     if error > 2e-10:
         raise ValueError('Local burial regions do not conserve their lower footprint.')
     return regions, areas, error
@@ -741,5 +936,6 @@ def integrate(s, thickness, pairs, *, depth_km, heating_delay_myr):
                  covered_union_area_km2=float(union_area.sum()))
     attribution = dict(lower=lower, weight=pair_area, contact=contact,
                        covered_area=covered_area, covered_share=share,
+                       covered_union_area_km2=union_area.copy(),
                        eligible_pair_volume_km3=eligible_pair_volume)
     return eligible, scope, attribution

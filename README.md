@@ -2,7 +2,7 @@
 
 The guarded production source of an exploratory tectonic and terrain evolution simulator, derived from Asein Lite. Its model covers plate motion, ocean and continental material, collision stacks, subduction, arcs, and relief, with a local browser interface for inspecting history.
 
-This publication preserves the simulation code used by the `20261007-coarse-burial-speed-history` continuation in **`coarse_rigid_sheet_history_v1`** mode. That mode deliberately reduces the mechanical scope so a long history can be explored. Its unresolved processes and observed problems are listed in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
+The initial publication, commit `6f2b2ccd`, preserves the simulation code used by the `20261007-coarse-burial-speed-history` continuation in **`coarse_rigid_sheet_history_v1`** mode. This development branch adds the diagnostics and validation described in [Coarse handoff](docs/COARSE_HANDOFF.md); those source changes do not establish adoption by the sealed active run. The mode's unresolved processes and observed problems are listed in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
 **This is a source snapshot, not a standalone runnable simulation release.** The exact production server requires an owned guardian, an initial budget and token, and a valid resumed-state acceptance chain. Those private run bindings and the historical state are not published. A portable launcher remains future work; the production guards have been preserved.
 
@@ -26,14 +26,20 @@ The original map and configuration for the Asein Lite history are archived in
 checksums and retrieval instructions. These are the 0 Myr inputs, not an evolved
 checkpoint or a portable production launcher.
 
+New reviewed Lite worlds use an effective slab pull of **3 × 10¹³ N per metre of active trench**, including the Highland preset and command-line fresh defaults. The form shows **30** in units of 10¹² N/m. Explicit force settings and recorded worlds retain their values; the engine's historical missing-force default remains 5 × 10¹² N/m. This changes fresh configuration only, leaving boundary resistance and the force solver unchanged.
+
+New reviewed Lite worlds select **Start with several ocean plates and ridges** by default (four water regions, with the existing ridge cooling-age settings). Explicitly disabling it, loading a saved configuration, or choosing the alternative supercontinent-ring initializer preserves that choice. Detailed-slab and legacy defaults are unchanged. Continental attachments still require explicit region-to-plate choices for the particular starting map; enabling ocean splitting alone does not attach the new ocean regions to continents. Seeded ridges describe the inherited ocean geometry and ages, while active spreading and displayed boundary types follow the solved motion.
+
+Fresh reviewed worlds record `normal_spreading_version = 1`: any positive normal opening can create paired ocean crust, including slow or highly oblique opening. Previously, creation required more than 2 km/Myr (0.2 cm/year) and 15% of the sliding speed, while normal-motion consumption admitted any closing speed. The new policy retains the existing finite-geometry, material-exclusion and local capacity checks; it adds no driving force or prescribed velocity. Historical states without the marker retain their previous spreading gate, and source compatibility checks still apply to their checkpoints. Legacy raster dynamics are unchanged.
+
 | Location | Contents |
 | --- | --- |
-| Root Python modules and `web/` | The simulation runtime and browser assets copied from the recorded runtime snapshot. |
+| Root Python modules and `web/` | The recorded runtime baseline, with this branch's source changes described in [Coarse handoff](docs/COARSE_HANDOFF.md). |
 | `tests/` | Regression tests and their included fixtures; presence in this repository is not a claim that every test has been run for this publication. |
 | `benchmarks/`, `examples/`, `capture/` | Supporting source and examples retained from the project. |
 | `reference_operations/` | Archived preparation, supervision, budget, and delivery code. Private bindings have been removed or redacted; these are references, not a ready-to-run production controller. |
 | `docs/inherited/` | Selected earlier design and scientific reference documents. They include historical results and optional or proposed features; they do not define the active mode. |
-| [SOURCE_MANIFEST.json](SOURCE_MANIFEST.json) | Source provenance and file hashes for this publication. |
+| [SOURCE_MANIFEST.json](SOURCE_MANIFEST.json) | Source provenance and file hashes for the original publication at `6f2b2ccd`; it is not a hash manifest for the modified development branch. |
 
 The source run's checkpoint data, output history, credentials, account state, and private operational receipts are excluded. The code snapshot is neither a self-contained reproduction of that world nor a ready-to-evolve fresh-world package.
 
@@ -46,6 +52,8 @@ In the recorded coarse mode, material sheets move rigidly while overlapping colu
 The production continuation used an independent Windows Job controller with an **1800 wall-second limit per simulated 1 Myr**, including mandatory output and acceptance work. The interface command above does not install that guard or satisfy the worker's bindings. The limit is a control policy, not a measured speed guarantee for this code on another machine.
 
 A completed, validated 1000 Myr history is not included in this release. Read [Current mode](docs/CURRENT_MODE.md) and [Known limitations](KNOWN_LIMITATIONS.md) alongside the inherited scientific documents when extending the model.
+
+The volcanic-point development is described in [Volcanic points and compact foundations](docs/ARC_POINT_NUCLEATION.md), including pending-volume accounting and the limits of point-to-polygon promotion.
 
 ## Attribution and licensing
 

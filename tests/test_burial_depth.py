@@ -4,7 +4,6 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import numpy as np
 
@@ -72,19 +71,18 @@ def narrow_production_overlap():
 
 class BurialIntegrationTests(unittest.TestCase):
     def test_self_overlap_rejects_the_complete_coupled_timestep(self):
-        s = split_cover()
+        # Real coincident covers exercise the current batched geometry path.
+        # Patching partition_face no longer intercepts integrate's session API.
+        s = prepare([(triangle(), 20., 0., False), (triangle(), 20., 0., False),
+                     (triangle(), 20., 0., False)], [(1, 3), (2, 3)])
         s.parcel_collision_sheet[1] = s.parcel_collision_sheet[0]
         upper = np.array([0, 1]); lower = np.array([2, 2])
-        weight = float(s.material_surface['area_km2'][2])*.1
+        weight = float(s.material_surface['area_km2'][2])
         pairs = (upper, lower, np.full(2, weight), np.ones(2, int))
-        polygon = s.material_surface['vertices'][s.material_surface['faces'][2]]
-        regions = [(polygon, (0, 1))]
-        with patch.object(burial_depth, 'partition_face',
-                          return_value=(regions, np.array([weight]), 0.)):
-            with self.assertRaisesRegex(IncompleteContactStepError,
-                                        'complete coupled timestep'):
-                burial_depth.integrate(s, np.full(3, 20.), pairs,
-                                       depth_km=50., heating_delay_myr=5.)
+        with self.assertRaisesRegex(IncompleteContactStepError,
+                                    'complete coupled timestep'):
+            burial_depth.integrate(s, np.full(3, 20.), pairs,
+                                   depth_km=50., heating_delay_myr=5.)
 
     def test_narrow_production_overlaps_match_independent_high_precision_areas(self):
         s, triangles, expected = narrow_production_overlap()
