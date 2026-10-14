@@ -1824,12 +1824,16 @@ class Simulation:
         area = np.bincount(self.plate, weights=self.cell_area, minlength=self.capacity)
         speed = np.linalg.norm(np.cross(self.omega[self.plate], self.xyz), axis=1) * RADIUS_KM * .1
         ocean_mask = self.crust == 0
+        # Arc source area is a 25-km magma-volume equivalent. Fixed-footprint
+        # deposits thicken existing material without creating reference area.
+        arc_reference_created = (self.process_totals["arc_added_km2"]
+                                 - self.process_totals.get("arc_deposited_source_area_km2", 0.))
         stats = {"continental_area_km2": float(self.cell_area[~ocean_mask].sum()),
                  "continental_fraction": float(self.cell_area[~ocean_mask].sum() / self.earth_area),
                  "craton_area_km2": float(self.cell_area[self.crust == 2].sum()),
                  "buoyant_crust_mass_km2": float(self.mass.sum()),
                  "original_continental_mass_km2": self.original_mass,
-                 "continental_mass_retained_fraction": float((self.mass.sum() - self.process_totals["arc_added_km2"]) / self.original_mass) if self.original_mass else 1.,
+                 "continental_mass_retained_fraction": float((self.mass.sum() - arc_reference_created) / self.original_mass) if self.original_mass else 1.,
                  "craton_mass_retained_fraction": float(self.mass[self.kind == 2].sum() / self.original_craton_mass) if self.original_craton_mass else 1.,
                  "mean_ocean_age_myr": float(np.average(self.age[ocean_mask], weights=self.cell_area[ocean_mask])) if np.any(ocean_mask) else 0.,
                  "mean_plate_speed_cm_yr": float(np.average(speed, weights=self.cell_area)),

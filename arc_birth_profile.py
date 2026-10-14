@@ -171,6 +171,9 @@ def snapshot_fields(s):
 def validate_frame(frame):
     import arc_birth_footprint
     arc_birth_footprint.validate_frame(frame)
+    from arc_emplacement_geometry import validate_deposition_policy
+    deposition_version=validate_deposition_policy(frame)
+    modes=('birth','growth','deposition') if deposition_version else ('birth','growth')
     tag=frame.get('arc_birth_profile_version',0)
     if isinstance(tag,(bool,np.bool_)) or not isinstance(tag,Integral) or tag not in (0,VERSION):
         raise ValueError('Unsupported saved juvenile birth profile version.')
@@ -205,8 +208,11 @@ def validate_frame(frame):
     for index,entry in enumerate(ledger):
         if (not isinstance(entry,dict) or type(entry.get('placement_id')) is not int or entry['placement_id']!=index+1
                 or type(entry.get('arc_id')) is not int or entry['arc_id']<1
-                or entry.get('mode') not in ('birth','growth')):
+                or entry.get('mode') not in modes):
             raise ValueError('Invalid enduring juvenile placement identity.')
+        if entry['mode']=='deposition' and (type(entry.get('receiving_face_id')) is not int
+                                             or entry['receiving_face_id']<1):
+            raise ValueError('Enduring juvenile deposition requires its actual receiving face identity.')
         area=entry.get('area_km2');volume=entry.get('volume_km3');time=entry.get('placement_time_myr')
         point=np.asarray(entry.get('geometry_xyz'),float)
         if (not nonnegative(area) or area==0 or not nonnegative(volume) or not balance(volume,25.*area)
@@ -231,8 +237,19 @@ def validate_frame(frame):
     if any(not balance(amount,original_by_origin[origin]) for origin,amount in spent_by_origin.items()):
         raise ValueError('Each entered magma origin must remain fully placed or pending.')
     stats=frame.get('stats',{})
+    if not isinstance(stats,dict):
+        raise ValueError('Juvenile cumulative statistics must be a mapping.')
     if 'arc_added_km2' in stats and not balance(sum(row['area_km2'] for row in ledger),stats['arc_added_km2']):
         raise ValueError('Enduring juvenile source placements disagree with cumulative emitted area.')
+    deposited=sum(row['area_km2'] for row in ledger if row['mode']=='deposition')
+    cumulative=('arc_deposited_source_area_km2','arc_deposited_volume_km3')
+    # Old epochs and future-only activations have no deposited history. Their
+    # missing counters mean zero; a real deposition history must be explicit.
+    if 'stats' in frame and (deposited>0. or any(key in stats for key in cumulative)):
+        values=[stats.get(key) for key in cumulative]
+        if (not all(nonnegative(value) for value in values)
+                or not balance(values[0],deposited) or not balance(values[1],25.*deposited)):
+            raise ValueError('Cumulative juvenile deposition disagrees with enduring source placements.')
     report=frame.get('arc_material_diagnostics',{}).get('birth_profile_capacity')
     if report is None and frame.get('time_myr')==0. and not frame.get('arc_material_diagnostics'):return
     if not isinstance(report,dict) or type(report.get('version')) is not int or report['version']!=VERSION:
@@ -245,6 +262,8 @@ def validate_frame(frame):
     if report['maximum_accepted_birth_grade']>MAX_GRADE*(1.+1e-10):
         raise ValueError('Juvenile birth exceeded its constructive slope capacity.')
     for row in frame['arc_material_diagnostics']['emplacement_geometry']['sources']:
+        if row.get('mode') not in modes:
+            raise ValueError('Juvenile capacity source mode requires its explicit policy.')
         profile=row.get('profile_capacity')
         if (not isinstance(profile,dict) or profile.get('version')!=VERSION
                 or isinstance(profile.get('version'),bool) or not isinstance(profile.get('version'),Integral)):
@@ -276,7 +295,12 @@ def validate_frame(frame):
                 raise ValueError('Placed juvenile source lacks a valid capacity decision.')
             if row['mode']=='birth' and limit!=MAX_GRADE:
                 raise ValueError('A juvenile birth cannot inherit tectonic oversteepening.')
-            if row['mode']=='growth':
+            if row['mode']=='deposition':
+                previous=profile.get('previous_maximum_grade')
+                if (isinstance(previous,(bool,np.bool_)) or not isinstance(previous,Real)
+                        or not np.isfinite(previous) or previous<0. or limit!=max(MAX_GRADE,previous)):
+                    raise ValueError('Juvenile deposition cannot relax its original constructive slope limit.')
+            if row['mode'] in ('growth','deposition'):
                 excess=profile.get('maximum_per_face_grade_excess')
                 if (isinstance(excess,bool) or not isinstance(excess,Real) or not np.isfinite(excess)
                         or excess<0 or excess>max(1e-10,limit*1e-10)):

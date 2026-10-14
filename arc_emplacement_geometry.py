@@ -394,10 +394,120 @@ def commit(context, surface, indices):
     context['updates']=retained
 
 
+def validate_deposition_policy(frame):
+    """Require explicit fixed-footprint source-volume semantics in saved frames."""
+    tag=frame.get('arc_deposition_version',0)
+    if isinstance(tag,(bool,np.bool_)) or not isinstance(tag,Integral) or tag not in (0,1):
+        raise ValueError('Unsupported saved juvenile column deposition version.')
+    policy=frame.get('arc_deposition_policy')
+    if not tag:
+        if policy is not None:
+            raise ValueError('Juvenile column deposition policy requires its version.')
+        arc=frame.get('arc_material_diagnostics',{})
+        if isinstance(arc,dict):
+            for key in ('deposited_source_area_km2','deposited_volume_km3','deposited_patches'):
+                if key in arc:
+                    value=arc[key]
+                    if (isinstance(value,(bool,np.bool_)) or not isinstance(value,Real)
+                            or not np.isfinite(value) or value!=0.):
+                        raise ValueError('Juvenile deposition totals require their saved version.')
+        stats=frame.get('stats',{})
+        if isinstance(stats,dict):
+            for key in ('arc_deposited_source_area_km2','arc_deposited_volume_km3'):
+                if key in stats:
+                    value=stats[key]
+                    if (isinstance(value,(bool,np.bool_)) or not isinstance(value,Real)
+                            or not np.isfinite(value) or value!=0.):
+                        raise ValueError('Cumulative juvenile deposition requires its saved version.')
+        return 0
+    expected=dict(version=1,source_column_km=25.,maximum_column_km=75.,
+        minimum_source_area_km2=.001,routing='source_containing_native_face',
+        fallback='failed_lateral_growth')
+    if (not isinstance(policy,dict) or set(policy)!=set(expected)
+            or any(isinstance(policy.get(key),(bool,np.bool_)) or policy.get(key)!=value
+                   for key,value in expected.items())
+            or not isinstance(policy.get('version'),Integral)):
+        raise ValueError('Invalid fixed-footprint juvenile deposition policy.')
+    if any(isinstance(frame.get(key),(bool,np.bool_)) or not isinstance(frame.get(key),Integral)
+           or frame[key]!=1 for key in ('arc_material_version','arc_emplacement_version',
+                                       'arc_birth_profile_version','arc_source_cohort_version')):
+        raise ValueError('Juvenile deposition requires physical profiles and source provenance.')
+    return int(tag)
+
+
+def _validate_column_deposition(row, placed):
+    """Check a local volume receipt without reinterpreting source area as land."""
+    receipt=row.get('column_deposition')
+    if (not isinstance(receipt,dict) or type(receipt.get('version')) is not int
+            or receipt['version']!=1 or receipt.get('geometry_unchanged') is not True):
+        raise ValueError('Juvenile deposition requires an unchanged-geometry receipt.')
+    def scalar(key):
+        value=receipt.get(key)
+        if isinstance(value,(bool,np.bool_)) or not isinstance(value,Real) or not np.isfinite(value) or value<0:
+            raise ValueError('Invalid juvenile deposition scalar: '+key)
+        return float(value)
+    def integers(key, count=None, *, positive=False):
+        value=receipt.get(key)
+        if (not isinstance(value,list) or (count is not None and len(value)!=count)
+                or any(isinstance(x,(bool,np.bool_)) or not isinstance(x,Integral)
+                       or x<(1 if positive else 0) for x in value)):
+            raise ValueError('Invalid juvenile deposition identity: '+key)
+        return value
+    count=len(row['source_indices'])
+    source_faces=integers('source_faces',count)
+    source_ids=integers('source_face_ids',count,positive=True)
+    receiving=integers('receiving_faces')
+    receiving_ids=integers('receiving_face_ids',len(receiving),positive=True)
+    if len(set(receiving))!=len(receiving) or len(set(receiving_ids))!=len(receiving_ids):
+        raise ValueError('A juvenile deposition receipt cannot repeat a receiving face.')
+    forward={};reverse={}
+    for face,identity in zip(source_faces,source_ids):
+        if forward.setdefault(face,identity)!=identity or reverse.setdefault(identity,face)!=face:
+            raise ValueError('Juvenile source face indices and persistent identities disagree.')
+    if any(forward.get(face)!=identity for face,identity in zip(receiving,receiving_ids)):
+        raise ValueError('Juvenile deposition left its actual source-containing faces.')
+    arrays={}
+    for key in ('face_area_km2','face_reference_area_km2','face_volume_added_km3',
+                'face_thickness_before_km','face_thickness_after_km'):
+        raw=receipt.get(key)
+        if not isinstance(raw,list) or any(isinstance(x,(bool,np.bool_)) or not isinstance(x,Real) for x in raw):
+            raise ValueError('Invalid juvenile deposition face array: '+key)
+        value=np.asarray(raw,float)
+        if value.shape!=(len(receiving),) or not np.isfinite(value).all() or np.any(value<=0):
+            raise ValueError('Juvenile deposition face amounts must be finite and positive.')
+        arrays[key]=value
+    area=arrays['face_area_km2'];volume=arrays['face_volume_added_km3']
+    before=arrays['face_thickness_before_km'];after=arrays['face_thickness_after_km']
+    if (np.any(after<before) or np.any(after>75.) or np.any(volume<.025-1e-7)
+            or not np.allclose(area*(after-before),volume,rtol=2e-11,atol=1e-7)):
+        raise ValueError('Juvenile deposited columns do not conserve their admitted source volume.')
+    spent=np.asarray(row.get('source_placed_area_km2'),float)
+    if spent.shape!=(count,) or not np.isfinite(spent).all() or np.any(spent<0):
+        raise ValueError('Juvenile deposition needs aligned per-origin spending.')
+    by_face={}
+    for face,amount in zip(source_faces,spent):
+        by_face[face]=by_face.get(face,0.)+25.*float(amount)
+    actual_by_face=dict(zip(receiving,volume))
+    if any(not np.isclose(amount,actual_by_face.get(face,0.),rtol=2e-11,atol=1e-7)
+           for face,amount in by_face.items()):
+        raise ValueError('Juvenile deposition borrowed volume from a different source face.')
+    actual=scalar('actual_added_volume_km3');source=scalar('source_volume_km3')
+    if (scalar('reference_area_change_km2')!=0. or scalar('footprint_area_change_km2')!=0.
+            or not np.isclose(actual,float(volume.sum()),rtol=2e-11,atol=1e-7)
+            or not np.isclose(source,25.*placed,rtol=2e-11,atol=1e-7)
+            or not np.isclose(actual,source,rtol=2e-11,atol=1e-7)
+            or not np.isclose(float(spent.sum()),placed,rtol=1e-11,atol=1e-7)
+            or (placed>0.)!=bool(receiving)):
+        raise ValueError('Juvenile deposition changed its footprint or failed its source-volume ledger.')
+    if placed==0. and (actual!=0. or source!=0.):
+        raise ValueError('Rejected juvenile deposition cannot consume source volume.')
+
+
 def validate_frame(frame):
     """Validate marked saved policy ledgers without rerunning footprint geometry."""
     import arc_birth_footprint
     footprint_version=arc_birth_footprint.validate_frame(frame)
+    deposition_version=validate_deposition_policy(frame)
     version=frame.get('arc_emplacement_version',0)
     if isinstance(version,(bool,np.bool_)) or not isinstance(version,Integral) or version not in (0,VERSION):
         raise ValueError('Unsupported saved juvenile emplacement version.')
@@ -452,7 +562,8 @@ def validate_frame(frame):
         amount=scalar(row,'requested_area_km2'); placed=scalar(row,'accepted_area_km2')
         held=scalar(row,'pending_area_km2'); count=scalar(row,'geometry_evaluations',integer=True)
         scalar(row,'owner',integer=True); scalar(row,'arc_id',integer=True)
-        if row.get('mode') not in ('birth','growth') or not near(amount,placed+held):
+        modes=('birth','growth','deposition') if deposition_version else ('birth','growth')
+        if row.get('mode') not in modes or not near(amount,placed+held):
             raise ValueError('Invalid juvenile source mode or admission arithmetic.')
         if scalar(row,'relocation_km')!=0.:
             raise ValueError('Finite juvenile emplacement cannot relocate its source.')
@@ -461,6 +572,10 @@ def validate_frame(frame):
                 or len(set(indices))!=len(indices) or points.shape!=(len(indices),3) or points.dtype.kind not in 'fiu'
                 or not np.isfinite(points).all() or not np.allclose(np.linalg.norm(points,axis=1),1.,atol=2e-10,rtol=0.)):
             raise ValueError('Juvenile source positions and local batch indices must align.')
+        if row['mode']=='deposition':
+            _validate_column_deposition(row,placed)
+        elif 'column_deposition' in row:
+            raise ValueError('A column deposition receipt requires its explicit source mode.')
         measured=row.get('accepted_footprint')
         if placed>0.:
             if not isinstance(measured,dict) or measured.get('admissible') is not True:
@@ -491,6 +606,10 @@ def validate_frame(frame):
                         or candidate>25.*placed/8.+area_allowance
                         or candidate<placed-area_allowance):
                     raise ValueError('Juvenile birth footprint exceeds its fixed source volume or column bounds.')
+            elif row['mode']=='deposition':
+                if (candidate!=old or old<=0. or new!=0. or lost!=0. or obstruction!=0. or eligible!=0.
+                        or sum(row['column_deposition']['face_area_km2'])>old+area_allowance):
+                    raise ValueError('Juvenile column deposition must retain exactly the existing footprint.')
             elif not near(candidate-old,placed):
                 raise ValueError('Legacy juvenile footprint must match its source equivalent area.')
         totals+=amount,placed,held,count
@@ -498,3 +617,23 @@ def validate_frame(frame):
         raise ValueError('Finite juvenile aggregate does not equal its source records.')
     if not near(accepted,scalar(arc,'added_area_km2')) or not near(25.*accepted,scalar(arc,'added_volume_km3')):
         raise ValueError('Finite juvenile source ledger disagrees with actual emplacement.')
+    deposition_rows=[row for row in rows if row['mode']=='deposition']
+    summary=('deposited_source_area_km2','deposited_volume_km3','deposited_patches')
+    # A future-only activation can retain the preceding step's legacy report.
+    # Once deposition is attempted, its summary must reconcile independently.
+    if deposition_rows or any(key in arc for key in summary):
+        deposited=scalar(arc,summary[0]);deposited_volume=scalar(arc,summary[1])
+        deposited_patches=scalar(arc,summary[2],integer=True)
+        expected=sum(row['accepted_area_km2'] for row in deposition_rows)
+        expected_patches=sum(row['accepted_area_km2']>0. for row in deposition_rows)
+        if (not near(deposited,expected) or not near(deposited_volume,25.*expected)
+                or deposited_patches!=expected_patches
+                or (not deposition_version and (deposited!=0. or deposited_volume!=0. or deposited_patches!=0.))):
+            raise ValueError('Juvenile deposition aggregate disagrees with its source receipts or version.')
+        reference_gain=scalar(arc,'physical_mass_added_km2')
+        residual=arc.get('physical_mass_residual_km2')
+        expected_reference=accepted-deposited
+        if (isinstance(residual,(bool,np.bool_)) or not isinstance(residual,Real)
+                or not np.isfinite(residual) or not near(reference_gain,expected_reference)
+                or not near(residual,reference_gain-expected_reference) or not near(residual,0.)):
+            raise ValueError('Juvenile reference-area gain must exclude fixed-footprint deposition.')

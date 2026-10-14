@@ -71,6 +71,8 @@ def snapshot_fields(s):
     result.update(arc_birth_profile.snapshot_fields(s))
     import arc_birth_footprint
     result.update(arc_birth_footprint.snapshot_fields(s))
+    import arc_local_deposition
+    result.update(arc_local_deposition.snapshot_fields(s))
     return result
 
 
@@ -484,6 +486,8 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
     policy=getattr(s,'native_arc_emplacement_version',0)
     import arc_birth_profile
     profile_version=arc_birth_profile.version(s)
+    import arc_local_deposition
+    deposition_version=arc_local_deposition.version(s)
     if isinstance(policy,(bool,np.bool_)) or not isinstance(policy,(int,np.integer)) or policy not in (0,1):
         raise ValueError('Unsupported juvenile emplacement policy.')
     if positions is None:
@@ -607,17 +611,18 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
     before_mass=float(s.mass.sum())
     before_footprint=float(s.material_surface['area_km2'].sum())
     new_faces=0;grown=0;added=0.;volume=0.;errors=[];owner_totals={}
+    deposited_area=0.;deposited_patches=0
     born_profiles=[]
     # Basements are sampled at the supplied points before any material changes.
     for key,indices in groups.items():
         take=np.asarray(indices,int);area=float(all_area[take].sum());first=take[0]
         owner=int(all_owners[first]);point=all_points[first];arc=int(route['arc_id'][first])
-        spending_take=take.copy()
+        spending_take=take.copy();spent_override=None;mode='growth' if arc else 'birth'
         if area<MIN_PATCH_AREA_KM2:
             unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
         if arc:
             selected=growable.get((arc,int(component_at_face[route['material_index'][first]])))
-            plan=None
+            plan=None;result=None;accepted=area
             if placement is not None and selected is not None:
                 surface=s.material_surface
                 old_ids,old_faces=np.unique(surface['faces'][selected],return_inverse=True)
@@ -637,25 +642,43 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
                 if accepted<=0.:
                     if profile_version:
                         placement_rows[-1]['profile_capacity']=dict(version=1,admissible=False,reason='no_geographic_footprint')
-                    unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
-                plan=admission['plan']
-                if profile_version:
+                else:plan=admission['plan']
+                if profile_version and accepted>0.:
                     capacity=arc_birth_profile.growth(s,selected,plan)
                     placement_rows[-1]['profile_capacity']=capacity
                     if not capacity['admissible']:
                         placement_rows[-1].update(accepted_area_km2=0.,pending_area_km2=area,
                             physical_emplacement_rejected='constructive_profile_capacity')
-                        unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
+                        accepted=0.
             else: accepted=area
-            result=None if selected is None else _grow(s,selected,accepted,prepared_plan=plan)
+            if selected is not None and accepted>0.:
+                result=_grow(s,selected,accepted,prepared_plan=plan)
             if result is None:
-                if placement is not None and selected is not None:
+                if placement is not None and selected is not None and accepted>0.:
                     placement_rows[-1].update(accepted_area_km2=0.,pending_area_km2=area,
                                                physical_emplacement_rejected='column_or_trace_bounds')
+                if deposition_version and placement is not None and selected is not None:
+                    lateral=placement_rows[-1]
+                    deposited=arc_local_deposition.propose(s,selected,route['material_index'][take],all_area[take])
+                    accepted=float(deposited['accepted_area_km2']);mode='deposition'
+                    placement_rows[-1]=dict(version=1,mode=mode,arc_id=arc,owner=owner,
+                        source_indices=take.tolist(),geometry_xyz=all_points[take].tolist(),
+                        requested_area_km2=area,accepted_area_km2=accepted,pending_area_km2=area-accepted,
+                        geometry_evaluations=lateral['geometry_evaluations'],
+                        column_evaluations=deposited['column_evaluations'],relocation_km=0.,
+                        requested_footprint=None,accepted_footprint=deposited['accepted_footprint'],
+                        last_examined_footprint=None,profile_capacity=deposited['profile_capacity'],
+                        column_deposition=deposited['column_deposition'],lateral_attempt=lateral)
+                    if accepted>0.:
+                        result=arc_local_deposition.commit(s,deposited)
+                        spent_override=deposited['spent_area_km2']
+                        deposited_area+=accepted;deposited_patches+=1
+            if result is None:
                 unresolved.extend((all_points[i].copy(),owner,float(all_area[i]),int(i)) for i in take);continue
-            if placement is not None:
+            if placement is not None and mode!='deposition':
                 emplacement.commit(placement,s.material_surface,selected)
-            grown+=1;errors.append(result['volume_error_km3'])
+            if mode!='deposition':
+                grown+=1;errors.append(result['volume_error_km3'])
         else:
             # The containing cell only seeds marker bookkeeping. Both actual
             # geometry and basal height use the original geographic position.
@@ -715,9 +738,10 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
             if profile_version:
                 born_profiles.append(result['birth_profile'])
                 placement_rows[-1]['profile_capacity']=result['birth_profile']
-        spent=np.zeros(len(take))
-        eligible_spending=np.isin(take,spending_take)
-        spent[eligible_spending]=all_area[take[eligible_spending]]*(accepted/float(all_area[spending_take].sum()))
+        spent=np.zeros(len(take)) if spent_override is None else spent_override
+        if spent_override is None:
+            eligible_spending=np.isin(take,spending_take)
+            spent[eligible_spending]=all_area[take[eligible_spending]]*(accepted/float(all_area[spending_take].sum()))
         held=all_area[take]-spent
         unresolved.extend((all_points[i].copy(),owner,float(amount),int(i)) for i,amount in zip(take,held) if amount>0.)
         if profile_version:
@@ -731,10 +755,12 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
             ledger=getattr(s,'native_arc_source_placements',[])
             for i,amount in zip(take,spent):
                 if amount<=0:continue
-                ledger.append(dict(placement_id=len(ledger)+1,arc_id=int(arc or result['arc_id']),
+                entry=dict(placement_id=len(ledger)+1,arc_id=int(arc or result['arc_id']),
                     placement_time_myr=float(s.t),source_provenance=deepcopy(all_provenance[i]),
                     geometry_xyz=[all_points[i].tolist()],area_km2=float(amount),volume_km3=float(25.*amount),
-                    mode='growth' if arc else 'birth'))
+                    mode=mode)
+                if mode=='deposition':entry['receiving_face_id']=int(s.parcel_patch[route['material_index'][i]])
+                ledger.append(entry)
             s.native_arc_source_placements=ledger
         area=accepted
         added+=area;volume+=result['added_volume_km3']
@@ -760,6 +786,9 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
         raise ValueError('Geographic arc birth/growth must use the same explicit magma source volume.')
     s.process_totals['arc_added_km2']+=added
     s.process_totals['arc_added_volume_km3']=s.process_totals.get('arc_added_volume_km3',0.)+volume
+    if deposition_version:
+        s.process_totals['arc_deposited_source_area_km2']=s.process_totals.get('arc_deposited_source_area_km2',0.)+deposited_area
+        s.process_totals['arc_deposited_volume_km3']=s.process_totals.get('arc_deposited_volume_km3',0.)+deposited_area*JUVENILE_THICKNESS_KM
     s._sync_material();s._coverage_signature=None;s._owner_occupancy_signature=None
     for name in ('_material_occupancy_hits','_material_coverage','exposed_material'):
         if hasattr(s,name):delattr(s,name)
@@ -768,7 +797,7 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
     report=dict(source_geometry_version=1,added_area_km2=added,added_volume_km3=volume,
         requested_area_km2=incoming,previous_pending_area_km2=prior,rejected_area_km2=rejected_area,
         rejected_by_reason_km2=reasons,pending_area_km2=pending_total,source_area_residual_km2=residual,
-        physical_mass_added_km2=mass_added,physical_mass_residual_km2=mass_added-added,
+        physical_mass_added_km2=mass_added,physical_mass_residual_km2=mass_added-(added-deposited_area),
         physical_footprint_area_added_km2=float(s.material_surface['area_km2'].sum())-before_footprint,
         physical_volume_added_km3=actual_volume,physical_volume_residual_km3=actual_volume-volume,
         supplied_magma_volume_km3=supplied_volume,source_volume_residual_km3=volume-supplied_volume,
@@ -777,6 +806,9 @@ def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenan
         maximum_growth_volume_error_km3=max(map(abs,errors),default=0.),juvenile_thickness_km=JUVENILE_THICKNESS_KM,
         representation='exact geographic source points and contained connected juvenile footprints',
         relocation_km=0.,grouping='same contained shared-edge arc component or identical ocean point; no owner/cell merging')
+    if deposition_version:
+        report.update(deposited_source_area_km2=deposited_area,
+            deposited_volume_km3=deposited_area*JUVENILE_THICKNESS_KM,deposited_patches=deposited_patches)
     if placement is not None:
         report['emplacement_geometry']=dict(version=1,
             policy='exact new footprint in uncovered intended-owner water; shared mesh backtracking; pending at original source',
