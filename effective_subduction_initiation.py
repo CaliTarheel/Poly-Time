@@ -509,6 +509,20 @@ def _trace_share(s,row,select):
     contour=s.native_boundary_geometry;parent=np.asarray(contour['contact_index'])
     starts,ends=np.asarray(contour['segments_start']),np.asarray(contour['segments_end'])
     radius=max(120.,1.8*__import__('trench_history')._spacing(s));share=np.zeros(len(select))
+    import native_boundary_geometry
+    if native_boundary_geometry.has_shares(contour):
+        # The contact's length is a division of contour pieces; its share of the trace is taken
+        # on that same ground, so a contact that is listed with no piece still carries its part.
+        wanted=np.asarray(select,bool)[contour['share_contact']]
+        full=np.zeros(len(parent));inside=np.zeros(len(parent))
+        for piece in np.unique(np.asarray(contour['share_segment'])[wanted]):
+            angle,_,intervals=_arc_intervals(starts[piece],ends[piece],a,b,radius)
+            full[piece]=angle;inside[piece]=math.fsum(high-low for low,high in intervals)
+        total=native_boundary_geometry.shares(contour,full,len(select))
+        held=native_boundary_geometry.shares(contour,inside,len(select))
+        take=np.asarray(select,bool)&(total>0.)
+        share[take]=np.minimum(1.,held[take]/total[take])
+        return share
     for edge in np.flatnonzero(select):
         total=inside=0.
         for piece in np.flatnonzero(parent==edge):

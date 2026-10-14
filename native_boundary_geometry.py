@@ -13,14 +13,61 @@ reconstruction prescribes no extra forcing. Contacts too small to be represented
 vertex field retain explicit raw geometry rather than disappearing silently. A raw
 categorical seam incompatible with an already represented local P1 interface is
 instead retained as a zero-length contact; it must not add a second physical trace.
+
+Each contour piece is listed once, under the contact that takes most of it
+(``contact_index``), while its length is divided among every nearby contact of
+the pair. A contact can therefore hold length and own no piece. Anything then
+measured on the pieces listed under a contact, such as the ocean fraction of its
+incoming side, describes other ground than the length it multiplies, and is zero
+for a contact with no piece: a trench contact reads as blocked by a continent
+that is not there, and a control cell changing owner moves hundreds of
+kilometres between a pulling trench and a jammed one. Contact share version 1
+returns the division itself (``share_segment``, ``share_contact``,
+``share_weight``), so a measure can be taken on the ground a contact's length
+came from. `shares` gives the per-contact sum of any per-piece quantity.
 """
 from __future__ import annotations
 
 import numpy as np
 
 
+SHARE_VERSION = 1
+
+
 def _unit(value):
     return value/np.maximum(np.linalg.norm(value, axis=-1, keepdims=True), 1e-30)
+
+
+def share_version(s):
+    value = getattr(s, 'contact_share_version', 0)
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value not in (0, SHARE_VERSION):
+        raise ValueError('Unsupported contact share version.')
+    return int(value)
+
+
+def upgrade_shares(s):
+    """Measure contacts on the ground their length came from, from the next reconstruction on."""
+    if share_version(s) == SHARE_VERSION:
+        return dict(getattr(s, 'contact_share_migration', {}))
+    report = dict(version=SHARE_VERSION, time_myr=float(s.t),
+                  selection='Per-contact measures use the division of contour pieces that gives each contact its length.',
+                  effective_from='the next boundary reconstruction; the geometry in hand carries no shares')
+    s.contact_share_version = SHARE_VERSION
+    s.contact_share_migration = report
+    return dict(report)
+
+
+def has_shares(geometry):
+    return isinstance(geometry, dict) and 'share_segment' in geometry
+
+
+def shares(geometry, values, count):
+    """Per-contact sum of a per-piece quantity, each piece divided as its length was."""
+    values = np.asarray(values, float)
+    if values.shape != (len(geometry['contact_index']),):
+        raise ValueError('A shared quantity needs one value for each contour piece.')
+    return np.bincount(geometry['share_contact'], weights=geometry['share_weight']*values[geometry['share_segment']],
+                       minlength=count)
 
 
 def _vertex_support(mesh, support):
@@ -283,7 +330,7 @@ def _represented_crossing(mesh, scores, p, q, edge, incident_faces, pieces):
     return np.asarray(matched, np.int64)
 
 
-def reconstruct(mesh, plate, support, edge_indices=None):
+def reconstruct(mesh, plate, support, edge_indices=None, *, with_shares=False):
     """Return geometry aligned to existing contact edges plus display pieces.
 
     ``edge_indices`` selects native ``edge_faces`` in their existing a-to-b
@@ -329,6 +376,7 @@ def reconstruct(mesh, plate, support, edge_indices=None):
     contact_at_edge[edge_indices] = np.arange(count)
     sums = np.zeros(count); sum_mid = np.zeros((count, 3)); sum_normal = np.zeros((count, 3))
     segments, unmapped, clipped = [], 0, 0
+    divided, listed = [], 0
     redundancy_candidates = []
     neighbours = np.asarray(mesh['face_neighbors'])
     for pp, qq in np.unique(np.column_stack((p, q)), axis=0):
@@ -364,6 +412,12 @@ def reconstruct(mesh, plate, support, edge_indices=None):
         best = candidate[np.arange(len(candidate)), weight.argmax(axis=1)]
         segments.append((pieces['start'][usable], pieces['end'][usable],
                          pieces['normal'][usable]*sign[best[usable], None], best[usable]))
+        if with_shares:
+            # Position of each usable piece in the returned list, and where its length went.
+            position = listed+np.cumsum(usable)-1
+            rows, columns = np.nonzero(selected)
+            divided.append((position[rows], candidate[rows, columns], weight[rows, columns]))
+        listed += int(np.count_nonzero(usable))
         # A categorical contact can point across the already reconstructed
         # interface in the opposite orientation. Do not append its unrelated
         # raw mesh edge when its actual two-face P1 crossing is wholly present
@@ -405,9 +459,19 @@ def reconstruct(mesh, plate, support, edge_indices=None):
     endpoints = np.asarray(mesh['vertices'])[np.asarray(mesh['edge_vertices'])[edge_indices[fallback]]]
     segments.append((endpoints[:, 0], endpoints[:, 1], raw_normal[fallback], fallback))
     start, end, segment_normal, contacts = (np.concatenate([entry[k] for entry in segments]) for k in range(4))
+    extra = {}
+    if with_shares:
+        # A contact that keeps its raw edge takes that edge whole and nothing of the contour:
+        # its length is the edge's, whatever the contour offered it.
+        piece, contact, weight = (np.concatenate([entry[k] for entry in divided]) if divided else np.empty(0)
+                                  for k in range(3))
+        keep = refined[contact.astype(np.int64)] if len(contact) else np.zeros(0, bool)
+        extra = dict(share_segment=np.concatenate((piece[keep], listed+np.arange(len(fallback)))).astype(np.int32),
+                     share_contact=np.concatenate((contact[keep], fallback)).astype(np.int32),
+                     share_weight=np.concatenate((weight[keep], np.ones(len(fallback)))).astype(float))
     return dict(midpoints=mid, normals=normal, lengths=length, refined=refined,
                 segments_start=start, segments_end=end, segment_normals=segment_normal,
-                contact_index=contacts.astype(np.int32),
+                contact_index=contacts.astype(np.int32), **extra,
                 diagnostics=dict(representation='dominant-pair native P1 support contours', edges=count,
                                  refined_edges=int(refined.sum()), fallback_edges=len(fallback),
                                  contour_segments=len(start)-len(fallback), third_owner_clipped_segments=clipped,
