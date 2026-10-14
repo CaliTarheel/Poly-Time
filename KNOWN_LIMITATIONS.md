@@ -31,6 +31,10 @@ The retained stack supports overlapping material and associated buoyancy account
 
 The separate upstream deep-stack eclogite prototype was not adopted into this continuation. Ordinary retained column and foundering processes must not be confused with that additional proposed treatment. High relief and deeply stacked regions remain priorities for checking material conservation, force consistency, and physical interpretation.
 
+The retained ordinary law uses a 50 km stack-depth threshold, a 10 Myr residence gate, and a 20 Myr exponential removal timescale. Its version-2 removable inventory prevents renewed compositional credit. However, local burial integration returns face-mean eligibility and the sink changes one thickness per face: on partial cover, accounting closure does not demonstrate that thinning is confined to buried material or that exposed coastlines are preserved. This remains a spatial-resolution concern; the absent 75 km experiment's measured losses are not measurements of the ordinary law. See [the mode-specific handoff assessment](docs/COARSE_HANDOFF.md) for source status and adoption requirements.
+
+A synthetic repeated half-cover regression reaches the ordinary law's 30 km compositional cap even though its initial integrated buried inventory is smaller. The branch's new diagnostics expose the uniform face allocation and its limiting inventories; they do not localize removal or establish how much never-deep material was removed in the active world. Ledger/frame validation also preserves historical attribution gaps rather than certifying them as closed. These source changes are not evidence of deployment to the sealed run.
+
 ## Workload can still grow
 
 Automatic fine refinement is disabled in the recorded coarse mode, but physical arc birth and topology changes can add geometry. This is not a fixed bound on mesh size or interval cost. Conservative merging or history compaction needs its own checks for ownership, sheet identity, material inventories, and provenance.

@@ -741,5 +741,6 @@ def integrate(s, thickness, pairs, *, depth_km, heating_delay_myr):
                  covered_union_area_km2=float(union_area.sum()))
     attribution = dict(lower=lower, weight=pair_area, contact=contact,
                        covered_area=covered_area, covered_share=share,
+                       covered_union_area_km2=union_area.copy(),
                        eligible_pair_volume_km3=eligible_pair_volume)
     return eligible, scope, attribution

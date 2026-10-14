@@ -2,7 +2,7 @@
 
 The guarded production source of an exploratory tectonic and terrain evolution simulator, derived from Asein Lite. Its model covers plate motion, ocean and continental material, collision stacks, subduction, arcs, and relief, with a local browser interface for inspecting history.
 
-This publication preserves the simulation code used by the `20261007-coarse-burial-speed-history` continuation in **`coarse_rigid_sheet_history_v1`** mode. That mode deliberately reduces the mechanical scope so a long history can be explored. Its unresolved processes and observed problems are listed in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
+The initial publication, commit `6f2b2ccd`, preserves the simulation code used by the `20261007-coarse-burial-speed-history` continuation in **`coarse_rigid_sheet_history_v1`** mode. This development branch adds the diagnostics and validation described in [Coarse handoff](docs/COARSE_HANDOFF.md); those source changes do not establish adoption by the sealed active run. The mode's unresolved processes and observed problems are listed in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
 **This is a source snapshot, not a standalone runnable simulation release.** The exact production server requires an owned guardian, an initial budget and token, and a valid resumed-state acceptance chain. Those private run bindings and the historical state are not published. A portable launcher remains future work; the production guards have been preserved.
 
@@ -23,12 +23,12 @@ Inherited Lite configuration defaults and the included historical launchers do n
 
 | Location | Contents |
 | --- | --- |
-| Root Python modules and `web/` | The simulation runtime and browser assets copied from the recorded runtime snapshot. |
+| Root Python modules and `web/` | The recorded runtime baseline, with this branch's source changes described in [Coarse handoff](docs/COARSE_HANDOFF.md). |
 | `tests/` | Regression tests and their included fixtures; presence in this repository is not a claim that every test has been run for this publication. |
 | `benchmarks/`, `examples/`, `capture/` | Supporting source and examples retained from the project. |
 | `reference_operations/` | Archived preparation, supervision, budget, and delivery code. Private bindings have been removed or redacted; these are references, not a ready-to-run production controller. |
 | `docs/inherited/` | Selected earlier design and scientific reference documents. They include historical results and optional or proposed features; they do not define the active mode. |
-| [SOURCE_MANIFEST.json](SOURCE_MANIFEST.json) | Source provenance and file hashes for this publication. |
+| [SOURCE_MANIFEST.json](SOURCE_MANIFEST.json) | Source provenance and file hashes for the original publication at `6f2b2ccd`; it is not a hash manifest for the modified development branch. |
 
 The source run's checkpoint data, output history, credentials, account state, and private operational receipts are excluded. The code snapshot is neither a self-contained reproduction of that world nor a ready-to-evolve fresh-world package.
 
