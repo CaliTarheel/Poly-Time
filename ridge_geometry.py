@@ -13,14 +13,25 @@ RADIUS_KM = 6371.
 _EPS = 32*np.finfo(np.float64).eps
 
 
-def normal_motion_threshold(shear, *, obliquity=.15):
+def normal_motion_threshold(shear, *, obliquity=.15, spreading_version=0):
     """Opening/closing threshold in km/Myr for native boundary kinematics.
 
     Classification, finite ocean production and front caching must share this
     policy. The retained raster edition explicitly supplies its historical
     obliquity of .35. Equality stays in the transform/stationary category.
     This is a kinematic gate, not a model of fault nucleation or strain partition.
+    Normal spreading version 1 instead admits any positive normal opening;
+    tangential motion continues to act independently at an oblique front.
     """
+    if (isinstance(spreading_version, (bool, np.bool_))
+            or not isinstance(spreading_version, (int, np.integer))
+            or spreading_version not in (0, 1)):
+        raise ValueError('Unsupported normal spreading version.')
+    # Version 1 partitions positive opening independently of tangential slip,
+    # matching the reviewed model's existing any-closing-speed consumption.
+    # Geometric clipping and local paired-capacity checks still govern birth.
+    if spreading_version == 1:
+        return np.zeros_like(np.asarray(shear), dtype=float)
     return np.maximum(2., obliquity*np.asarray(shear))
 
 

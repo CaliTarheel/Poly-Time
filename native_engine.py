@@ -292,6 +292,9 @@ class Simulation(legacy.Simulation):
         self.w, self.h = cfg['width'], cfg['height']
         self.native_mesh = geometry.icosphere(cfg['mesh_level'])
         self.native_spreading_version = 1
+        # Fresh reviewed worlds admit slow normal opening. Decoded historical
+        # states without this marker retain the original speed/obliquity gate.
+        self.normal_spreading_version = int(cfg['physics_profile'] == 'reviewed_v1')
         self.native_subduction_version = 1
         self.native_subduction_geometry_version = 1
         self.foreland_loading_version = 1
@@ -581,9 +584,12 @@ class Simulation(legacy.Simulation):
         # Classification shares the finite-spreading threshold. Normal partition
         # version 1 independently admits closing motion to convergence processes,
         # allowing sliding and subduction to coexist without changing ridge policy.
-        threshold = normal_motion_threshold(shear)
+        threshold = normal_motion_threshold(shear,
+            spreading_version=getattr(self, 'normal_spreading_version', 0))
         ext = self.normal_speed > threshold
-        con = self.normal_speed < -threshold
+        # Closing retains its historical kinematic labels; normal_partition
+        # separately admits all actual convergence to consumption processes.
+        con = self.normal_speed < -normal_motion_threshold(shear)
         la, lb = self.crust[self.ba] > 0, self.crust[self.bb] > 0
         self.bcode = np.where(self.bl > 1e-10, 3, 0).astype(np.uint8)
         self.bcode[ext & ~(la | lb)] = 1
@@ -642,12 +648,7 @@ class Simulation(legacy.Simulation):
         self.boundary_geometry_diagnostics = deepcopy(self.native_boundary_geometry['diagnostics'])
         trench_history.prepare(self)
         physics_profile.stall_buoyant_incoming(self)
-        ranks = np.zeros(self.n, np.uint8)
-        priority = np.array([0, 2, 4, 1, 6, 5], np.uint8)
-        display = boundary_labels.codes(self)
-        np.maximum.at(ranks, self.ba, priority[display])
-        np.maximum.at(ranks, self.bb, priority[display])
-        self.boundary = np.array([0, 3, 1, 0, 2, 5, 4], np.uint8)[ranks]
+        self.boundary = boundary_labels.cells(self, boundary_labels.codes(self), self.n)
 
     def _migrate_trenches(self, dt):
         """The moving hinge follows its upper plate without a second remap."""
@@ -1046,6 +1047,7 @@ class Simulation(legacy.Simulation):
                                                    contour['segment_normals'], contour['contact_index'])]
         if getattr(self,'native_spreading_version',0)==1:
             result['native_spreading_version']=1
+            result['normal_spreading_version']=getattr(self,'normal_spreading_version',0)
             result['boundary_segments']=native_spreading.boundary_segments(self)
             exact=self.native_spreading_geometry
             for kind,name in (('ocean','ridge_length_km'),('continental','rift_length_km')):

@@ -3,6 +3,7 @@ from decimal import Decimal,localcontext
 import math
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import numpy as np
 
 import burial_depth
@@ -130,7 +131,18 @@ def independent_gnomonic_regions(triangles):
         return totals
 
 
+def exact_clipping():
+    """Leave every doubted face to exact clipping, the fallback when binary64 regions do not stand."""
+    return patch.object(burial_depth,'_standing_regions',return_value=None)
+
+
 class BurialPartitionPrecisionTests(unittest.TestCase):
+    def setUp(self):
+        burial_depth.geometry_cache_reset()
+
+    def tearDown(self):
+        burial_depth.geometry_cache_reset()
+
     def test_guard_digit_return_discards_only_unrepresentable_winding(self):
         collapsed=np.array([
             [0.4429049499273482,-0.7461530375224076,-0.4970823371695456],
@@ -153,9 +165,12 @@ class BurialPartitionPrecisionTests(unittest.TestCase):
         self.assertFalse(burial_depth._positive_binary64_winding(thin[::-1]))
 
     def test_52_myr_guard_digit_partition_retains_every_exact_positive_region(self):
-        regions,areas,error=burial_depth.partition_face(
-            RUN_52_TRIANGLES,0,np.arange(2),np.array([1,2]),
-            5673.2372536289995,6371.)
+        # The binary64 regions of this face stand on their own now
+        # (test_burial_standing_regions); exact clipping keeps this contract.
+        with exact_clipping():
+            regions,areas,error=burial_depth.partition_face(
+                RUN_52_TRIANGLES,0,np.arange(2),np.array([1,2]),
+                5673.2372536289995,6371.)
         # True halfspaces retain a representable positive uncovered sliver
         # that the former -5e-14 band swallowed. Its interface remains passive.
         self.assertEqual(len(regions),6)
@@ -187,10 +202,20 @@ class BurialPartitionPrecisionTests(unittest.TestCase):
             parcel_root_age_myr=np.full(3,100.))
         pair_area=np.array([139.5918501186568,161.6081539824471])
         pairs=(np.array([1,2]),np.array([0,0]),pair_area,np.array([10,10]))
-        eligible,scope,attribution=burial_depth.integrate(
-            s,np.array([30.,10.,10.]),pairs,depth_km=20.,heating_delay_myr=5.)
+        with exact_clipping():
+            eligible,scope,attribution=burial_depth.integrate(
+                s,np.array([30.,10.,10.]),pairs,depth_km=20.,heating_delay_myr=5.)
         self.assertEqual(scope['local_stack_regions'],6)
         self.assertLess(scope['maximum_region_area_relative_error'],16*np.finfo(float).eps)
+        # The binary64 regions that stand for this face are the four that are
+        # resolved: the strips exact clipping keeps have no binary64 area and
+        # are left out, with the same burial.
+        burial_depth.geometry_cache_reset()
+        standing,standing_scope,_=burial_depth.integrate(
+            s,np.array([30.,10.,10.]),pairs,depth_km=20.,heating_delay_myr=5.)
+        self.assertEqual(standing_scope['local_stack_regions'],4)
+        self.assertLess(standing_scope['maximum_region_area_relative_error'],16*np.finfo(float).eps)
+        np.testing.assert_allclose(standing,eligible,rtol=1e-12)
         self.assertAlmostEqual(scope['covered_union_area_km2'],float(pair_area.sum()),places=9)
         self.assertTrue(np.isfinite(eligible).all())
         self.assertTrue(np.isfinite(attribution['eligible_pair_volume_km3']).all())

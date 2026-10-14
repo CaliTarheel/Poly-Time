@@ -147,12 +147,14 @@ assert.equal(sandbox.readConfig().primordial_subduction.target_margin_fraction,.
 // fallback selection an explicit user choice. Highland's finite selection wins.
 sandbox.state.initial={};
 sandbox.fillConfig({seed:42,width:512,physics_profile:'reviewed_v1',
-  effective_subduction:{enabled:true,force_n_per_m:5e12},
+  effective_subduction:{enabled:true,force_n_per_m:3e13},
   primordial_subduction:{enabled:true,target_margin_fraction:1,selection_seed:0},
   subduction_response:'fixed_trench',retained_phases:'disabled',
   continental_lifecycle:{enabled:false},rift_traction:{enabled:false},
   force_limit_rifting:{enabled:false},trench_persistence:'kinematic',slab_allocation:'uniform'},
   {freshDefaults:true});
+assert.equal(get('effective-subduction-force').value,30);
+assert.equal(sandbox.readConfig().effective_subduction.force_n_per_m,3e13);
 assert.equal(sandbox.state.primordialDeclarationEdited,false);
 assert.equal(sandbox.readConfig().primordial_subduction.target_margin_fraction,1);
 sandbox.state.initial.initial_subduction={enabled:true,target_margin_fraction:.45,selection_seed:41};

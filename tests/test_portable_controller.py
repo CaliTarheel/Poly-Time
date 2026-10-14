@@ -149,6 +149,39 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(json.loads(target.read_text()), {'event': 'previous'})
             self.assertEqual([path.name for path in Path(directory).iterdir()], ['receipt.json'])
 
+    def test_default_still_terminates_an_interval_past_its_deadline(self):
+        marker = dict(active=True, deadline=100.)
+        self.assertTrue(controller.deadline_passed(marker, 100.))
+        self.assertFalse(controller.deadline_passed(marker, 99.9))
+        self.assertFalse(controller.deadline_passed(dict(marker, active=False), 1e9))
+        self.assertEqual(controller.step_seconds_per_myr(), 1800.)
+
+    def test_disabled_step_deadline_never_terminates_and_never_exhausts_the_budget(self):
+        import budget
+        marker = dict(active=True, deadline=100.)
+        self.assertFalse(controller.deadline_passed(marker, 1e12, step_deadline=False))
+        rate = controller.step_seconds_per_myr(False)
+        with budget.step_budget(1., seconds_per_myr=rate) as clock:
+            # A year of wall time later the cooperative checks still pass, and the
+            # snapshot that workers validate is a finite, correctly ordered interval.
+            year = 365.*24.*3600.
+            self.assertGreater(clock.physical_deadline, clock.started+10.*year)
+            with patch.object(budget, '_clock', return_value=clock.started+year):
+                budget.require_physical_time('fixture')
+                budget.require_finalization_time('fixture')
+            with budget.installed(budget.snapshot()):
+                pass
+
+    def test_disabled_step_deadline_reaches_the_owned_server(self):
+        with patch.object(controller, 'WindowsOwnedServer') as owned, \
+                patch.object(controller.os, 'name', 'nt'):
+            controller.launch_server(8768, 2)
+            self.assertNotIn('--no-step-deadline', owned.call_args.args[0])
+            controller.launch_server(8768, 2, step_deadline=False)
+            command = owned.call_args.args[0]
+            self.assertIn('--no-step-deadline', command)
+            self.assertEqual(command[command.index('--workers')+1], '2')
+
     @unittest.skipUnless(os.name == 'nt', 'Windows Job Object containment')
     def test_real_windows_owned_child_and_grandchild_exit_before_recovery(self):
         with tempfile.TemporaryDirectory() as directory:

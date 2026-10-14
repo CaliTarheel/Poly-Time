@@ -45,11 +45,18 @@ def prepare(stencil, arc_ids):
         raise ValueError('Arc identities must be nonnegative integers aligned with material faces.')
     original = np.asarray(stencil['vertex_index'])[faces]
     pairs = np.array([[0, 1], [1, 2], [2, 0]])
-    edges = np.sort(original[:, pairs], axis=2).reshape(-1, 2)
-    # Only equality/counts matter here, not the order of unique edges. Fixed
-    # width integer byte records avoid NumPy's structured-field row sorting;
-    # unlike arithmetic packing, they cannot overflow for large vertex IDs.
-    records = np.ascontiguousarray(edges).view(np.dtype((np.void, 2*edges.dtype.itemsize))).ravel()
+    # Ordering each edge's two ends is a minimum and a maximum; sorting a length-two
+    # axis row by row is the same result at many times the cost.
+    first, second = original, original[:, [1, 2, 0]]
+    edges = np.stack((np.minimum(first, second), np.maximum(first, second)), axis=2).reshape(-1, 2)
+    # Only equality/counts matter here, not the order of unique edges.
+    if edges.dtype.kind in 'iu' and edges.size and 0 <= edges.min() and edges.max() < 1 << 31:
+        # Both ends fit in 31 bits, so one int64 per edge is an exact, collision-free key.
+        records = (edges[:, 0].astype(np.int64) << 32) | edges[:, 1].astype(np.int64)
+    else:
+        # Fixed width integer byte records avoid NumPy's structured-field row sorting;
+        # unlike arithmetic packing, they cannot overflow for large vertex IDs.
+        records = np.ascontiguousarray(edges).view(np.dtype((np.void, 2*edges.dtype.itemsize))).ravel()
     _, inverse, counts = np.unique(records, return_inverse=True, return_counts=True)
     open_arc = (counts[inverse] == 1) & np.repeat(ids > 0, 3)
     nodes = faces[:, pairs].reshape(-1, 2)[open_arc]

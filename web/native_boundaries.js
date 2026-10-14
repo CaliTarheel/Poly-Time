@@ -10,7 +10,7 @@
   const project = p => [(Math.atan2(p[1], p[0]) + Math.PI)/(2*Math.PI), .5-Math.asin(clamp(p[2], -1, 1))/Math.PI];
   const blend = (a, b, t) => unit(a.map((x, i) => (1-t)*x+t*b[i]));
   function records(data) {
-    return (data?.boundary_segments || []).filter(r => Number.isInteger(r.code) && r.code >= 1 && r.code <= 5 &&
+    return (data?.boundary_segments || []).filter(r => Number.isInteger(r.code) && r.code >= 1 && r.code <= 6 &&
       Array.isArray(r.geometry_xyz) && r.geometry_xyz.length === 2 && r.geometry_xyz.every(valid) &&
       angle(...r.geometry_xyz.map(unit)) < Math.PI-.001);
   }

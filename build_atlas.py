@@ -22,8 +22,8 @@ def build(run_path, target):
     draw.text((32, 28), 'DEEP TIME / A WORLD IN MOTION', fill='#e8d9b6', font=large)
     config = manifest['config']
     draw.text((34, 88), f"Seed {config['seed']}  |  {config['width']} x {config['height']} spherical grid  |  elapsed geological time", fill='#92a8b1', font=normal)
-    colors = {1: '#77d4dc', 2: '#ef806c', 3: '#c5a1de', 4: '#f4d38a', 5: '#ed9be2'}
-    labels = {1: 'Spreading', 2: 'Subduction', 3: 'Transform', 4: 'Collision', 5: 'Rift'}
+    colors = {1: '#77d4dc', 2: '#ef806c', 3: '#c5a1de', 4: '#f4d38a', 5: '#ed9be2', 6: '#ffffff'}
+    labels = {1: 'Spreading', 2: 'Subduction', 3: 'Transform', 4: 'Collision', 5: 'Rift', 6: 'Converging, no trench'}
     for slot, index in enumerate(selected):
         metadata = json.loads((run_path / f'frame_{index:04d}.json').read_text())
         with np.load(run_path / f'frame_{index:04d}.npz', allow_pickle=False) as data:
@@ -45,7 +45,7 @@ def build(run_path, target):
         draw.text((left, top), f"{metadata['time_myr']:,.0f} MILLION YEARS", fill='#e8d9b6', font=normal)
         image.paste(terrain, (left, top+38))
     for j, code in enumerate(colors):
-        x, y = 35 + j*275, 1498
+        x, y = 35 + j*255, 1498
         draw.line((x, y+13, x+32, y+13), fill=colors[code], width=3)
         draw.text((x+42, y), labels[code], fill='#b4c1c4', font=small)
     draw.text((35, 1532), 'Approximate worldbuilding scenario. Lines indicate sampled tectonic boundaries; terrain detail is limited by the grid.', fill='#92a8b1', font=small)

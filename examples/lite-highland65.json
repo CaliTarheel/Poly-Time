@@ -12,7 +12,7 @@
   "duration_myr": 20,
   "dt_myr": 2,
   "snapshot_myr": 2,
-  "effective_subduction": {"enabled": true, "force_n_per_m": 5000000000000.0},
+  "effective_subduction": {"enabled": true, "force_n_per_m": 30000000000000.0},
   "primordial_subduction": {"enabled": true, "target_margin_fraction": 0.45, "selection_seed": 41},
   "subduction_response": "fixed_trench",
   "retained_phases": "disabled",
