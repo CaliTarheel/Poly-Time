@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import numpy as np
 import mesh_coverage
+import vector_norm
 
 # 0.1 millimetre on Earth; well above clipping roundoff, below material scale.
 CONNECT_TOLERANCE_KM = 1e-7
@@ -17,39 +18,89 @@ CONNECT_TOLERANCE_KM = 1e-7
 
 def _unit(x):
     x = np.asarray(x, float)
-    return x / max(float(np.linalg.norm(x)), 1e-30)
+    return x / max(vector_norm.length(x), 1e-30)
 
 
 def _angle(a, b):
-    return float(np.arctan2(np.linalg.norm(np.cross(a, b)), np.dot(a, b)))
+    return float(np.arctan2(vector_norm.length(np.cross(a, b)), np.dot(a, b)))
+
+
+class _Arc:
+    """One directed edge a->b, with everything that depends only on it computed once.
+
+    Pair tests (`shared_arc`, `_on_arc`) used to recompute these from scratch for every
+    partner edge. Each value below is the same NumPy call on the same operands, so
+    it is bitwise what the per-pair code obtained.
+    """
+    __slots__ = ('a', 'b', '_cross', '_length', '_normal', '_angle')
+
+    def __init__(self, a, b):
+        self.a, self.b = a, b
+        self._cross = self._length = self._normal = self._angle = None
+
+    def cross(self):
+        if self._cross is None:
+            self._cross = np.cross(self.a, self.b)
+        return self._cross
+
+    def length(self):
+        if self._length is None:
+            self._length = vector_norm.length(self.cross())
+        return self._length
+
+    def normal(self):
+        if self._normal is None:
+            self._normal = _unit(self.cross())
+        return self._normal
+
+    def angle(self):
+        if self._angle is None:
+            self._angle = float(np.arctan2(self.length(), np.dot(self.a, self.b)))
+        return self._angle
 
 
 def _on_arc(point, a, b, tol):
-    normal = _unit(np.cross(a, b))
+    return _point_on_arc(point, _Arc(a, b), tol)
+
+
+def _point_on_arc(point, arc, tol):
+    normal = arc.normal()
     if abs(float(np.dot(point, normal))) > tol:
         return False
     # Directed tangential tests distinguish a minor arc from its antipode.
-    return (np.dot(np.cross(a, point), normal) >= -tol
-            and np.dot(np.cross(point, b), normal) >= -tol)
+    return (np.dot(np.cross(arc.a, point), normal) >= -tol
+            and np.dot(np.cross(point, arc.b), normal) >= -tol)
+
+
+def _shared_length(first, second, tol):
+    if first.length() <= tol or second.length() <= tol:
+        return 0.
+    normal = first.normal()
+    if max(abs(float(second.a @ normal)), abs(float(second.b @ normal))) > tol:
+        return 0.
+    points = [p for p in (first.a, first.b, second.a, second.b)
+              if _point_on_arc(p, first, tol) and _point_on_arc(p, second, tol)]
+    # An edge's own angle is already known; every other pair is computed as before.
+    longest = max((first.angle() if p is first.a and q is first.b
+                   else second.angle() if p is second.a and q is second.b
+                   else _angle(p, q)
+                   for i, p in enumerate(points) for q in points[i+1:]), default=0.)
+    return longest if longest > tol else 0.
 
 
 def shared_arc(a, b, c, d, tol):
     """Positive common minor-arc length in radians, excluding point touches."""
-    if np.linalg.norm(np.cross(a, b)) <= tol or np.linalg.norm(np.cross(c, d)) <= tol:
-        return 0.
-    normal = _unit(np.cross(a, b))
-    if max(abs(float(c @ normal)), abs(float(d @ normal))) > tol:
-        return 0.
-    points = [p for p in (a, b, c, d)
-              if _on_arc(p, a, b, tol) and _on_arc(p, c, d, tol)]
-    longest = max((_angle(p, q) for i, p in enumerate(points) for q in points[i+1:]), default=0.)
-    return longest if longest > tol else 0.
+    return _shared_length(_Arc(a, b), _Arc(c, d), tol)
+
+
+def _arcs(polygon):
+    return [_Arc(a, b) for a, b in zip(polygon, np.roll(polygon, -1, axis=0))]
 
 
 def _touches(one, two, tol):
-    return any(shared_arc(a, b, c, d, tol) > 0.
-               for a, b in zip(one, np.roll(one, -1, axis=0))
-               for c, d in zip(two, np.roll(two, -1, axis=0)))
+    second = _arcs(two)
+    return any(_shared_length(first, other, tol) > 0.
+               for first in _arcs(one) for other in second)
 
 
 def prepare(surface, sheets, overlap):
@@ -203,6 +254,7 @@ def construct(surface, sheets, overlap, take, top_sheet, geometry):
     for index in take:
         components.setdefault(root(int(index)), []).append(int(index))
     face_pair = {int(i): (int(a), int(b)) for a, b, i in zip(top, under, take)}
+    free_arcs = {}  # a free edge meets many polygon edges; its own cross/normal/length are fixed
     result = []
     for indices in components.values():
         vector_terms, normal_terms = [], []
@@ -211,13 +263,16 @@ def construct(surface, sheets, overlap, take, top_sheet, geometry):
         for index in indices:
             polygon = _polygon(geometry, index)
             points.extend(polygon)
-            for a, b in zip(polygon, np.roll(polygon, -1, axis=0)):
-                angle = _angle(a, b)
-                vector_terms.append(.5 * angle * _unit(np.cross(a, b)))
+            for arc in _arcs(polygon):
+                vector_terms.append(.5 * arc.angle() * arc.normal())
                 for side, face in enumerate(face_pair[index]):
                     start, end = geometry['free_offsets'][face:face+2]
-                    for c, d, inward in geometry['free_edges'][start:end]:
-                        length = shared_arc(a, b, c, d, tol) * radius
+                    for k in range(start, end):
+                        c, d, inward = geometry['free_edges'][k]
+                        free = free_arcs.get(k)
+                        if free is None:
+                            free = free_arcs[k] = _Arc(c, d)
+                        length = _shared_length(arc, free, tol) * radius
                         if length:
                             boundary_length[side] += length
                             normal_terms.append(inward * length * (-1. if side == 0 else 1.))

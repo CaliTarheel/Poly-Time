@@ -81,6 +81,8 @@ def snapshot_fields(s):
     result.update(arc_local_deposition.snapshot_fields(s))
     import arc_point_nucleation
     result.update(arc_point_nucleation.snapshot_fields(s))
+    import arc_ribbon
+    result.update(arc_ribbon.snapshot_fields(s))
     return result
 
 
@@ -483,14 +485,19 @@ def _cell_add_arc_crust(s,cells,additions):
     return report
 
 
-def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenance=None):
+def add_arc_crust(s,cells,additions,*,positions=None,owners=None,source_provenance=None,dt=None,_ribbon=True):
     """Place supplied juvenile area at real sources, retaining the old API.
 
     Explicit positions activate geographic routing. Cell-only calls retain
     their historical semantics for old experiments and direct legacy callers.
     A source over an existing native arc grows only that containing arc ID;
     separate ocean points never coalesce because they share a cell or owner.
+    A state marked for the arc ribbon hands the whole transaction to that policy.
     """
+    import arc_ribbon
+    if _ribbon and arc_ribbon.version(s):
+        return arc_ribbon.transaction(s,cells,additions,positions=positions,owners=owners,
+            source_provenance=source_provenance,dt=dt)
     policy=getattr(s,'native_arc_emplacement_version',0)
     import arc_birth_profile
     profile_version=arc_birth_profile.version(s)

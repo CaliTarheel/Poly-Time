@@ -31,6 +31,11 @@ jobs:
       - name: Install the pinned dependencies
         run: python -m pip install -r requirements-portable.txt
       - name: Run the tests
+        # The runner's own TEMP is spelled with a short 8.3 name (RUNNER~1). Tests that compare
+        # a temporary path with its resolved form need one spelling, as on a developer's machine.
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: python -B ci/run_tests.py --shard ${{ matrix.shard }}/8 --results tmp/ci-results-${{ matrix.shard }}.json --logs tmp/ci-logs
       - name: Keep the outcomes
         if: always()
