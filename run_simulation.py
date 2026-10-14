@@ -25,7 +25,7 @@ def parser():
     result.add_argument('--effective-subduction', action=argparse.BooleanOptionalAction, default=None,
                         help='Use Lite constant trench force with declared starting trenches (default for new reviewed worlds); selects reviewed_v1, fixed trench and immediate foundering.')
     result.add_argument('--subduction-force-n-per-m', type=float,
-                        help='Effective pull per metre of active trench, in N/m (default 5e12); supplying it enables effective subduction.')
+                        help='Effective pull per metre of active trench, in N/m (fresh-world default 3e13; saved forces are preserved); supplying it enables effective subduction.')
     return result
 
 
@@ -50,6 +50,14 @@ def build_config(args):
         for key in fresh_world.REVIEWED_FRESH_LAWS:
             if config.get(key) is None:
                 config[key] = saved_meaning[key]
+        effective = config.get('effective_subduction')
+        if isinstance(effective, dict):
+            # Freeze the engine's interpretation before start() applies fresh
+            # defaults, including old enabled laws that omitted the force.
+            settings = dict(effective)
+            for key in ('enabled', 'force_n_per_m'):
+                settings.setdefault(key, saved_meaning['effective_subduction'][key])
+            config['effective_subduction'] = settings
         ocean = config.get('primordial_ocean')
         if isinstance(ocean, dict) and 'enabled' not in ocean:
             config['primordial_ocean'] = dict(ocean, enabled=False)

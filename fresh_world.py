@@ -23,7 +23,7 @@ REVIEWED_PROFILE = 'reviewed_v1'
 # effective_subduction. Neither table is an engine or saved-checkpoint default.
 DETAILED_FRESH_LAWS = dict(retained_phases='thermal_v1', subduction_response='moving_hinge_v1')
 REVIEWED_FRESH_LAWS = dict(
-    effective_subduction=dict(enabled=True, force_n_per_m=5e12),
+    effective_subduction=dict(enabled=True, force_n_per_m=3e13),
     primordial_subduction=dict(enabled=True),
     primordial_ocean=dict(enabled=True),
     subduction_response='fixed_trench', retained_phases='disabled',
@@ -46,8 +46,12 @@ def fresh_world_request(config=None, initial=None):
     effective = request.get('effective_subduction')
     if effective is None:
         request['effective_subduction'] = deepcopy(REVIEWED_FRESH_LAWS['effective_subduction'])
-    elif isinstance(effective, dict) and 'enabled' not in effective:
-        request['effective_subduction'] = dict(effective, enabled=True)
+    elif isinstance(effective, dict):
+        settings = dict(effective)
+        settings.setdefault('enabled', True)
+        if settings['enabled'] is True:
+            settings.setdefault('force_n_per_m', REVIEWED_FRESH_LAWS['effective_subduction']['force_n_per_m'])
+        request['effective_subduction'] = settings
     lite = isinstance(request['effective_subduction'], dict) and request['effective_subduction'].get('enabled') is True
     laws = REVIEWED_FRESH_LAWS if lite else DETAILED_FRESH_LAWS
     if (lite and request.get('primordial_subduction') is None and isinstance(initial, dict)
