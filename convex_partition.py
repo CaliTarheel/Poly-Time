@@ -7,6 +7,7 @@ crossing coordinates themselves remain floating-point unit vectors.
 """
 from fractions import Fraction
 import numpy as np
+import vector_norm
 
 
 def _clean(points):
@@ -82,7 +83,7 @@ def split(polygon,edge):
         if (d[i]>0. and d[previous]<0.) or (d[i]<0. and d[previous]>0.):
             fraction=abs(d[previous])/(abs(d[previous])+abs(d[i]))
             crossing=(1.-fraction)*polygon[previous]+fraction*point
-            crossing/=np.linalg.norm(crossing)
+            crossing/=vector_norm.length(crossing)
             positive.append(crossing);negative.append(crossing)
         if d[i]>=0.:positive.append(point)
         if d[i]<=0.:negative.append(point)
