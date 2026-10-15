@@ -44,6 +44,7 @@ CHECK_TOLERANCE = 1e-4  # of the sphere's area, per step (0.01%)
 CRUMB_KM2 = 100.        # detached bits of a plate smaller than this are left with it
 SUTURE_KM = 100.        # a collision that has closed this far welds its two plates into one
 SIMPLIFY_KM2 = 100.     # a boundary vertex cutting off less than this with its neighbours is dropped
+SIMPLIFY_EVERY_MYR = 1. # outlines are simplified once this much time has passed, not every sub-step
 
 
 def _full():
@@ -200,7 +201,12 @@ class RegionWorld:
         # with every later step. Cleaned once here, after every change to the crust this step.
         for piece in self.crust:
             piece.shape, _, _ = sphere.clean(piece.shape)
-        entry['simplified_vertices'] = self._simplify()
+        # Simplifying costs about as much as the rest of a sub-step; the vertices a few sub-steps
+        # add are bounded, so once a Myr is enough.
+        due = self.time_myr + dt - getattr(self, 'simplified_myr', -np.inf) >= SIMPLIFY_EVERY_MYR - 1e-9
+        entry['simplified_vertices'] = self._simplify() if due else 0
+        if due:
+            self.simplified_myr = self.time_myr + dt
         self.regions = self._from_crust()
         entry['events'] += self._regroup(entry)  # keeps regions and crust together as it moves pieces
         self.time_myr += dt
@@ -243,8 +249,9 @@ class RegionWorld:
         new, removed, dropped = sphere.simplify_shared(rings, area_km2=SIMPLIFY_KM2, groups=polygon_of)
         changed = {}
         for (i, j, k), before, after, count in zip(where, rings, new, dropped):
-            # Points shared with a neighbour can be added, and the same number taken out elsewhere.
-            if len(after) != len(before) or not np.array_equal(after, before):
+            # A ring that only gained points shared with a neighbour (on its own edges) is the
+            # same region; only rings that lost vertices need their piece rebuilt.
+            if count:
                 changed[i] = changed.get(i, 0) + int(count)
         for i, count in changed.items():
             c = self.crust[i]
