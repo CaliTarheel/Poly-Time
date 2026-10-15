@@ -123,8 +123,8 @@ class Rifting:
     """When a plate splits: where the pull across a straight cut beats the strength along it."""
     # Strength of the lithosphere against being pulled apart, N per m of cut. Continental
     # lithosphere is the weaker, so continents are where plates rift.
-    ocean_strength_n_per_m: float = 1.2e13
-    continent_strength_n_per_m: float = 3e12
+    ocean_strength_n_per_m: float = 1.6e13
+    continent_strength_n_per_m: float = 1e12
     minimum_plate_km2: float = 20e6   # only plates this large are tested
     minimum_part_km2: float = 3e6     # and only cuts leaving both parts this large
     azimuths: int = 12                # cut directions tried through each centre

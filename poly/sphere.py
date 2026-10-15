@@ -413,6 +413,16 @@ def part(rings, minimum_km2=1e-6, whole_km2=None):
         flipped = spherely.difference(_full(), whole)
         whole = flipped if area_km2(flipped) <= whole_km2 + allowed_change(whole_km2) else None
     if whole is not None:
+        # Repairs (vertices dropped, crossings cut) must not change the area the loops enclose; a
+        # ring that touches itself can be repaired into something else, and is then built loop by
+        # loop instead. (Loop areas are reliable below half the sphere.)
+        shell = [loop_area_km2(loop) for loop in loops]
+        cut = [abs(loop_area_km2(loop)) for hole in rings[1:] for loop in simple_loops(hole)]
+        if all(abs(a) < .45 * SPHERE_KM2 for a in shell) and sum(shell) > 0.:
+            expected = sum(shell) - sum(cut)
+            if abs(area_km2(whole) - expected) > max(1., 1e-4 * expected):
+                whole = None
+    if whole is not None:
         area = area_km2(whole)
         return (EMPTY, area + slits) if area < minimum_km2 else (whole, slits)
     region, dropped = EMPTY, 0.
