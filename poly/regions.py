@@ -896,10 +896,13 @@ class RegionWorld:
             point = sphere.unit(mids[k] * np.cos(angle) + sign * poles[k] * np.sin(angle))
             arc_points[k] = point
             piece = self._piece_at(over, point)
-            if piece is not None and piece.kind == 'continent' and getattr(piece, 'mesh', None) is not None:
+            if piece is not None and piece.kind == 'continent':
+                # Into a continent, or an island arc already built (too small for a mesh: it
+                # thickens as one), near the arc.
                 area = piece.area_km2()
-                local = sphere.rotate(point, self.frame(over).T)
-                piece.mesh.add_volume(magma, area, near=local[None])
+                if getattr(piece, 'mesh', None) is not None:
+                    local = sphere.rotate(point, self.frame(over).T)
+                    piece.mesh.add_volume(magma, area, near=local[None])
                 piece.thickness_km += magma / area
                 entry['arc_km3'] += magma
             else:
