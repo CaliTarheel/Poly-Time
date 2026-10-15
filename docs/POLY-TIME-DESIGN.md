@@ -72,6 +72,30 @@ in collision zones. Poly-Time removes the grid so that none of this can happen s
   goes down. Ocean against ocean: the older goes down. Continent against continent: collision.
 - A trench where more than 500 km2 of continental crust arrives in one step becomes a collision.
 
+## Plates as regions (regions first)
+
+Keeping a network of boundary lines and junctions consistent as plates move broke again and again
+(junctions crossing, pinches, slivers, plates turning inside out). So the plates are the primary
+objects (`poly/regions.py`): each plate is its crust, stored in the plate's own frame as GPlates stores
+features, and its region is where that crust is. Every step:
+
+1. each region is carried by its rotation;
+2. the carried regions overlap where plates converge and leave gaps where they diverge. Both are
+   resolved inside a strip around each run of the old boundary, by that run's type: at a trench the
+   downgoing plate loses the overlap; anywhere else the overlap or gap is split along the pair's
+   half-stage line. Pairs are resolved one after another, so ground where three plates overlap ends
+   with exactly one owner. What is left of a gap goes to the nearest plate (booked as junction);
+3. each plate's crust is updated in its own frame, age bands are merged, and the crust is cleaned;
+4. shared boundaries are tied together (a point one plate has on its neighbour's edge becomes a
+   vertex of both) and simplified on both sides at once, so the plates still tile the sphere;
+5. the regions are rebuilt from the crust; a plate that came apart becomes separate plates, and
+   crumbs of one plate left beside or inside another go to that plate;
+6. the boundaries are derived again from where the regions touch, each segment keeping the type,
+   trench polarity and closing-so-far of the nearest old segment of the same plates.
+
+The checks are the same: the plates tile the sphere, each plate's crust tiles it, and the area created
+equals the area destroyed, term by term.
+
 ## What carries over from Super-Light-Time
 
 - The force balance physics (slab pull, basal drag, ridge push, resistances), with inputs taken from
