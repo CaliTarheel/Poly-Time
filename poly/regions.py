@@ -251,6 +251,17 @@ class RegionWorld:
         for p in plates:
             self._update_crust(p, lost[p], gained[p], entry, dt)
         self.crust = _merge_bands(self.crust)
+        # Pieces still below the level of detail after merging (a gain with no band of its own to
+        # join, a sliver left on its own) are not tracked: booked as a sliver and let go. The ground
+        # comes back to a neighbour as a junction gain when the regions are rebuilt.
+        kept = []
+        for piece in self.crust:
+            area = piece.area_km2()
+            if area < DETAIL_KM2 and piece.kind == 'ocean':
+                entry['lost']['sliver'] += area
+                continue
+            kept.append(piece)
+        self.crust = kept
         # Joining pieces whose edges coincide only to rounding leaves slit holes; left in, they multiply
         # with every later step. Cleaned once here, after every change to the crust this step.
         for piece in self.crust:
@@ -337,42 +348,47 @@ class RegionWorld:
         back = self.frame(plate).T
         mine = [c for c in self.crust if c.plate == plate]
         others = [c for c in self.crust if c.plate != plate]
+        # The losses are disjoint pieces of the plate's overlaps; joined by boundary kind, each crust
+        # piece meets at most one geography per kind and is cut once, instead of once per loss.
+        by_kind = {}
         for shape, kind in losses:
-            if sphere.area_km2(shape) < TINY_KM2:
-                continue
-            local = sphere.rotate_geography(shape, back)
+            if sphere.area_km2(shape) >= TINY_KM2:
+                by_kind.setdefault(kind, []).append(shape)
+        local_by_kind = {kind: sphere.rotate_geography(sphere.union(*shapes), back) for kind, shapes in by_kind.items()}
+        if local_by_kind:
+            all_local = sphere.union(*local_by_kind.values())
             for piece in mine:
-                taken = sphere.intersection(piece.shape, local)
-                area = sphere.area_km2(taken)
-                if area < TINY_KM2:
+                whole = sphere.intersection(piece.shape, all_local)
+                if sphere.area_km2(whole) < TINY_KM2:
                     continue
-                piece.shape = sphere.difference(piece.shape, local)
-                category = _loss_category(kind, piece.kind)
-                entry['lost'][category] += area
-                if piece.kind == 'continent':
+                continental = 0.
+                for kind, local in local_by_kind.items():
+                    taken = sphere.intersection(whole, local)
+                    area = sphere.area_km2(taken)
+                    if area < TINY_KM2:
+                        continue
+                    category = _loss_category(kind, piece.kind)
+                    entry['lost'][category] += area
+                    if piece.kind == 'continent':
+                        continental += area
+                    if category == 'continent_at_trench':
+                        # Where the continent went down, arrival by arrival, not the middle of them all.
+                        for shape in by_kind[kind]:
+                            part = sphere.intersection(whole, sphere.rotate_geography(shape, back))
+                            if sphere.area_km2(part) >= TINY_KM2:
+                                entry['continent_arrived'].append(
+                                    (sphere.rotate(_point_in(part), self.frame(plate)), sphere.area_km2(part), plate))
+                piece.shape = sphere.difference(piece.shape, whole)
+                if continental >= TINY_KM2:
                     # Continent is too light to go away: it shortens and thickens, keeping its volume.
-                    entry['thickened_km3'] += self._thicken(piece, area, mine)
-                if category == 'continent_at_trench':
-                    # Where the continent went down, not the middle of the whole strip along the trench.
-                    entry['continent_arrived'].append((sphere.rotate(_point_in(taken), self.frame(plate)), area, plate))
+                    entry['thickened_km3'] += self._thicken(piece, continental, mine)
         for shape, category in gains:
             area = sphere.area_km2(shape)
             if area < TINY_KM2:
                 continue
             entry['gained'][category] += area
             mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back), self.time_myr + .5 * dt))
-        # Pieces below the level of detail are not tracked: booked as a sliver and let go (the ground
-        # comes back to a neighbour as a junction gain when the regions are rebuilt).
-        kept = []
-        for c in mine:
-            area = sphere.area_km2(c.shape)
-            if area < TINY_KM2:
-                continue
-            if area < DETAIL_KM2 and c.kind == 'ocean':
-                entry['lost']['sliver'] += area
-                continue
-            kept.append(c)
-        self.crust = others + kept
+        self.crust = others + [c for c in mine if sphere.area_km2(c.shape) >= TINY_KM2]
 
     def _thicken(self, piece, area, mine):
         """Keep the volume of `area` km2 of continent just taken from `piece`; returns that volume.
