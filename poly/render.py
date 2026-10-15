@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw
 
 from poly import sphere
 from poly.mesh import ISOSTASY
+from poly.ocean import depth_km
 
 COLOURS = dict(ridge=(220, 40, 40), trench=(120, 40, 160), transform=(30, 150, 60),
                converging=(240, 140, 20), collision=(120, 70, 30), suture=(60, 30, 10))
@@ -14,8 +15,9 @@ CONTINENT = (196, 170, 120)
 # Hypsometric tints for continent by isostatic elevation (km): lowland, upland, mountain, high peaks.
 RELIEF = [(0., (168, 190, 120)), (.5, (196, 170, 120)), (1.5, (140, 100, 60)), (3., (245, 245, 245))]
 CONTINENT_KM = 35.
-YOUNG, OLD = np.array([150, 215, 235]), np.array([20, 50, 110])
-OCEAN_SPAN_MYR = 150.
+# Ocean tinted by depth: shallow (ridge crests, 2.6 km) to deep (old floor, 5.6 km).
+SHALLOW, DEEP = np.array([150, 215, 235]), np.array([20, 50, 110])
+SHALLOW_KM, DEEP_KM = 2.5, 5.7
 
 
 def _tint(elevation_km):
@@ -47,7 +49,7 @@ def draw(world, path, width=720, boundaries=True):
         local = sphere.rotate(xyz[inside], world.frame(plate).T)
         llon, llat = sphere.to_lonlat(local)
         points = spherely.points(llon, llat)
-        colour = np.tile(np.array(OLD, np.uint8), (inside.sum(), 1))
+        colour = np.tile(np.array(DEEP, np.uint8), (inside.sum(), 1))
         for piece in (p for p in world.crust if p.plate == plate):
             spherely.prepare(piece.shape)
             hit = np.asarray(spherely.contains(piece.shape, points))
@@ -59,8 +61,8 @@ def draw(world, path, width=720, boundaries=True):
                 colour[hit] = _tint(ISOSTASY * (np.asarray(thick, float) - CONTINENT_KM) * np.ones(int(hit.sum())))
             else:
                 age = 0. if piece.born_myr is None else max(world.time_myr - piece.born_myr, 0.)
-                f = min(age / OCEAN_SPAN_MYR, 1.)
-                colour[hit] = np.round(YOUNG * (1 - f) + OLD * f).astype(np.uint8)
+                f = float(np.clip((depth_km(age) - SHALLOW_KM) / (DEEP_KM - SHALLOW_KM), 0., 1.))
+                colour[hit] = np.round(SHALLOW * (1 - f) + DEEP * f).astype(np.uint8)
         image[inside] = colour
     picture = Image.fromarray(image.reshape(height, width, 3))
     if boundaries:

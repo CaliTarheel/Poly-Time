@@ -132,7 +132,16 @@ equals the area destroyed, term by term.
   continent shortened at a collision (ESCAPE_FRACTION, 0.25) comes back as continent along the piece's
   coast within 1,500 km of the collision, over the plate's own ocean, booked as an `escape` gain and
   loss; the orogen thins by as much. It is owed per piece and delivered as a band 2 km wide once that
-  much is owed, since a sub-step's share would be a ribbon metres wide. Airy isostasy gives elevation from thickness (0.15 km per km of
+  much is owed, since a sub-step's share would be a ribbon metres wide.
+- **Arcs.** Magma rises into the overriding plate 150 km behind every trench, 30 km3 per km of trench
+  per Myr at 50 km/Myr of convergence (Earth's arcs add 20-40). Where that point is continent, the
+  mesh thickens there: an Andean arc. Where it is ocean, the magma is owed on the trench segments
+  (carried by their identity) and, once a run of them is owed enough for a strip 60 km wide and 20 km
+  thick along it, the strip is built as continental crust over the plate's ocean: an island arc,
+  booked as an `arc` gain and loss, that then moves, collides, welds and rifts like any continent.
+  The ledger records the magma added every step.
+- **Ocean depth from age.** The floor subsides as it cools (Stein & Stein's GDH1: 2.6 km at the
+  ridge, 0.365 km per root-Myr to 20 Myr, levelling towards 5.65 km); the maps tint ocean by it. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.
 - **Suture.** A collision records how far it has closed; at 100 km the two plates weld. The smaller
   plate's crust passes into the larger's frame unchanged, the boundaries between them go, and its other

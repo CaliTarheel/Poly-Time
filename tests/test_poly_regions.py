@@ -1,5 +1,6 @@
 """Plates as regions: overlaps and gaps booked by boundary type, boundaries derived every step."""
 import unittest
+from unittest import mock
 
 import numpy as np
 import spherely
@@ -133,6 +134,50 @@ class RegionStepTests(unittest.TestCase):
         # One more cut is tried, along the suture, and every cut near it is weaker than without it.
         self.assertEqual(len(with_suture), len(without) + 1)
         self.assertLess(min(c.strength_n_per_m for c in with_suture), min(c.strength_n_per_m for c in without))
+
+    def test_magma_behind_a_trench_thickens_the_overriding_continent(self):
+        # The cap goes down under the world plate at the cap's eastern edge (lon 40); a continent
+        # on the world plate just east of the trench takes the arc magma on its western side.
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        continent = sphere.polygon(disc((46., 0.), 5.))
+        for piece in world.crust:
+            if piece.plate == 2:
+                piece.shape = sphere.difference(piece.shape, continent)
+        world.crust.append(Crust(2, 'continent', continent))
+        volume = world._continent_km3()
+        for _ in range(5):
+            entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
+            assert_checks(self, entry)
+        magma = sum(e['arc_km3'] for e in world.ledger)
+        self.assertGreater(magma, 0.)
+        self.assertEqual(sum(e['gained']['arc'] for e in world.ledger), 0.)  # no island arc: it went into continent
+        (piece,) = [c for c in world.crust if c.kind == 'continent']
+        self.assertAlmostEqual(world._continent_km3() / (volume + magma), 1., delta=1e-6)
+        lon = sphere.to_lonlat(sphere.rotate(piece.mesh.nodes, world.frame(2)))[0]
+        west, east = lon < np.median(lon), lon >= np.median(lon)
+        self.assertGreater(piece.mesh.thickness[west].mean(), piece.mesh.thickness[east].mean())
+
+    def test_magma_behind_an_ocean_trench_builds_an_island_arc(self):
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        with mock.patch.object(regions, 'ARC_KM3_PER_KM_MYR', 20. * regions.ARC_KM3_PER_KM_MYR):
+            events = []
+            for _ in range(8):
+                entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
+                assert_checks(self, entry)
+                events += entry['events']
+                if any(e['kind'] == 'island_arc' for e in events):
+                    break
+        arcs = [e for e in events if e['kind'] == 'island_arc']
+        self.assertTrue(arcs)
+        self.assertEqual(arcs[0]['plate'], 2)
+        built = sum(e['gained']['arc'] for e in world.ledger)
+        self.assertEqual(built, sum(e['lost']['arc'] for e in world.ledger))
+        self.assertGreater(built, 0.)
+        arc = [c for c in world.crust if c.kind == 'continent' and c.plate == 2]
+        self.assertTrue(arc)
+        self.assertAlmostEqual(sum(c.area_km2() for c in arc) / built, 1., delta=1e-6)
+        self.assertEqual(arc[0].thickness_km, regions.ARC_THICK_KM)
+        self.assertLess(abs(entry['tiling_error_km2']), TOLERANCE_KM2)
 
     def test_eight_plates_keep_their_crust_accounted_for(self):
         network_world, omegas = voronoi_world(count=8, seed=3, speed_km_myr=30., continents=3)
