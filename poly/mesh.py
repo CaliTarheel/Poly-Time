@@ -202,7 +202,7 @@ class ContinentMesh:
         high = elevation > 0.
         if not high.any() or dt_myr <= 0.:
             return 0., 0., 0.
-        areas = self.node_areas_km2() * polygon_km2 / max(self.area_km2(), 1e-300)
+        areas = np.maximum(self.node_areas_km2() * polygon_km2 / max(self.area_km2(), 1e-300), 1.)
         cut = np.where(high, ERODE_PER_MYR * elevation * dt_myr, 0.)
         cut = np.minimum(cut, np.maximum(self.thickness - REFERENCE_KM, 0.))  # never below sea level
         removed = float((cut * areas).sum())
