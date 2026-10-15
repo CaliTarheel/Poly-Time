@@ -25,6 +25,13 @@ ISOSTASY = .15      # elevation per km of extra thickness: (rho_mantle - rho_cru
 # Thick crust flows outward under its own weight: thickness diffuses with this diffusivity. A
 # plateau 1,000 km across takes about 50 Myr to spread (Tibet).
 SPREADING_KM2_PER_MYR = 3e3
+# Erosion: crust above sea level is worn down at this fraction of its elevation per Myr, as
+# thickness (0.2 km/Myr of rock at 1 km, since isostasy lifts the crust as it is unloaded, so the
+# land loses only 0.15 km of height for each km of rock removed). The sediment settles on the
+# piece's own lowlands within DEPOSIT_REACH_KM; what finds none goes to the sea.
+ERODE_PER_MYR = .2
+LOWLAND_KM = .2
+DEPOSIT_REACH_KM = 500.
 REACH_KM = 300.     # shortening thickens the crust within about this of where it happened
 MINIMUM_KM2 = 2e4   # a piece smaller than this (a 140 km disc) keeps one thickness, no mesh
 LOST_KM = 1.        # a node this far outside the piece's new outline was on the ground lost
@@ -185,6 +192,32 @@ class ContinentMesh:
             np.add.at(change, j, -flow)
             t += change / areas
         self.thickness = t
+
+    def erode(self, dt_myr, polygon_km2):
+        """Wear the highlands down for `dt_myr`, settling the sediment on nearby lowlands.
+
+        Returns (km3 eroded, km3 settled on this piece, km3 gone to the sea).
+        """
+        elevation = self.elevation_km()
+        high = elevation > 0.
+        if not high.any() or dt_myr <= 0.:
+            return 0., 0., 0.
+        areas = self.node_areas_km2() * polygon_km2 / max(self.area_km2(), 1e-300)
+        cut = np.where(high, ERODE_PER_MYR * elevation * dt_myr, 0.)
+        cut = np.minimum(cut, np.maximum(self.thickness - REFERENCE_KM, 0.))  # never below sea level
+        removed = float((cut * areas).sum())
+        self.thickness = self.thickness - cut
+        if removed <= 0.:
+            return 0., 0., 0.
+        low = elevation <= LOWLAND_KM
+        if not low.any():
+            return removed, 0., removed
+        d = cKDTree(self.nodes[high]).query(self.nodes[low], k=1)[0] * sphere.RADIUS_KM
+        weight = np.exp(-.5 * (d / (DEPOSIT_REACH_KM / 2.)) ** 2) * areas[low]
+        if weight.sum() <= 1e-12:
+            return removed, 0., removed
+        self.thickness[low] += removed * (weight / weight.sum()) / areas[low]
+        return removed, removed, 0.
 
     def rotated(self, matrix):
         return ContinentMesh(sphere.rotate(self.nodes, matrix), self.triangles, self.thickness)

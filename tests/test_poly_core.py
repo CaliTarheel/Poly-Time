@@ -110,6 +110,26 @@ class SphereTests(unittest.TestCase):
         self.assertEqual(len(lone[0]), len(north))
 
 
+class MeshTests(unittest.TestCase):
+    def test_erosion_wears_a_peak_down_and_settles_the_sediment_nearby(self):
+        from poly import mesh
+        from tests.test_poly_evolve import disc
+        shape = sphere.polygon(disc((30., 0.), 15.))
+        area = sphere.area_km2(shape)
+        m = mesh.ContinentMesh.build(shape, 35.)
+        m.add_volume(3e7, area, near=sphere.from_lonlat(30., 0.)[None])
+        volume, peak = m.volume_km3(area), m.elevation_km().max()
+        removed = settled = to_sea = 0.
+        for _ in range(20):
+            r, s, t = m.erode(1., area)
+            removed, settled, to_sea = removed + r, settled + s, to_sea + t
+        self.assertLess(m.elevation_km().max(), .7 * peak)
+        self.assertGreater(settled, .5 * removed)
+        self.assertAlmostEqual(settled + to_sea, removed, delta=1e-6 * removed)
+        self.assertAlmostEqual(m.volume_km3(area) + to_sea, volume, delta=1e-6 * volume)
+        self.assertGreaterEqual(m.thickness.min(), mesh.REFERENCE_KM - 1e-9)
+
+
 class LedgerTests(unittest.TestCase):
     def test_a_cap_spinning_about_its_own_centre_makes_and_destroys_almost_nothing(self):
         centre = sphere.from_lonlat(30., 20.)

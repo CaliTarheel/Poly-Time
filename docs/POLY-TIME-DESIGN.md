@@ -140,6 +140,11 @@ equals the area destroyed, term by term.
   thick along it, the strip is built as continental crust over the plate's ocean: an island arc,
   booked as an `arc` gain and loss, that then moves, collides, welds and rifts like any continent.
   The ledger records the magma added every step.
+- **Erosion.** Crust above sea level is worn down at 0.2 of its elevation per Myr, as thickness
+  (isostasy lifts the crust as it is unloaded, so a km of rock removed lowers the land by 0.15 km);
+  never below sea level. The sediment settles on the piece's own lowlands (under 0.2 km) within about
+  500 km, so foreland basins fill as orogens decay; what finds no lowland goes to the sea, and the
+  ledger records both the volume eroded and the volume gone to the sea every step.
 - **Ocean depth from age.** The floor subsides as it cools (Stein & Stein's GDH1: 2.6 km at the
   ridge, 0.365 km per root-Myr to 20 Myr, levelling towards 5.65 km); the maps tint ocean by it. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.
@@ -182,5 +187,6 @@ matching, initiation and rifting (about 70 of the 182 modules a step uses touch 
    consumption under prescribed rotations, closed ledger, tests, map rendering.
 2. **Topology events**: initiation, collision and suture, rifting and splitting, triple junctions.
 3. **Dynamics**: the force balance on polygons and boundary lines.
-4. **Crust**: continental mesh (thickness: done) and its processes; isochron ocean properties.
+4. **Crust**: continental mesh with thickening, spreading, escape, arcs and erosion (done); ocean
+   depth from age (done); relief beyond isostasy, sediment as crust, to come.
 5. **Runs**: frames, viewer, GPlates export, comparison with Super-Light-Time runs.

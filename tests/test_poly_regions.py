@@ -104,7 +104,8 @@ class RegionStepTests(unittest.TestCase):
         # The continent shortened, and kept its volume by thickening, on its mesh, where it was shortened:
         # it was carried east into the trench, so its eastern side is the thick side.
         self.assertLess(world.areas()['continent'], area)
-        self.assertAlmostEqual(world._continent_km3() / volume, 1., delta=1e-3)
+        to_sea = sum(e['sediment_to_sea_km3'] for e in world.ledger)
+        self.assertAlmostEqual((world._continent_km3() + to_sea) / volume, 1., delta=1e-3)
         (piece,) = [c for c in world.crust if c.kind == 'continent']
         self.assertGreater(piece.thickness_km, 35.)
         self.assertIsNotNone(piece.mesh)
@@ -152,7 +153,8 @@ class RegionStepTests(unittest.TestCase):
         self.assertGreater(magma, 0.)
         self.assertEqual(sum(e['gained']['arc'] for e in world.ledger), 0.)  # no island arc: it went into continent
         (piece,) = [c for c in world.crust if c.kind == 'continent']
-        self.assertAlmostEqual(world._continent_km3() / (volume + magma), 1., delta=1e-6)
+        to_sea = sum(e['sediment_to_sea_km3'] for e in world.ledger)
+        self.assertAlmostEqual((world._continent_km3() + to_sea) / (volume + magma), 1., delta=1e-6)
         lon = sphere.to_lonlat(sphere.rotate(piece.mesh.nodes, world.frame(2)))[0]
         west, east = lon < np.median(lon), lon >= np.median(lon)
         self.assertGreater(piece.mesh.thickness[west].mean(), piece.mesh.thickness[east].mean())

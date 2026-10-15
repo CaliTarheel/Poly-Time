@@ -206,7 +206,8 @@ class RegionWorld:
         # so carrying the region is carrying the crust, and the rebuild below keeps them together.
         moved = {p: sphere.rotate_geography(r, motion[p]) for p, r in self.regions.items()}
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
-                     events=[], continent_arrived=[], thickened_km3=0., arc_km3=0.)
+                     events=[], continent_arrived=[], thickened_km3=0., arc_km3=0., eroded_km3=0.,
+                     sediment_to_sea_km3=0.)
         lost = {p: [] for p in moved}      # (world geography, boundary kind)
         gained = {p: [] for p in moved}    # (world geography, gain category)
         stage_cache = {}
@@ -277,6 +278,7 @@ class RegionWorld:
             self._update_crust(p, lost[p], gained[p], entry, dt)
         self.crust = _merge_bands(self.crust)
         self._spread(dt)  # thick crust flows outward under its own weight
+        self._erode(dt, entry)  # and is worn down where it stands high
         # Pieces still below the level of detail after merging (a gain with no band of its own to
         # join, a sliver left on its own) are not tracked: booked as a sliver and let go. The ground
         # comes back to a neighbour as a junction gain when the regions are rebuilt.
@@ -531,6 +533,18 @@ class RegionWorld:
         for c in self.crust:
             if c.kind == 'continent' and getattr(c, 'mesh', None) is not None:
                 c.mesh.spread(dt)
+
+    def _erode(self, dt, entry):
+        """Wear the highlands down; sediment settles on the piece's lowlands or goes to the sea."""
+        for c in self.crust:
+            if c.kind != 'continent' or getattr(c, 'mesh', None) is None:
+                continue
+            area = c.area_km2()
+            removed, settled, to_sea = c.mesh.erode(dt, area)
+            if removed > 0.:
+                entry['eroded_km3'] += removed
+                entry['sediment_to_sea_km3'] += to_sea
+                c.thickness_km = c.mesh.volume_km3(area) / area
 
     def _mesh_continents(self):
         """Give every continental piece without a mesh one (a world built or loaded without them)."""
