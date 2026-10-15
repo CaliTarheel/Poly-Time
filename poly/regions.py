@@ -53,6 +53,7 @@ SIMPLIFY_GROWTH = 1.25  # or sooner, once the outlines have this many times the 
 # (Indochina out of the India-Asia collision). 0 keeps it all as thickness.
 ESCAPE_FRACTION = .25
 ESCAPE_REACH_KM = 1500.
+ESCAPE_STEP_KM = 2.     # escape is delivered as a band of the coast this wide, once that much is owed
 
 
 def _full():
@@ -441,20 +442,38 @@ class RegionWorld:
 
     def _escape(self, piece, shortened_km2, mine, entry):
         """Push the piece's coast out over its plate's ocean within reach of the collision, by
-        ESCAPE_FRACTION of the area shortened; the crust there spreads out (same volume)."""
+        ESCAPE_FRACTION of the area shortened; the crust there spreads out (same volume).
+
+        A sub-step's share would be a ribbon metres wide, below the level of detail, so it is owed
+        and delivered as a band ESCAPE_STEP_KM wide along the coast within reach when enough is owed.
+        """
+        if ESCAPE_FRACTION <= 0.:
+            return
+        piece.escape_km2 = getattr(piece, 'escape_km2', 0.) + ESCAPE_FRACTION * shortened_km2
         mesh = getattr(piece, 'mesh', None)
         lost = getattr(mesh, 'lost_nodes', None)
-        if ESCAPE_FRACTION <= 0. or mesh is None or lost is None or not len(lost):
+        if mesh is None or lost is None or not len(lost):
             return
         ocean = [c for c in mine if c.kind == 'ocean' and c is not piece]
         if not ocean:
             return
         rings = [r for poly in sphere.polygons(piece.shape) for r in poly]
         near = sphere.strip(lost, ESCAPE_REACH_KM) if len(lost) > 1 else sphere.EMPTY
-        coast = sum(float(sphere.arc_km(r, np.roll(r, -1, axis=0)).sum()) for r in rings)
-        if coast <= 0. or sphere.is_empty(near):
+        if sphere.is_empty(near):
             return
-        width = ESCAPE_FRACTION * shortened_km2 / coast  # km outward, if the whole coast moved
+        # The coast within reach of the collision is what moves; the width is set from its length.
+        from scipy.spatial import cKDTree
+        tree = cKDTree(np.asarray(lost, float))
+        coast = 0.
+        for r in rings:
+            mids = sphere.unit(r + np.roll(r, -1, axis=0))
+            within = tree.query(mids, k=1)[0] * sphere.RADIUS_KM <= ESCAPE_REACH_KM
+            coast += float(sphere.arc_km(r, np.roll(r, -1, axis=0))[within].sum())
+        if coast <= 0.:
+            return
+        width = piece.escape_km2 / coast  # km outward along the coast within reach
+        if width < ESCAPE_STEP_KM:
+            return
         band = sphere.union(*[sphere.strip(np.vstack((r, r[:1])), width) for r in rings])
         band = sphere.intersection(sphere.difference(band, piece.shape), near)
         band = sphere.intersection(band, sphere.union(*[c.shape for c in ocean]))
@@ -471,6 +490,7 @@ class RegionWorld:
         if recut is not None:
             piece.mesh = recut
         piece.thickness_km = volume / grown
+        piece.escape_km2 = max(piece.escape_km2 - area, 0.)
         entry['gained']['escape'] += area
         entry['lost']['escape'] += area
 

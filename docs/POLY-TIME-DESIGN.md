@@ -131,7 +131,8 @@ equals the area destroyed, term by term.
   so a 1,000 km plateau takes about 50 Myr to spread; crust is conserved exactly), and a share of the
   continent shortened at a collision (ESCAPE_FRACTION, 0.25) comes back as continent along the piece's
   coast within 1,500 km of the collision, over the plate's own ocean, booked as an `escape` gain and
-  loss; the orogen thins by as much. Airy isostasy gives elevation from thickness (0.15 km per km of
+  loss; the orogen thins by as much. It is owed per piece and delivered as a band 2 km wide once that
+  much is owed, since a sub-step's share would be a ribbon metres wide. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.
 - **Suture.** A collision records how far it has closed; at 100 km the two plates weld. The smaller
   plate's crust passes into the larger's frame unchanged, the boundaries between them go, and its other
