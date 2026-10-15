@@ -6,14 +6,26 @@ import spherely
 from PIL import Image, ImageDraw
 
 from poly import sphere
+from poly.mesh import ISOSTASY
 
 COLOURS = dict(ridge=(220, 40, 40), trench=(120, 40, 160), transform=(30, 150, 60),
                converging=(240, 140, 20), collision=(120, 70, 30), suture=(60, 30, 10))
 CONTINENT = (196, 170, 120)
-THICKENED = np.array([120, 85, 55])  # continent at twice its usual thickness or more
+# Hypsometric tints for continent by isostatic elevation (km): lowland, upland, mountain, high peaks.
+RELIEF = [(0., (168, 190, 120)), (.5, (196, 170, 120)), (1.5, (140, 100, 60)), (3., (245, 245, 245))]
 CONTINENT_KM = 35.
 YOUNG, OLD = np.array([150, 215, 235]), np.array([20, 50, 110])
 OCEAN_SPAN_MYR = 150.
+
+
+def _tint(elevation_km):
+    """Colours for elevations, interpolated along RELIEF."""
+    levels = np.array([e for e, _ in RELIEF])
+    colours = np.array([c for _, c in RELIEF], float)
+    out = np.zeros((len(elevation_km), 3))
+    for k in range(3):
+        out[:, k] = np.interp(elevation_km, levels, colours[:, k])
+    return np.round(out).astype(np.uint8)
 
 
 def draw(world, path, width=720, boundaries=True):
@@ -42,8 +54,9 @@ def draw(world, path, width=720, boundaries=True):
             if not hit.any():
                 continue
             if piece.kind == 'continent':
-                f = min(max(getattr(piece, 'thickness_km', CONTINENT_KM) / CONTINENT_KM - 1., 0.), 1.)
-                colour[hit] = np.round(np.array(CONTINENT) * (1 - f) + THICKENED * f).astype(np.uint8)
+                mesh = getattr(piece, 'mesh', None)
+                thick = mesh.sample(local[hit]) if mesh is not None else getattr(piece, 'thickness_km', CONTINENT_KM)
+                colour[hit] = _tint(ISOSTASY * (np.asarray(thick, float) - CONTINENT_KM) * np.ones(int(hit.sum())))
             else:
                 age = 0. if piece.born_myr is None else max(world.time_myr - piece.born_myr, 0.)
                 f = min(age / OCEAN_SPAN_MYR, 1.)

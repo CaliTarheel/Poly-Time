@@ -100,10 +100,22 @@ class RegionStepTests(unittest.TestCase):
         self.assertGreaterEqual(sutures[0]['closed_km'], regions.SUTURE_KM)
         self.assertEqual(world.plates(), [2])
         self.assertTrue(all(c.plate == 2 for c in world.crust))
-        # The continent shortened, and kept its volume by thickening.
+        # The continent shortened, and kept its volume by thickening, on its mesh, where it was shortened:
+        # it was carried east into the trench, so its eastern side is the thick side.
         self.assertLess(world.areas()['continent'], area)
         self.assertAlmostEqual(world._continent_km3() / volume, 1., delta=1e-3)
-        self.assertGreater(max(c.thickness_km for c in world.crust if c.kind == 'continent'), 35.)
+        (piece,) = [c for c in world.crust if c.kind == 'continent']
+        self.assertGreater(piece.thickness_km, 35.)
+        self.assertIsNotNone(piece.mesh)
+        self.assertAlmostEqual(piece.mesh.volume_km3(piece.area_km2()) / piece.volume_km3(), 1., delta=1e-6)
+        nodes = sphere.rotate(piece.mesh.nodes, world.frame(piece.plate))
+        lon = sphere.to_lonlat(nodes)[0]
+        east, west = lon > np.median(lon), lon <= np.median(lon)
+        self.assertGreater(piece.mesh.thickness[east].mean(), piece.mesh.thickness[west].mean() + 1.)
+        # Some of the shortened continent escaped sideways over the plate's ocean, booked both ways.
+        escaped = sum(e['gained']['escape'] for e in world.ledger)
+        self.assertGreater(escaped, 0.)
+        self.assertEqual(escaped, sum(e['lost']['escape'] for e in world.ledger))
         # A one-plate world still steps.
         assert_checks(self, world.step({2: np.zeros(3)}, 1.))
         # The suture is remembered, in the welded plate's frame, and is where the plate is weakest.

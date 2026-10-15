@@ -55,6 +55,9 @@ class Crust:
     # Mean thickness. Continental crust that shortens (collision, compression) keeps its volume
     # and thickens; ocean pieces carry the default, unused.
     thickness_km: float = CONTINENT_KM
+    # A continent's thickness as a field on a mesh in the plate's frame (poly.mesh); None keeps the
+    # one number. `thickness_km` is always the mesh's mean, so volume is area times thickness.
+    mesh: object = None
 
     def area_km2(self) -> float:
         return sphere.area_km2(self.shape)

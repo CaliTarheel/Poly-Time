@@ -30,13 +30,14 @@ import spherely
 
 from poly import sphere
 from poly.build import TRANSFORM_RATIO, _smooth
+from poly.mesh import ContinentMesh
 from poly.sphere import DETAIL_KM2
 from poly.topology import segment_motion
 from poly.world import (AGE_BAND_MYR, COLLISION_KM2, INITIATION_KM, MINIMUM_PLATE_KM2, SAMPLE_KM, TOLERANCE,
                         Crust, _merge_bands)
 
-GAINS = ('ridge', 'trench_opening', 'sliver', 'junction')
-LOSSES = ('subducted', 'continent_at_trench', 'collision', 'compression', 'sliver', 'junction')
+GAINS = ('ridge', 'trench_opening', 'sliver', 'junction', 'escape')
+LOSSES = ('subducted', 'continent_at_trench', 'collision', 'compression', 'sliver', 'junction', 'escape')
 INHERIT_KM = 300.   # a boundary segment takes the type of the nearest old one of the same plates within this
 PROBE_KM = .5       # how far outside a plate's outline its neighbour is looked for
 MARGIN = .2         # hysteresis around the transform threshold when re-typing
@@ -47,6 +48,12 @@ SUTURE_KM = 100.        # a collision that has closed this far welds its two pla
 SIMPLIFY_KM2 = 100.     # a boundary vertex cutting off less than this with its neighbours is dropped
 SIMPLIFY_EVERY_MYR = 1. # outlines are simplified once this much time has passed, not every sub-step
 SIMPLIFY_GROWTH = 1.25  # or sooner, once the outlines have this many times the vertices they had after
+# Lateral escape: this share of the continent shortened at a collision comes back as continent
+# along the piece's coast within ESCAPE_REACH_KM of the collision, over the plate's own ocean
+# (Indochina out of the India-Asia collision). 0 keeps it all as thickness.
+ESCAPE_FRACTION = .25
+ESCAPE_REACH_KM = 1500.
+ESCAPE_STEP_KM = 2.     # escape is delivered as a band of the coast this wide, once that much is owed
 
 
 def _full():
@@ -172,6 +179,7 @@ class RegionWorld:
     # ------------------------------------------------------------------- step
     def step(self, rotations_per_myr: dict, dt: float = 1.) -> dict:
         rotations_per_myr = self._complete(rotations_per_myr)
+        self._mesh_continents()
         crust_before = sum(c.area_km2() for c in self.crust)
         old_regions = dict(self.regions)
         old_index = self._index(rotations_per_myr=rotations_per_myr, dt=dt)
@@ -252,6 +260,7 @@ class RegionWorld:
         for p in plates:
             self._update_crust(p, lost[p], gained[p], entry, dt)
         self.crust = _merge_bands(self.crust)
+        self._spread(dt)  # thick crust flows outward under its own weight
         # Pieces still below the level of detail after merging (a gain with no band of its own to
         # join, a sliver left on its own) are not tracked: booked as a sliver and let go. The ground
         # comes back to a neighbour as a junction gain when the regions are rebuilt.
@@ -396,8 +405,10 @@ class RegionWorld:
                                     (sphere.rotate(_point_in(part), self.frame(plate)), sphere.area_km2(part), plate))
                 piece.shape = sphere.difference(piece.shape, whole)
                 if continental >= TINY_KM2:
-                    # Continent is too light to go away: it shortens and thickens, keeping its volume.
+                    # Continent is too light to go away: it shortens and thickens, keeping its volume,
+                    # and some of it escapes sideways over the plate's own ocean.
                     entry['thickened_km3'] += self._thicken(piece, continental, mine)
+                    self._escape(piece, continental, mine, entry)
         for shape, category in gains:
             area = sphere.area_km2(shape)
             if area < TINY_KM2:
@@ -409,19 +420,90 @@ class RegionWorld:
     def _thicken(self, piece, area, mine):
         """Keep the volume of `area` km2 of continent just taken from `piece`; returns that volume.
 
-        The piece keeps it, thicker; one taken away whole hands it to its plate's largest other
-        continental piece. (Thickness is one number per piece until continents carry a mesh.)
+        The piece keeps it, thicker: on its mesh, near the ground that was lost; with one
+        thickness, everywhere. One taken away whole hands it to its plate's largest other
+        continental piece.
         """
         volume = area * piece.thickness_km
         left = piece.area_km2()
         if left >= TINY_KM2:
-            piece.thickness_km += volume / left
+            total = volume + left * piece.thickness_km
+            if piece.mesh is not None:
+                piece.mesh = piece.mesh.recut(piece.shape, left, total)
+            piece.thickness_km = total / left
             return volume
         others = [c for c in mine if c is not piece and c.kind == 'continent' and c.area_km2() >= TINY_KM2]
         if others:
             heir = max(others, key=lambda c: c.area_km2())
+            if heir.mesh is not None:
+                heir.mesh.add_volume(volume, heir.area_km2(), near=None if piece.mesh is None else piece.mesh.nodes)
             heir.thickness_km += volume / heir.area_km2()
         return volume
+
+    def _escape(self, piece, shortened_km2, mine, entry):
+        """Push the piece's coast out over its plate's ocean within reach of the collision, by
+        ESCAPE_FRACTION of the area shortened; the crust there spreads out (same volume).
+
+        A sub-step's share would be a ribbon metres wide, below the level of detail, so it is owed
+        and delivered as a band ESCAPE_STEP_KM wide along the coast within reach when enough is owed.
+        """
+        if ESCAPE_FRACTION <= 0.:
+            return
+        piece.escape_km2 = getattr(piece, 'escape_km2', 0.) + ESCAPE_FRACTION * shortened_km2
+        mesh = getattr(piece, 'mesh', None)
+        lost = getattr(mesh, 'lost_nodes', None)
+        if mesh is None or lost is None or not len(lost):
+            return
+        ocean = [c for c in mine if c.kind == 'ocean' and c is not piece]
+        if not ocean:
+            return
+        rings = [r for poly in sphere.polygons(piece.shape) for r in poly]
+        near = sphere.strip(lost, ESCAPE_REACH_KM) if len(lost) > 1 else sphere.EMPTY
+        if sphere.is_empty(near):
+            return
+        # The coast within reach of the collision is what moves; the width is set from its length.
+        from scipy.spatial import cKDTree
+        tree = cKDTree(np.asarray(lost, float))
+        coast = 0.
+        for r in rings:
+            mids = sphere.unit(r + np.roll(r, -1, axis=0))
+            within = tree.query(mids, k=1)[0] * sphere.RADIUS_KM <= ESCAPE_REACH_KM
+            coast += float(sphere.arc_km(r, np.roll(r, -1, axis=0))[within].sum())
+        if coast <= 0.:
+            return
+        width = piece.escape_km2 / coast  # km outward along the coast within reach
+        if width < ESCAPE_STEP_KM:
+            return
+        band = sphere.union(*[sphere.strip(np.vstack((r, r[:1])), width) for r in rings])
+        band = sphere.intersection(sphere.difference(band, piece.shape), near)
+        band = sphere.intersection(band, sphere.union(*[c.shape for c in ocean]))
+        area = sphere.area_km2(band)
+        if area < TINY_KM2:
+            return
+        volume = piece.volume_km3()
+        for c in ocean:
+            if sphere.area_km2(sphere.intersection(c.shape, band)) >= TINY_KM2:
+                c.shape = sphere.difference(c.shape, band)
+        piece.shape = sphere.union(piece.shape, band)
+        grown = piece.area_km2()
+        recut = mesh.recut(piece.shape, grown, volume)
+        if recut is not None:
+            piece.mesh = recut
+        piece.thickness_km = volume / grown
+        piece.escape_km2 = max(piece.escape_km2 - area, 0.)
+        entry['gained']['escape'] += area
+        entry['lost']['escape'] += area
+
+    def _spread(self, dt):
+        for c in self.crust:
+            if c.kind == 'continent' and getattr(c, 'mesh', None) is not None:
+                c.mesh.spread(dt)
+
+    def _mesh_continents(self):
+        """Give every continental piece without a mesh one (a world built or loaded without them)."""
+        for c in self.crust:
+            if c.kind == 'continent' and getattr(c, 'mesh', None) is None:
+                c.mesh = ContinentMesh.build(c.shape, c.thickness_km)
 
     def _continent_km3(self) -> float:
         return sum(c.volume_km3() for c in self.crust if c.kind == 'continent')
@@ -500,11 +582,24 @@ class RegionWorld:
         moved = []
         for c in [c for c in self.crust if c.plate == plate]:
             part = sphere.intersection(c.shape, local)
-            if sphere.area_km2(part) < TINY_KM2:
+            part_km2 = sphere.area_km2(part)
+            if part_km2 < TINY_KM2:
                 continue
+            whole_km3 = c.volume_km3()
             c.shape = sphere.difference(c.shape, local)
             shape = part if np.allclose(carry, np.eye(3)) else sphere.rotate_geography(part, carry)
-            moved.append(Crust(to, c.kind, shape, c.born_myr, c.thickness_km))
+            given = Crust(to, c.kind, shape, c.born_myr, c.thickness_km)
+            if c.kind == 'continent' and getattr(c, 'mesh', None) is not None:
+                # The part takes the field as it is there; the rest keeps the remainder exactly.
+                taken = ContinentMesh.build(part, c.thickness_km, field=c.mesh.sample)
+                part_km3 = taken.volume_km3(part_km2) if taken is not None else part_km2 * c.thickness_km
+                given.thickness_km = part_km3 / part_km2
+                given.mesh = None if taken is None else taken.rotated(carry)
+                left_km2 = c.area_km2()
+                if left_km2 >= TINY_KM2:
+                    c.mesh = c.mesh.recut(c.shape, left_km2, whole_km3 - part_km3)
+                    c.thickness_km = (whole_km3 - part_km3) / left_km2
+            moved.append(given)
         self.crust = [c for c in self.crust if sphere.area_km2(c.shape) >= TINY_KM2] + moved
         self.regions[plate] = sphere.difference(self.regions[plate], piece)
         self.regions[to] = sphere.union(self.regions.get(to, sphere.EMPTY), piece)
