@@ -110,7 +110,8 @@ def cap_world(centre_lonlat=(0., 0.), radius_deg=40., cap_omega=(0., 0., .01), r
     return world, omegas
 
 
-def voronoi_world(count=8, seed=1, spacing_km=100., speed_km_myr=30., continents=0, overriding=None):
+def voronoi_world(count=8, seed=1, spacing_km=100., speed_km_myr=30., continents=0, overriding=None,
+                  continent_fraction=0.):
     """`count` plates from a spherical Voronoi tessellation of random seeds, with random rotations."""
     from scipy.spatial import SphericalVoronoi
     rng = np.random.default_rng(seed)
@@ -143,16 +144,30 @@ def voronoi_world(count=8, seed=1, spacing_km=100., speed_km_myr=30., continents
     world.crust = [Crust(p, 'ocean', shape, born_myr=-50.) for p, shape in polygons.items()]
     if continents:
         _add_continents(world, polygons, continents, rng)
+    if continent_fraction:
+        _add_continents(world, polygons, len(polygons), rng, fill=.8, fraction=continent_fraction)
     return world, omegas
 
 
-def _add_continents(world, polygons, count, rng):
-    """Put a circular continent inside `count` random plates (cut out of their ocean)."""
-    for plate in rng.choice(sorted(polygons), size=min(count, len(polygons)), replace=False):
+def _add_continents(world, polygons, count, rng, fill=.45, fraction=None):
+    """Put a circular continent inside `count` random plates (cut out of their ocean).
+
+    Each disc's radius is `fill` of the distance from the plate's centre to its edge. With
+    `fraction`, the largest plates are taken first and discs are added until that fraction of
+    the sphere is continent: an Earth-like world is about 0.3.
+    """
+    if fraction:
+        order = sorted(polygons, key=lambda p: -sphere.area_km2(polygons[p]))
+    else:
+        order = [int(p) for p in rng.choice(sorted(polygons), size=min(count, len(polygons)), replace=False)]
+    placed = 0.
+    for plate in order:
+        if fraction and placed >= fraction * sphere.SPHERE_KM2:
+            break
         plate = int(plate)
         ring = sphere.polygons(polygons[plate])[0][0]
         centre = sphere.unit(ring.mean(axis=0))
-        radius = .45 * float(np.min(sphere.arc_km(ring, centre[None]))) / sphere.RADIUS_KM
+        radius = fill * float(np.min(sphere.arc_km(ring, centre[None]))) / sphere.RADIUS_KM
         pole = sphere.unit(np.cross(centre, ring[0]))
         start = sphere.rotate(centre, sphere.rotation(pole * radius))
         disc = np.array([sphere.rotate(start, sphere.rotation(centre * 2 * math.pi * k / 48)) for k in range(48)])
@@ -161,3 +176,4 @@ def _add_continents(world, polygons, count, rng):
             if piece.plate == plate:
                 piece.shape = sphere.difference(piece.shape, continent)
         world.crust.append(Crust(plate, 'continent', continent))
+        placed += sphere.area_km2(continent)
