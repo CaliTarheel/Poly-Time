@@ -22,6 +22,9 @@ from poly import sphere
 SPACING_KM = 200.   # interior node spacing
 REFERENCE_KM = 35.  # thickness of continent at sea level
 ISOSTASY = .15      # elevation per km of extra thickness: (rho_mantle - rho_crust) / rho_mantle
+# Thick crust flows outward under its own weight: thickness diffuses with this diffusivity. A
+# plateau 1,000 km across takes about 50 Myr to spread (Tibet).
+SPREADING_KM2_PER_MYR = 3e3
 REACH_KM = 300.     # shortening thickens the crust within about this of where it happened
 MINIMUM_KM2 = 2e4   # a piece smaller than this (a 140 km disc) keeps one thickness, no mesh
 LOST_KM = 1.        # a node this far outside the piece's new outline was on the ground lost
@@ -154,7 +157,34 @@ class ContinentMesh:
             gone[np.flatnonzero(gone)[km < LOST_KM]] = False
         deficit = target_km3 - new.volume_km3(polygon_km2)
         new.add_volume(deficit, polygon_km2, near=self.nodes[gone] if gone.any() else None)
+        new.lost_nodes = self.nodes[gone]  # where the ground went, for what follows a collision
         return new
+
+    def spread(self, dt_myr, diffusivity=SPREADING_KM2_PER_MYR):
+        """Let the thickness flow down its gradient for `dt_myr`: crust is conserved exactly.
+
+        Finite volumes on the mesh edges: the crust moving along an edge per Myr is the
+        diffusivity times the thickness difference (an edge's width and length cancel to first
+        order), sub-cycled to keep the explicit scheme stable.
+        """
+        if len(self.triangles) == 0 or dt_myr <= 0.:
+            return
+        edges = np.vstack((self.triangles[:, [0, 1]], self.triangles[:, [1, 2]], self.triangles[:, [2, 0]]))
+        edges = np.unique(np.sort(edges, axis=1), axis=0)
+        i, j = edges[:, 0], edges[:, 1]
+        areas = np.maximum(self.node_areas_km2(), 1.)
+        degree = np.bincount(np.concatenate((i, j)), minlength=len(self.nodes))
+        limit = .25 * areas / np.maximum(degree, 1) / diffusivity  # stable sub-step, per node
+        cycles = int(np.ceil(dt_myr / max(float(limit.min()), 1e-9)))
+        step = dt_myr / cycles
+        t = self.thickness.copy()
+        for _ in range(cycles):
+            flow = diffusivity * step * (t[j] - t[i])  # km3 along each edge, from j to i
+            change = np.zeros(len(t))
+            np.add.at(change, i, flow)
+            np.add.at(change, j, -flow)
+            t += change / areas
+        self.thickness = t
 
     def rotated(self, matrix):
         return ContinentMesh(sphere.rotate(self.nodes, matrix), self.triangles, self.thickness)

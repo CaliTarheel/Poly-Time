@@ -112,6 +112,10 @@ class RegionStepTests(unittest.TestCase):
         lon = sphere.to_lonlat(nodes)[0]
         east, west = lon > np.median(lon), lon <= np.median(lon)
         self.assertGreater(piece.mesh.thickness[east].mean(), piece.mesh.thickness[west].mean() + 1.)
+        # Some of the shortened continent escaped sideways over the plate's ocean, booked both ways.
+        escaped = sum(e['gained']['escape'] for e in world.ledger)
+        self.assertGreater(escaped, 0.)
+        self.assertEqual(escaped, sum(e['lost']['escape'] for e in world.ledger))
         # A one-plate world still steps.
         assert_checks(self, world.step({2: np.zeros(3)}, 1.))
         # The suture is remembered, in the welded plate's frame, and is where the plate is weakest.

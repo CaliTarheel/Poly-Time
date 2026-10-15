@@ -126,7 +126,13 @@ equals the area destroyed, term by term.
   collision, not a uniformly thicker continent. A rift gives each part the field as it is there; a
   suture rotates the mesh into the new frame; a piece consumed whole passes its volume to its plate's
   largest continent near where it was. The ledger records the volume thickened and the total
-  continental volume every step. Relief, erosion and arcs are processes on this mesh, to come.
+  continental volume every step.
+- **Thick crust spreads and escapes.** Thickness diffuses down its gradient on the mesh (3,000 km2/Myr,
+  so a 1,000 km plateau takes about 50 Myr to spread; crust is conserved exactly), and a share of the
+  continent shortened at a collision (ESCAPE_FRACTION, 0.25) comes back as continent along the piece's
+  coast within 1,500 km of the collision, over the plate's own ocean, booked as an `escape` gain and
+  loss; the orogen thins by as much. Airy isostasy gives elevation from thickness (0.15 km per km of
+  crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.
 - **Suture.** A collision records how far it has closed; at 100 km the two plates weld. The smaller
   plate's crust passes into the larger's frame unchanged, the boundaries between them go, and its other
   boundaries become the larger plate's with their state. The suture line is kept, in the welded plate's
