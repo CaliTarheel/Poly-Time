@@ -146,11 +146,16 @@ class RegionWorld:
             reach[p] = float(np.linalg.norm(rotations_per_myr[p])) * sphere.RADIUS_KM * dt
         runs = self._runs(rotations_per_myr, dt, reach)   # pair -> [(zone, kind, overriding)]
         # Overlaps: within a run's zone, by that run's type; elsewhere split along the half-stage line.
+        # Pairs are resolved one after another, each plate's losses taken out before its next pair:
+        # where three plates overlap, the pairs alone could each give the ground away (a gap) or
+        # each keep it (an overlap); this way exactly one plate keeps it.
+        holding = dict(moved)
         for i, p in enumerate(plates):
             for q in plates[i + 1:]:
-                overlap = sphere.intersection(moved[p], moved[q])
+                overlap = sphere.intersection(holding[p], holding[q])
                 if sphere.area_km2(overlap) < TINY_KM2:
                     continue
+                before = len(lost[p]), len(lost[q])
                 remaining = overlap
                 for zone, kind, over in runs.get((p, q), []):
                     local = sphere.intersection(remaining, zone)
@@ -160,6 +165,10 @@ class RegionWorld:
                     self._split_overlap(local, kind, over, p, q, stage, lost)
                 if sphere.area_km2(remaining) >= TINY_KM2:
                     self._split_overlap(remaining, 'junction', None, p, q, stage, lost)
+                for plate, start in zip((p, q), before):
+                    given = [shape for shape, _ in lost[plate][start:]]
+                    if given:
+                        holding[plate] = sphere.difference(holding[plate], sphere.union(*given))
         # Gaps: within a run's zone, split along that pair's half-stage line; the rest to the nearest plate.
         cover = sphere.union(*moved.values())
         remaining = sphere.difference(FULL, cover)
