@@ -90,11 +90,57 @@ features, and its region is where that crust is. Every step:
    vertex of both) and simplified on both sides at once, so the plates still tile the sphere;
 5. the regions are rebuilt from the crust; a plate that came apart becomes separate plates, and
    crumbs of one plate left beside or inside another go to that plate;
-6. the boundaries are derived again from where the regions touch, each segment keeping the type,
-   trench polarity and closing-so-far of the nearest old segment of the same plates.
+6. the boundaries are derived again from where the regions touch. Every segment has a persistent
+   identity: the old boundaries are indexed one by one with their midpoints carried by the pair's
+   mean rotation, and a new segment takes the state (type, trench polarity, closing-so-far) and
+   identity of the nearest carried old segment within 300 km, with one continuity rule: a segment
+   whose nearest old boundary differs from both its neighbours' is beside another contact of the
+   same plates, not part of it, and takes its neighbours' boundary when that is in reach. A segment
+   with no old boundary in reach is a new contact, typed from the motion.
+
+**Level of detail.** Nothing smaller than 4 km2 is tracked (`DETAIL_KM2`): a hole, a loop or a
+leftover crust piece under that is debris, dropped or merged and still counted in the ledger's drift;
+an outline vertex that cuts off less than that is not kept. Islands and arcs at that scale will come
+from a separate process, not from the crust geometry.
+
+**Geometry repair.** S2's outputs are valid, but a ring read back as longitude and latitude and
+rotated moves by about 1e-16 and can touch or cross itself. A loop S2 says crosses itself is split at
+the crossing into the loops that meet there, which keeps the signed area exactly; loops of the ring's
+orientation with real area are built, folds and slits are debris. Snapping every vertex to a lattice
+was tried and made things worse: the lattice is far coarser than the native error, and shared edges
+pass through different plate frames, so it widened every slit.
 
 The checks are the same: the plates tile the sphere, each plate's crust tiles it, and the area created
 equals the area destroyed, term by term.
+
+## Collisions, sutures and rifts (phase 2, continued)
+
+- **Continent keeps its volume.** Continental crust that loses area anywhere but down a trench
+  (collision, compression, slivers) thickens instead: each piece carries a mean thickness (35 km to
+  start), and the volume taken is added back to the piece, or to its plate's largest other continental
+  piece if it was taken whole. The ledger records the volume thickened and the total continental volume
+  every step. (One thickness per piece until continents carry a mesh.)
+- **Suture.** A collision records how far it has closed; at 100 km the two plates weld. The smaller
+  plate's crust passes into the larger's frame unchanged, the boundaries between them go, and its other
+  boundaries become the larger plate's with their state. The suture line is kept, in the welded plate's
+  frame like its crust, and moves with it (and passes to a new plate when a rift takes its side).
+- **Rifting by tension.** At the start of each step of a force-driven run, straight cuts (great circles)
+  through each large plate's centre and through each of its continents are tested, twelve directions
+  each. The plate moves rigidly, so each side of a cut needs the other to carry it: the external torque
+  on one side (drivers, neighbours' resistance, basal drag) fitted as an even pull across the cut is the
+  cut's tension. The strength along the cut is the mean of ocean (1.6e13 N/m) and continent (3e12 N/m)
+  by length, so continents are where plates break; a stretch of cut within 150 km of an old suture is
+  weaker still (3e11 N/m), and the great circle fitted to each suture is tried as a cut of its own, so
+  plates break again where they welded. The cut whose tension most exceeds its strength splits the
+  plate, at most one a step; the new plate starts in its parent's frame, takes the crust and boundary
+  state on its side, and the cut is typed from the motion at the next step. Both parts must be at
+  least 3 Mkm2.
+- **Slab pull by age.** Pull per metre of trench scales with the square root of the age of the crust
+  going down (3e13 N/m at 80 Myr, capped at 1.25x), sampled 150 km down the downgoing side; young
+  ocean at a new trench pulls little.
+- The three-continent test world is continent-poor (9.4 Mkm2, under 2% of the sphere, against about
+  30% on Earth), so most of its cuts are nearly all ocean and most of its rifts are oceanic; on an
+  Earth-like world the continental weakness dominates.
 
 ## What carries over from Super-Light-Time
 

@@ -60,10 +60,10 @@ class SphereTests(unittest.TestCase):
         # The same when S2 will not take the polygon whole and it is rebuilt loop by loop.
         real = sphere.polygon_robust
 
-        def refuse_holes(ring, holes=(), attempts=24):
+        def refuse_holes(ring, holes=(), attempts=24, minimum_km2=1e-6):
             if len(holes):
                 raise ValueError('refused')
-            return real(ring, holes, attempts)
+            return real(ring, holes, attempts, minimum_km2)
         with mock.patch.object(sphere, 'polygon_robust', refuse_holes):
             region, _ = sphere.part([shell, hole], whole_km2=whole - cut)
         self.assertAlmostEqual(sphere.area_km2(region) / (whole - cut), 1., places=6)
@@ -81,6 +81,16 @@ class SphereTests(unittest.TestCase):
         (kept,) = sphere.node_shared([pinch])
         self.assertEqual(len(kept), 6)
         self.assertGreater(sphere.arc_km(kept[2], kept[5]), 0.)
+
+    def test_a_ring_touching_itself_keeps_both_lobes(self):
+        # A figure of eight (two lobes meeting at one point), as rotation can read a strip back.
+        lobe_a = sphere.from_lonlat([0., 2., 1.], [0., 0., 1.])
+        lobe_b = sphere.from_lonlat([1., 2., 0.], [1., 2., 2.])
+        ring = np.vstack((lobe_a, lobe_b[1:], lobe_b[:1]))
+        expected = sphere.loop_area_km2(lobe_a) + sphere.loop_area_km2(lobe_b)
+        for matrix in (np.eye(3), sphere.rotation(np.array([.3, -.2, .9]))):
+            region, _ = sphere.part([sphere.rotate(ring, matrix)], whole_km2=expected)
+            self.assertAlmostEqual(sphere.area_km2(region) / expected, 1., places=6)
 
     def test_simplifying_shared_rings_keeps_them_tiling_the_sphere(self):
         # Two hemispheres meeting along the equator, drawn every 28 km with a 1 km zig-zag.

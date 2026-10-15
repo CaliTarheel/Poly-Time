@@ -2,6 +2,7 @@
 import unittest
 
 import numpy as np
+import spherely
 
 from poly import dynamics, regions, sphere
 from poly.build import cap_world, voronoi_world
@@ -77,6 +78,50 @@ class RegionStepTests(unittest.TestCase):
         self.assertIn('collision', kinds_of(world))
         self.assertGreater(sum(e['lost']['continent_at_trench'] for e in world.ledger), COLLISION_KM2)
 
+    def test_a_collision_thickens_the_continent_then_welds_the_plates(self):
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        continent = sphere.polygon(disc((30., 0.), 6.))
+        for piece in world.crust:
+            if piece.plate == 1:
+                piece.shape = sphere.difference(piece.shape, continent)
+        world.crust.append(Crust(1, 'continent', continent))
+        volume = world._continent_km3()
+        area = world.areas()['continent']
+        events = []
+        for _ in range(30):
+            entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
+            assert_checks(self, entry)
+            events += entry['events']
+            if any(e['kind'] == 'suture' for e in events):
+                break
+        sutures = [e for e in events if e['kind'] == 'suture']
+        self.assertTrue(sutures)
+        self.assertEqual((sutures[0]['into'], sutures[0]['gone']), (2, 1))  # the cap joins the larger plate
+        self.assertGreaterEqual(sutures[0]['closed_km'], regions.SUTURE_KM)
+        self.assertEqual(world.plates(), [2])
+        self.assertTrue(all(c.plate == 2 for c in world.crust))
+        # The continent shortened, and kept its volume by thickening.
+        self.assertLess(world.areas()['continent'], area)
+        self.assertAlmostEqual(world._continent_km3() / volume, 1., delta=1e-3)
+        self.assertGreater(max(c.thickness_km for c in world.crust if c.kind == 'continent'), 35.)
+        # A one-plate world still steps.
+        assert_checks(self, world.step({2: np.zeros(3)}, 1.))
+        # The suture is remembered, in the welded plate's frame, and is where the plate is weakest.
+        self.assertEqual(len(world.sutures), 1)
+        (line, when), = list(world.suture_lines())
+        self.assertGreater(len(line), 2)
+        self.assertLess(when, world.time_myr)
+        balance = dynamics.Balance()
+        weak = dynamics.Rifting(minimum_plate_km2=1., minimum_part_km2=1.)
+        rotations = balance.solve(world)
+        with_suture = dynamics.cuts(balance, world, rotations, 2, weak)
+        sutures, world.sutures = world.sutures, []
+        without = dynamics.cuts(balance, world, rotations, 2, weak)
+        world.sutures = sutures
+        # One more cut is tried, along the suture, and every cut near it is weaker than without it.
+        self.assertEqual(len(with_suture), len(without) + 1)
+        self.assertLess(min(c.strength_n_per_m for c in with_suture), min(c.strength_n_per_m for c in without))
+
     def test_eight_plates_keep_their_crust_accounted_for(self):
         network_world, omegas = voronoi_world(count=8, seed=3, speed_km_myr=30., continents=3)
         world = regions.from_network(network_world)
@@ -105,6 +150,39 @@ class RegionDynamicsTests(unittest.TestCase):
             assert_checks(self, entry)
         self.assertAlmostEqual(world.time_myr, 2., places=9)
         self.assertGreater(sum(e['lost']['subducted'] for e in entries), 0.)
+
+
+class RiftTests(unittest.TestCase):
+    def test_a_plates_boundary_torques_and_drag_balance(self):
+        world = regions.from_network(voronoi_world(count=6, seed=5, continents=2)[0])
+        balance = dynamics.Balance()
+        rotations = balance.solve(world)
+        for plate in world.plates():
+            mids, torques = dynamics.plate_torques(balance, world, rotations, plate)
+            region = world.world_regions()[plate]
+            inside = np.asarray(spherely.contains(region, balance.geographies))
+            a = balance.points[inside]
+            drag = (balance.parameters.basal_drag_pa_s_per_m * dynamics.R_M ** 2 * balance.point_area_m2
+                    * (np.eye(3) * len(a) - a.T @ a))
+            net = torques.sum(axis=0) - drag @ (np.asarray(rotations[plate]) / dynamics.SECONDS_PER_MYR)
+            self.assertLess(np.linalg.norm(net), 1e-6 * np.abs(torques).sum())
+
+    def test_a_weak_plate_rifts_and_the_books_close(self):
+        world = regions.from_network(voronoi_world(count=6, seed=5, continents=2)[0])
+        weak = dynamics.Rifting(ocean_strength_n_per_m=1e10, continent_strength_n_per_m=1e10)
+        crust = sum(c.area_km2() for c in world.crust)
+        entries = []
+        dynamics.run(world, 2, report=lambda w, entry: entries.append(entry), rifting=weak)
+        rifts = [e for entry in entries for e in entry['events'] if e['kind'] == 'rift']
+        self.assertGreaterEqual(len(rifts), 1)
+        self.assertGreater(rifts[0]['tension_n_per_m'], rifts[0]['strength_n_per_m'])
+        self.assertEqual(len(world.plates()), 6 + len(rifts))
+        for entry in entries:
+            assert_checks(self, entry)
+        self.assertAlmostEqual(sum(c.area_km2() for c in world.crust) / crust, 1., delta=1e-6)
+        # Parent and child meet along the cut.
+        first = rifts[0]
+        self.assertTrue(any({b.left, b.right} == {first['plate'], first['new']} for b in world.boundaries))
 
 
 if __name__ == '__main__':

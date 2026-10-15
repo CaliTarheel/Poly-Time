@@ -64,7 +64,13 @@ def polygon(ring, holes=()):
 
 EMPTY = spherely.from_wkt('POLYGON EMPTY')
 DEBRIS_LIMIT_KM2 = 1.
-SLIT_KM2 = 1e-3  # a hole enclosing less than this is a slit left where edges nearly coincide
+# The model's level of detail. Nothing smaller is tracked: a hole, a loop or a leftover piece under
+# this is debris, dropped or merged (its area still shows in the ledger's drift), and an outline
+# vertex that cuts off less than this is not worth keeping. Islands and arcs at this scale will come
+# from a separate process, not from the crust geometry.
+DETAIL_KM2 = 4.
+SLIT_KM2 = DETAIL_KM2  # a hole enclosing less than this is a slit left where edges nearly coincide
+TOOTH_COSINE = -.995   # a ring turning back this sharply (within about 6 degrees) at a vertex is a tooth
 # Rebuilding a shape read back from S2 can cut a slit or fold of tens of km2 (an absolute amount,
 # whatever the plate's size). Allow 1e-4 of the shape and at least 100 km2: far inside the 0.1%
 # standard, and still orders of magnitude below a lost lobe or an inside-out shape.
@@ -83,32 +89,42 @@ def _full():
 
 
 def strip(points, half_width_km):
-    """A band `half_width_km` either side of a polyline, as one polygon or the union of per-segment pieces."""
+    """A band `half_width_km` either side of a polyline, coarsely: the polyline is resampled every
+    two band widths or so before the band is drawn, so a boundary with teeth or wiggles finer than
+    the band gets a smooth band, never one drawn round every tooth. Where the offset outline of the
+    coarse polyline still crosses itself (a sharp turn), it is repaired at the crossings, and failing
+    that the band is the union of a quadrilateral per coarse segment.
+    """
     points = np.asarray(points, float)
     angle = half_width_km / RADIUS_KM
-    if len(points) >= 2:
-        length = np.r_[0., np.cumsum(arc_km(points[:-1], points[1:]))]
-        for spacing in (2. * half_width_km, 4. * half_width_km):
-            marks = np.unique(np.r_[np.searchsorted(length, np.arange(0., length[-1], spacing)), len(points) - 1])
-            coarse = points[marks]
-            # Coincident points have no direction between them (and would give NaN normals).
-            coarse = coarse[np.r_[True, arc_km(coarse[:-1], coarse[1:]) > 1e-6]]
-            if len(coarse) < 2:
-                return EMPTY
-            segment = unit(np.cross(coarse[:-1], coarse[1:]))
-            normal = unit(np.vstack((segment[:1], segment[:-1] + segment[1:], segment[-1:])))
-            left = unit(coarse * np.cos(angle) + normal * np.sin(angle))
-            right = unit(coarse * np.cos(angle) - normal * np.sin(angle))
-            ring = np.vstack((right, left[::-1]))
-            try:
-                band = polygon(ring)
-            except (ValueError, RuntimeError):
-                continue
-            if area_km2(band) > .5 * SPHERE_KM2:
-                band = polygon(ring[::-1])
+    if len(points) < 2:
+        return EMPTY
+    length = np.r_[0., np.cumsum(arc_km(points[:-1], points[1:]))]
+    for spacing in (2. * half_width_km, 4. * half_width_km):
+        marks = np.unique(np.r_[np.searchsorted(length, np.arange(0., length[-1], spacing)), len(points) - 1])
+        coarse = points[marks]
+        # Coincident points have no direction between them (and would give NaN normals).
+        coarse = coarse[np.r_[True, arc_km(coarse[:-1], coarse[1:]) > 1e-6]]
+        if len(coarse) < 2:
+            continue
+        segment = unit(np.cross(coarse[:-1], coarse[1:]))
+        normal = unit(np.vstack((segment[:1], segment[:-1] + segment[1:], segment[-1:])))
+        left = unit(coarse * np.cos(angle) + normal * np.sin(angle))
+        right = unit(coarse * np.cos(angle) - normal * np.sin(angle))
+        ring = np.vstack((right, left[::-1]))
+        try:
+            band = polygon_robust(ring)
+        except (ValueError, RuntimeError):
+            continue
+        if area_km2(band) > .5 * SPHERE_KM2:
+            band = spherely.difference(_full(), band)
+        if not is_empty(band):
             return band
+    # The coarsest polyline, a quadrilateral per segment.
+    marks = np.unique(np.r_[np.searchsorted(length, np.arange(0., length[-1], 4. * half_width_km)), len(points) - 1])
+    coarse = points[marks]
     pieces = []
-    for a, b in zip(points[:-1], points[1:]):
+    for a, b in zip(coarse[:-1], coarse[1:]):
         if float(arc_km(a, b)) < 1e-6:
             continue
         normal = unit(np.cross(a, b))
@@ -260,7 +276,7 @@ def loop_area_km2(loop) -> float:
     return float(2. * np.arctan2(numerator, denominator).sum()) * RADIUS_KM ** 2
 
 
-def tidy_ring(ring, tolerance=1e-10):
+def tidy_ring(ring, tolerance=1e-10, tooth_km2=0.):
     """A ring without near-duplicate vertices or zero-width spikes (A -> B -> A).
 
     Reading S2's shapes through longitude and latitude moves points by ~1e-16, leaving vertices
@@ -278,6 +294,12 @@ def tidy_ring(ring, tolerance=1e-10):
         w = np.roll(points, -1, axis=0) - points
         cosine = np.einsum('ij,ij->i', u, w) / (np.linalg.norm(u, axis=1) * np.linalg.norm(w, axis=1))
         spike = cosine < -1. + 1e-9  # the ring turns straight back here: a spike of no width
+        if tooth_km2 > 0.:
+            # A tooth: the ring turns back within TOOTH_COSINE (about 6 degrees) and the sliver it
+            # cuts off is below `tooth_km2` (the level of detail, when the caller asks for it).
+            # Boundaries grew combs of these, 1.2 km long and 30 m wide, that nothing else took out.
+            triangle = .5 * np.linalg.norm(np.cross(u, w), axis=1) * RADIUS_KM ** 2
+            spike |= (cosine < TOOTH_COSINE) & (triangle < tooth_km2)
         if not spike.any():
             break
         spike &= ~np.roll(spike, 1)  # one of two neighbouring spikes at a time
@@ -316,35 +338,53 @@ def simple_loops(ring, tolerance=1e-10):
 _EDGE = re.compile(r'(?:loop (\d+)\D*?)?edge (\d+)', re.IGNORECASE)
 
 
-def polygon_robust(ring, holes=(), attempts=24):
-    """`polygon`, dropping the vertex S2 names when it rejects a ring (crossing or repeated edges).
+def polygon_robust(ring, holes=(), attempts=24, minimum_km2=1e-6):
+    tooth = minimum_km2 if minimum_km2 >= DETAIL_KM2 else 0.
+    """`polygon`, repaired when S2 rejects a ring (crossing or repeated edges).
 
-    S2's own outputs are valid, but writing them as longitude and latitude moves points by ~1e-16,
-    which can make edges that nearly touch cross. Dropping the vertex at the offending edge moves
-    the outline by about that much; callers check the area against S2's own.
+    S2's own outputs are valid, but a ring read back and rotated can touch or cross itself: a strip
+    of no width that runs out and back along one line, or two lobes meeting at a point. A loop S2
+    says crosses itself is split at the crossing into loops, which keeps the signed area exactly;
+    loops of the ring's own orientation with real area are kept, the rest (folds, slits) are
+    debris. Only when no crossing is named is the vertex at the offending edge dropped, which moves
+    the outline by about the read-back error; callers check the area against S2's own.
     """
-    loops = [tidy_ring(ring)] + [tidy_ring(h) for h in holes]
+    loops = [tidy_ring(ring, tooth_km2=tooth)] + [tidy_ring(h, tooth_km2=tooth) for h in holes]
     loops = [loops[0]] + [h for h in loops[1:] if len(h) >= 3]
+    if len(loops[0]) < 3:
+        return EMPTY  # tidied away: a spike or a repeated point, nothing inside
     for _ in range(attempts):
         try:
             return polygon(loops[0], loops[1:])
         except (ValueError, RuntimeError) as error:
             found = [(int(m.group(1) or 0), int(m.group(2))) for m in _EDGE.finditer(str(error))]
+            if not found and abs(loop_area_km2(loops[0])) < max(minimum_km2, SLIT_KM2):
+                return EMPTY  # a loop S2 collapses to nothing (vertices a few mm apart): debris
             # S2 numbers loops in its own nesting order, which is ours only while that is simple;
             # an edge that is not there means it is not, and the caller rebuilds loop by loop.
             if not found or any(loop >= len(loops) or edge >= len(loops[loop]) for loop, edge in found):
                 raise
-            if 'cross' in str(error) and len(found) == 2 and found[0][0] == found[1][0] and found[0][0] < len(loops):
-                # Two edges of one loop cross: a slit or fold. Cut out the shorter stretch of the
-                # loop between them and put the crossing point in its place.
-                cut = _cut_crossing(loops[found[0][0]], found[0][1], found[1][1])
-                if cut is not None:
-                    loops[found[0][0]] = cut
-                    continue
-            # When two loops are named (a crossing), drop the vertex from the smaller one.
-            loop, edge = min(found, key=lambda le: len(loops[le[0]]) if le[0] < len(loops) else 1 << 30)
-            if loop >= len(loops):
-                raise
+            if 'cross' in str(error) and len(found) == 2 and found[0][0] == found[1][0]:
+                which = found[0][0]
+                pieces = _split_at_crossing(loops[which], found[0][1], found[1][1])
+                if pieces is not None:
+                    sign = np.sign(loop_area_km2(loops[which]))
+                    kept = [p for p in pieces if len(p) >= 3 and np.sign(loop_area_km2(p)) == sign
+                            and abs(loop_area_km2(p)) >= max(minimum_km2, SLIT_KM2)]
+                    if not kept:
+                        if which == 0:
+                            return EMPTY
+                        del loops[which]
+                        continue
+                    if which == 0:
+                        shell = union(*[polygon_robust(p, (), attempts, minimum_km2) for p in kept])
+                        cut = [polygon_robust(h[::-1], (), attempts, minimum_km2) for h in loops[1:]]
+                        return spherely.difference(shell, union(*cut)) if cut else shell
+                    rest = polygon_robust(loops[0], loops[1:which] + loops[which + 1:], attempts, minimum_km2)
+                    hole = union(*[polygon_robust(p[::-1], (), attempts, minimum_km2) for p in kept])
+                    return spherely.difference(rest, hole)
+            # When two loops are named (a crossing between loops), drop the vertex from the smaller.
+            loop, edge = min(found, key=lambda le: len(loops[le[0]]))
             if len(loops[loop]) <= 3:
                 if loop == 0:
                     raise
@@ -354,27 +394,21 @@ def polygon_robust(ring, holes=(), attempts=24):
     return polygon(loops[0], loops[1:])
 
 
-def _cut_crossing(loop, i, j):
-    """`loop` with the shorter stretch between crossing edges i and j replaced by their crossing."""
+def _split_at_crossing(loop, i, j):
+    """`loop` split at the crossing of its edges i and j into the two loops that meet there."""
     n = len(loop)
     i, j = sorted((i, j))
     a, b, c, d = loop[i], loop[(i + 1) % n], loop[j], loop[(j + 1) % n]
     meet = np.cross(np.cross(a, b), np.cross(c, d))
     norm = float(np.linalg.norm(meet))
     if norm < 1e-300:
-        return None
+        return None  # the edges lie along one great circle: no single crossing point
     meet /= norm
     if float(meet @ (a + b + c + d)) < 0.:
         meet = -meet
-    # Two loops meet at the crossing: vertices i+1..j, and the rest round the start. A slit or fold
-    # encloses (almost) nothing, so keep the stretch that encloses more and cut the other.
     inner = np.vstack((meet[None], loop[i + 1:j + 1]))
     outer = np.vstack((loop[:i + 1], meet[None], loop[j + 1:]))
-    if abs(loop_area_km2(inner)) <= abs(loop_area_km2(outer)) and len(inner) < len(loop):
-        result = outer
-    else:
-        result = inner
-    return result if len(result) >= 3 else None
+    return [inner, outer]
 
 
 def part(rings, minimum_km2=1e-6, whole_km2=None):
@@ -404,7 +438,7 @@ def part(rings, minimum_km2=1e-6, whole_km2=None):
     if sum(abs(loop_area_km2(loop)) for loop in loops) < minimum_km2:
         return EMPTY, sum(abs(loop_area_km2(loop)) for loop in loops)
     try:
-        whole = polygon_robust(rings[0], [h for h in rings[1:] if simple_loops(h)])
+        whole = polygon_robust(rings[0], [h for h in rings[1:] if simple_loops(h)], minimum_km2=minimum_km2)
     except (ValueError, RuntimeError):
         whole = None
     if whole is not None and whole_km2 is not None and area_km2(whole) > .5 * SPHERE_KM2 > 1.5 * whole_km2:
@@ -412,6 +446,16 @@ def part(rings, minimum_km2=1e-6, whole_km2=None):
         # the right way out if that is what S2 had, else rebuild it loop by loop below.
         flipped = spherely.difference(_full(), whole)
         whole = flipped if area_km2(flipped) <= whole_km2 + allowed_change(whole_km2) else None
+    if whole is not None:
+        # Repairs (vertices dropped, crossings cut) must not change the area the loops enclose; a
+        # ring that touches itself can be repaired into something else, and is then built loop by
+        # loop instead. (Loop areas are reliable below half the sphere.)
+        shell = [loop_area_km2(loop) for loop in loops]
+        cut = [abs(loop_area_km2(loop)) for hole in rings[1:] for loop in simple_loops(hole)]
+        if all(abs(a) < .45 * SPHERE_KM2 for a in shell) and sum(shell) > 0.:
+            expected = sum(shell) - sum(cut)
+            if abs(area_km2(whole) - expected) > max(1., 1e-4 * expected):
+                whole = None
     if whole is not None:
         area = area_km2(whole)
         return (EMPTY, area + slits) if area < minimum_km2 else (whole, slits)
@@ -427,7 +471,7 @@ def part(rings, minimum_km2=1e-6, whole_km2=None):
                 dropped += abs(loop_area_km2(loop))
                 continue
             try:
-                piece = polygon_robust(loop)
+                piece = polygon_robust(loop, minimum_km2=minimum_km2)
             except (ValueError, RuntimeError):
                 # Real area that S2 will not take: give up on rebuilding rather than lose it.
                 raise ValueError('A loop of %.3g km2 cannot be rebuilt.' % abs(loop_area_km2(loop)))
@@ -447,6 +491,8 @@ def parts(geography, minimum_km2=1e-6):
     """The polygons of a geography as valid geographies, and the debris area dropped; checked against S2."""
     result, dropped = [], 0.
     whole = area_km2(geography)
+    if whole > SPHERE_KM2 - allowed_change(SPHERE_KM2):
+        return [_full()], 0.  # the whole sphere is one piece
     for rings in polygons(geography):
         piece, lost = part(rings, minimum_km2, whole)
         dropped += lost
@@ -462,16 +508,20 @@ def parts(geography, minimum_km2=1e-6):
 
 
 def clean(geography, minimum_km2=1e-6):
-    """The same region rebuilt from valid polygons only (no zero-width lines or debris).
+    """The same region rebuilt from valid polygons only: no zero-width lines, slit holes or debris.
 
-    Returns (shape, debris area dropped, whether it was rebuilt). If the rebuilt area differs from
-    S2's own area of the input, the input is returned unchanged, so cleaning can never lose crust.
+    Polygon parts smaller than `minimum_km2` are debris too: with the level of detail (DETAIL_KM2)
+    passed, the crumbs left along boundaries that would ride along, add vertices and block
+    simplification. Returns (shape, debris area dropped, whether it was rebuilt); the caller books
+    the area change.
     """
     if spherely.get_type_id(geography) != spherely.GeographyType.GEOMETRYCOLLECTION.value:
-        # Polygons only already; rebuild only if some hole is a slit (encloses nothing), which
-        # otherwise rides along and multiplies with every later operation.
-        slit = any(abs(loop_area_km2(hole)) < SLIT_KM2 for rings in polygons(geography) for hole in rings[1:])
-        if not slit:
+        # Polygons only already; rebuild only if some hole is a slit (encloses nothing) or some part
+        # is below the level of detail, either of which otherwise multiplies with every operation.
+        rings_of = polygons(geography)
+        slit = any(abs(loop_area_km2(hole)) < SLIT_KM2 for rings in rings_of for hole in rings[1:])
+        small = any(abs(loop_area_km2(rings[0])) < minimum_km2 for rings in rings_of)
+        if not slit and not small:
             return geography, 0., True
     try:
         pieces, dropped = parts(geography, minimum_km2)
@@ -484,6 +534,8 @@ def rotate_geography(geography, matrix, tolerance=None):
     """The same polygons rotated by `matrix` (rings keep their orientation)."""
     pieces, dropped = [], 0.
     whole = area_km2(geography)
+    if whole > SPHERE_KM2 - allowed_change(SPHERE_KM2, tolerance):
+        return _full()  # the whole sphere (a plate that is all there is), which S2 writes as one point
     for rings in polygons(geography):
         piece, lost = part([rotate(ring, matrix) for ring in rings], whole_km2=whole)
         dropped += lost
@@ -652,7 +704,7 @@ def node_shared(rings, node_km=NODE_KM, groups=None):
     return result
 
 
-def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=1e-3, rounds=8, groups=None):
+def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2, rounds=8, groups=None, stats=None):
     """Rings with small zig-zags and points on straight edges taken out, keeping shared edges shared.
 
     A vertex goes only if, in every ring that has it, it cuts off a triangle smaller than
@@ -698,6 +750,12 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=1e-3, roun
                          | (high == cluster) | (low != low[first][cluster]) | (high != high[first][cluster]))
         limit = np.where(occurrences > 1, area_km2, alone_km2)
         candidate = ~bad & (worst < limit) & (occurrences > 0)
+        if stats is not None:
+            stats.setdefault('rounds', []).append(dict(
+                clusters=int((occurrences > 0).sum()), shared=int((occurrences > 1).sum()),
+                long=int(np.logical_or.reduceat(long, np.r_[0]).sum()) if False else int(long.sum()),
+                bad=int((bad & (occurrences > 0)).sum()), small=int(((worst < limit) & (occurrences > 0)).sum()),
+                candidates=int(candidate.sum())))
         if not candidate.any():
             break
         # Only where the triangle a vertex cuts off is empty: no vertex of any ring inside it or
@@ -725,11 +783,15 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=1e-3, roun
             blocked = np.zeros(len(cand), bool)
             blocked[ks[inside]] = True
             candidate[cand[blocked]] = False
+            if stats is not None:
+                stats['rounds'][-1]['blocked_by_occupied_triangle'] = int(blocked.sum())
         # A vertex goes when its triangle is smaller than its neighbours' (ties by position), so no
         # two neighbours go in one round and the smallest triangles go first.
         key = worst + np.arange(clusters) * 1e-12
         lo, hi = low[first], high[first]
         go = candidate & ((key < key[lo]) | ~candidate[lo]) & ((key < key[hi]) | ~candidate[hi])
+        if stats is not None:
+            stats['rounds'][-1]['go'] = int(go.sum())
         if not go.any():
             break
         keep = ~go[cluster]
