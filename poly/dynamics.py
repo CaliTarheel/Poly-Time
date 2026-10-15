@@ -118,6 +118,142 @@ class Balance:
         return rotations
 
 
+@dataclass
+class Rifting:
+    """When a plate splits: where the pull across a straight cut beats the strength along it."""
+    # Strength of the lithosphere against being pulled apart, N per m of cut. Continental
+    # lithosphere is the weaker, so continents are where plates rift.
+    ocean_strength_n_per_m: float = 1.2e13
+    continent_strength_n_per_m: float = 3e12
+    minimum_plate_km2: float = 20e6   # only plates this large are tested
+    minimum_part_km2: float = 3e6     # and only cuts leaving both parts this large
+    azimuths: int = 12                # cut directions tried through each centre
+    spacing_km: float = 50.           # sampling along a cut
+
+
+@dataclass
+class Cut:
+    plate: int
+    centre: np.ndarray        # a point the cut passes through
+    pole: np.ndarray          # the cut is the great circle normal to this; the new plate is on its + side
+    length_km: float
+    tension_n_per_m: float    # mean pull across the cut (positive: being pulled apart)
+    strength_n_per_m: float   # mean strength along it
+    continent_fraction: float
+
+    @property
+    def ratio(self) -> float:
+        return self.tension_n_per_m / self.strength_n_per_m
+
+
+def plate_torques(balance, world, rotations, plate):
+    """The external torques (N m) on `plate`'s boundary segments under `rotations` (rad/Myr).
+
+    Returns (segment midpoints, torques): drivers (slab pull, ridge push) and the resistance of its
+    neighbours, as in `Balance.solve`, segment by segment.
+    """
+    p = balance.parameters
+    mids, torques = [], []
+    w = {k: np.asarray(v, float) / SECONDS_PER_MYR for k, v in rotations.items()}
+    for left, right, a, b, kind, overriding in _segments(world):
+        if plate not in (left, right):
+            continue
+        m = sphere.unit(a + b)
+        length_m = float(sphere.arc_km(a, b)) * 1e3
+        if length_m <= 0.:
+            continue
+        t_ = sphere.unit(b - a)
+        n = np.cross(t_, m)
+        normal_c, along_c = p.resistance[kind]
+        g = length_m * (normal_c * np.outer(n, n) + along_c * np.outer(t_, t_))
+        cross = np.array([[0., -m[2], m[1]], [m[2], 0., -m[0]], [-m[1], m[0], 0.]])
+        block = R_M ** 2 * cross @ g @ cross.T
+        relative = block @ (w[right] - w[left])
+        torque = -relative if plate == right else relative
+        if kind == 'trench':
+            down = right if overriding == left else left
+            if down == plate:
+                direction = -n if down == right else n
+                torque = torque + R_M * np.cross(m, p.slab_pull_n_per_m * length_m * direction)
+        elif kind == 'ridge':
+            direction = n if plate == right else -n
+            torque = torque + R_M * np.cross(m, p.ridge_push_n_per_m * length_m * direction)
+        mids.append(m)
+        torques.append(torque)
+    return np.array(mids).reshape(-1, 3), np.array(torques).reshape(-1, 3)
+
+
+def cuts(balance, world, rotations, plate, rifting=None):
+    """Straight cuts across `plate` through its centre and its continents, with the pull across each.
+
+    The plate moves rigidly, so each side of a cut needs the other to pull or push it along: the
+    external torque on one side (drivers, neighbours' resistance, basal drag) is what the cut must
+    carry. That torque, fitted as an even pull across the cut, is its tension.
+    """
+    rifting = rifting or Rifting()
+    p = balance.parameters
+    region = world.world_regions()[plate]
+    if sphere.area_km2(region) < rifting.minimum_plate_km2:
+        return []
+    spherely.prepare(region)
+    inside = np.asarray(spherely.contains(region, balance.geographies))
+    points = balance.points[inside]
+    omega = np.asarray(rotations[plate], float) / SECONDS_PER_MYR
+    mids, torques = plate_torques(balance, world, rotations, plate)
+    drag = p.basal_drag_pa_s_per_m * R_M ** 2 * balance.point_area_m2
+    frame = world.frame(plate)
+    continents = [c for c in world.crust if c.plate == plate and c.kind == 'continent']
+    centres = [_centre(region)] + [sphere.rotate(_centre(c.shape), frame) for c in continents]
+    step = rifting.spacing_km / sphere.RADIUS_KM
+    point_km2 = sphere.SPHERE_KM2 / len(balance.points)
+    result = []
+    for centre in centres:
+        e1 = sphere.unit(np.cross(centre, [0., 0., 1.]) if abs(centre[2]) < .9 else np.cross(centre, [1., 0., 0.]))
+        e2 = np.cross(centre, e1)
+        for k in range(rifting.azimuths):
+            angle = math.pi * k / rifting.azimuths
+            pole = math.cos(angle) * e1 + math.sin(angle) * e2
+            side = points @ pole > 0.
+            if min(side.sum(), (~side).sum()) * point_km2 < rifting.minimum_part_km2:
+                continue
+            # The cut: the great circle through the centre normal to the pole, where it is inside the plate.
+            u = np.cross(pole, centre)
+            t = np.arange(0., 2. * math.pi, step)
+            line = np.outer(np.cos(t), centre) + np.outer(np.sin(t), u)
+            lon, lat = sphere.to_lonlat(line)
+            on = np.asarray(spherely.contains(region, spherely.points(lon, lat)))
+            if on.sum() < 2:
+                continue
+            line = line[on]
+            length_m = len(line) * rifting.spacing_km * 1e3
+            # External torque on the minus side (the side that stays the old plate).
+            a = points[~side]
+            block = drag * (np.eye(3) * len(a) - a.T @ a)
+            torque = torques[mids @ pole < 0.].sum(axis=0) - block @ omega
+            arm = np.cross(line.sum(axis=0) * rifting.spacing_km * 1e3, pole)
+            # The plus side holds the minus side with an even pull f along +pole: R f (S x pole) = -torque.
+            tension = float(-torque @ arm / (R_M * (arm @ arm))) if arm @ arm > 0. else 0.
+            continental = _in_any(line, [sphere.rotate_geography(c.shape, frame) for c in continents])
+            fraction = float(continental.mean())
+            strength = fraction * rifting.continent_strength_n_per_m + (1. - fraction) * rifting.ocean_strength_n_per_m
+            result.append(Cut(plate, centre, pole, length_m / 1e3, tension, strength, fraction))
+    return result
+
+
+def _centre(geography):
+    c = spherely.centroid(geography)
+    return sphere.from_lonlat(spherely.get_x(c), spherely.get_y(c))
+
+
+def _in_any(points, geographies):
+    lon, lat = sphere.to_lonlat(points)
+    where = spherely.points(lon, lat)
+    hit = np.zeros(len(points), bool)
+    for g in geographies:
+        hit |= np.asarray(spherely.contains(g, where))
+    return hit
+
+
 def _segments(world):
     """(left, right, a, b, kind, overriding) for every boundary segment of either kind of world."""
     if hasattr(world, 'segments'):
@@ -129,20 +265,33 @@ def _segments(world):
             yield s.left, s.right, a, b, s.kind, s.overriding
 
 
-def run(world, steps, parameters=None, dt=1., report=None):
+def run(world, steps, parameters=None, dt=1., report=None, rifting=None):
     """Step `world` `steps` times with motions from the force balance; returns the balance.
 
     Each step is split into sub-steps short enough that no plate moves further than
-    `step_limit_km`, and the forces are solved again before each.
+    `step_limit_km`, and the forces are solved again before each. At the start of each step a world
+    that can rift (`world.rift`) splits the plate whose best cut is pulled hardest beyond its
+    strength (`rifting`, default `Rifting()`).
     """
     balance = Balance(parameters)
+    if rifting is None and hasattr(world, 'rift'):
+        rifting = Rifting()
     for _ in range(steps):
         remaining = dt
+        rifted = []
+        if rifting is not None:
+            rotations = balance.solve(world)
+            found = [c for plate in world.plates() for c in cuts(balance, world, rotations, plate, rifting)]
+            best = max(found, key=lambda c: c.ratio, default=None)
+            if best is not None and best.ratio > 1.:
+                rifted.append(world.rift(best))
         while remaining > 1e-9:
             rotations = balance.solve(world)
             fastest = max(balance.last['speed_km_myr'].values())
             sub = min(remaining, balance.parameters.step_limit_km / max(fastest, 1e-9))
             entry = world.step(rotations, sub)
+            entry['events'] = rifted + entry['events']
+            rifted = []
             entry['speed_km_myr'] = balance.last['speed_km_myr']
             entry['substep_myr'] = sub
             remaining -= sub

@@ -43,15 +43,24 @@ MINIMUM_PLATE_KM2 = 1e6
 NECK_KM = 150.
 
 
+CONTINENT_KM = 35.  # thickness of continental crust that has not been shortened
+
+
 @dataclass
 class Crust:
     plate: int
     kind: str      # 'ocean' or 'continent'
     shape: object  # in the plate's own frame
     born_myr: float | None = None
+    # Mean thickness. Continental crust that shortens (collision, compression) keeps its volume
+    # and thickens; ocean pieces carry the default, unused.
+    thickness_km: float = CONTINENT_KM
 
     def area_km2(self) -> float:
         return sphere.area_km2(self.shape)
+
+    def volume_km3(self) -> float:
+        return self.area_km2() * self.thickness_km
 
 
 @dataclass

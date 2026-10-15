@@ -42,6 +42,7 @@ MARGIN = .2         # hysteresis around the transform threshold when re-typing
 TINY_KM2 = 1e-6     # areas below this are numerical
 CHECK_TOLERANCE = 1e-4  # of the sphere's area, per step (0.01%)
 CRUMB_KM2 = 100.        # detached bits of a plate smaller than this are left with it
+SUTURE_KM = 100.        # a collision that has closed this far welds its two plates into one
 SIMPLIFY_KM2 = 100.     # a boundary vertex cutting off less than this with its neighbours is dropped
 
 
@@ -125,7 +126,7 @@ class RegionWorld:
         # so carrying the region is carrying the crust, and the rebuild below keeps them together.
         moved = {p: sphere.rotate_geography(r, motion[p]) for p, r in self.regions.items()}
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
-                     events=[], continent_arrived=[])
+                     events=[], continent_arrived=[], thickened_km3=0.)
         lost = {p: [] for p in moved}      # (world geography, boundary kind)
         gained = {p: [] for p in moved}    # (world geography, gain category)
         stage_cache = {}
@@ -287,6 +288,9 @@ class RegionWorld:
                 piece.shape = sphere.difference(piece.shape, local)
                 category = _loss_category(kind, piece.kind)
                 entry['lost'][category] += area
+                if piece.kind == 'continent':
+                    # Continent is too light to go away: it shortens and thickens, keeping its volume.
+                    entry['thickened_km3'] += self._thicken(piece, area, mine)
                 if category == 'continent_at_trench':
                     # Where the continent went down, not the middle of the whole strip along the trench.
                     entry['continent_arrived'].append((sphere.rotate(_point_in(taken), self.frame(plate)), area, plate))
@@ -297,6 +301,26 @@ class RegionWorld:
             entry['gained'][category] += area
             mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back), self.time_myr + .5 * dt))
         self.crust = others + [c for c in mine if sphere.area_km2(c.shape) >= TINY_KM2]
+
+    def _thicken(self, piece, area, mine):
+        """Keep the volume of `area` km2 of continent just taken from `piece`; returns that volume.
+
+        The piece keeps it, thicker; one taken away whole hands it to its plate's largest other
+        continental piece. (Thickness is one number per piece until continents carry a mesh.)
+        """
+        volume = area * piece.thickness_km
+        left = piece.area_km2()
+        if left >= TINY_KM2:
+            piece.thickness_km += volume / left
+            return volume
+        others = [c for c in mine if c is not piece and c.kind == 'continent' and c.area_km2() >= TINY_KM2]
+        if others:
+            heir = max(others, key=lambda c: c.area_km2())
+            heir.thickness_km += volume / heir.area_km2()
+        return volume
+
+    def _continent_km3(self) -> float:
+        return sum(c.volume_km3() for c in self.crust if c.kind == 'continent')
 
     def _regroup(self, entry=None) -> list:
         """Plates that came apart become separate plates; slivers and vanished plates go to neighbours."""
@@ -376,7 +400,7 @@ class RegionWorld:
                 continue
             c.shape = sphere.difference(c.shape, local)
             shape = part if np.allclose(carry, np.eye(3)) else sphere.rotate_geography(part, carry)
-            moved.append(Crust(to, c.kind, shape, c.born_myr))
+            moved.append(Crust(to, c.kind, shape, c.born_myr, c.thickness_km))
         self.crust = [c for c in self.crust if sphere.area_km2(c.shape) >= TINY_KM2] + moved
         self.regions[plate] = sphere.difference(self.regions[plate], piece)
         self.regions[to] = sphere.union(self.regions.get(to, sphere.EMPTY), piece)
@@ -406,9 +430,9 @@ class RegionWorld:
         return best
 
     # ---------------------------------------------------------- boundaries
-    def _index(self) -> dict:
+    def _index(self, boundaries=None) -> dict:
         index = {}
-        for b in self.boundaries:
+        for b in self.boundaries if boundaries is None else boundaries:
             entry = index.setdefault((b.left, b.right), [[], [], [], []])
             entry[0].append(b.mids())
             entry[1] += list(b.kinds)
@@ -546,7 +570,7 @@ class RegionWorld:
             b.kinds = [str(k) for k in _smooth(b.kinds)]
             _fill_overriding(b)
             for k in range(len(b.kinds)):
-                if b.kinds[k] == 'converging':
+                if b.kinds[k] in ('converging', 'collision'):
                     b.closed_km[k] += max(-opening[k], 0.) * dt
                 elif b.kinds[k] != 'trench':
                     b.closed_km[k] = 0.
@@ -554,6 +578,60 @@ class RegionWorld:
             events += self._initiate(b)
         for point, area, plate in entry['continent_arrived']:
             events += self._collide(point, area, plate)
+        events += self._sutures(rotations_per_myr)
+        return events
+
+    def rift(self, cut) -> dict:
+        """Split `cut.plate` along the great circle normal to `cut.pole`; the + side becomes a new plate.
+
+        The new plate starts in its parent's frame (so it moves with it until told otherwise) and takes
+        the crust on its side; boundaries keep their state, renamed by side. The cut itself is a new
+        boundary, typed from the motion at the next step.
+        """
+        plate = cut.plate
+        centre, pole = sphere.unit(cut.centre), sphere.unit(cut.pole)
+        u = np.cross(pole, centre)
+        t = np.linspace(0., 2. * np.pi, 72, endpoint=False)
+        half = sphere.polygon(np.outer(np.cos(t), centre) + np.outer(np.sin(t), u))  # the + side
+        piece = sphere.intersection(self.regions[plate], half)
+        new = max(list(self.regions) + list(self.frames) + list(self.parents)) + 1
+        self.frames[new] = self.frame(plate).copy()
+        self.parents[new] = plate
+        self.names[new] = '%s (rift)' % self.names.get(plate, 'Plate %d' % plate)
+        area = sphere.area_km2(piece)
+        self._give(plate, piece, new)
+        self.boundaries = self._derive(self._index(_split_by_side(self.boundaries, plate, new, pole)), {})
+        return dict(kind='rift', plate=plate, new=new, area_km2=area, length_km=cut.length_km,
+                    tension_n_per_m=cut.tension_n_per_m, strength_n_per_m=cut.strength_n_per_m,
+                    continent_fraction=cut.continent_fraction)
+
+    def _sutures(self, rotations_per_myr) -> list:
+        """Weld the plates on either side of every collision that has closed SUTURE_KM.
+
+        The smaller plate's crust passes into the larger's frame unchanged and the boundaries between
+        them go; its other boundaries become the larger plate's, keeping their state.
+        """
+        events, into = [], {}
+        for b in self.boundaries:
+            for lo, hi in _runs_of(b.kinds, 'collision'):
+                closed = float(np.mean(b.closed_km[lo:hi]))
+                if closed < SUTURE_KM:
+                    continue
+                left, right = into.get(b.left, b.left), into.get(b.right, b.right)
+                if left == right or left not in self.regions or right not in self.regions:
+                    continue
+                keep, gone = sorted((left, right), key=lambda p: -sphere.area_km2(self.regions[p]))
+                area = sphere.area_km2(self.regions[gone])
+                self._give(gone, self.regions[gone], keep)
+                self.regions.pop(gone, None)
+                self.crust = [c for c in self.crust if c.plate != gone]
+                self.parents[gone] = keep
+                into = {p: (keep if q == gone else q) for p, q in into.items()}
+                into[gone] = keep
+                events.append(dict(kind='suture', plates=(b.left, b.right), into=keep, gone=gone,
+                                   area_km2=area, closed_km=closed))
+        if into:
+            self.boundaries = self._derive(self._index(_relabel(self.boundaries, into)), rotations_per_myr)
         return events
 
     def _initiate(self, b) -> list:
@@ -596,6 +674,7 @@ class RegionWorld:
             if near.any():
                 for k in np.flatnonzero(near):
                     b.kinds[k], b.overriding[k] = 'collision', None
+                    b.closed_km[k] = 0.  # closing across the collision counts from here
                 return [dict(kind='collision', plates=(b.left, b.right), arrived_km2=area)]
         return []
 
@@ -639,6 +718,7 @@ class RegionWorld:
             crust[piece.plate] = crust.get(piece.plate, 0.) + piece.area_km2()
         entry['crust_vs_plate_error_km2'] = max((abs(crust.get(p, 0.) - a) for p, a in entry['plates_km2'].items()), default=0.)
         entry['balance_error_km2'] = sum(entry['gained'].values()) - sum(entry['lost'].values())
+        entry['continent_km3'] = self._continent_km3()
         # Regions are rebuilt from the crust every step, so rebuilding error cannot accumulate; a step
         # is refused beyond 1e-4 of the sphere (0.01%, ~51,000 km2), ten times inside the 0.1% standard.
         scale = CHECK_TOLERANCE * sphere.SPHERE_KM2
@@ -655,6 +735,54 @@ def _loss_category(boundary_kind, crust_kind):
     if boundary_kind in ('converging', 'collision'):
         return 'collision' if crust_kind == 'continent' else 'compression'
     return 'sliver'
+
+
+def _runs_of(kinds, kind):
+    """(start, end) of every run of `kind` in a list of segment kinds."""
+    runs, start = [], None
+    for k, here in enumerate(list(kinds) + [None]):
+        if here == kind and start is None:
+            start = k
+        elif here != kind and start is not None:
+            runs.append((start, k))
+            start = None
+    return runs
+
+
+def _relabel(boundaries, into):
+    """The boundaries with plates renamed by `into` (gone -> kept); those now inside one plate dropped."""
+    result = []
+    for b in boundaries:
+        left, right = into.get(b.left, b.left), into.get(b.right, b.right)
+        if left == right:
+            continue
+        over = [into.get(o, o) for o in b.overriding]
+        if left < right:
+            result.append(Boundary(left, right, b.points, list(b.kinds), over, b.closed_km.copy()))
+        else:
+            result.append(Boundary(right, left, b.points[::-1], list(b.kinds)[::-1], over[::-1],
+                                   b.closed_km[::-1].copy()))
+    return result
+
+
+def _split_by_side(boundaries, plate, new, pole):
+    """The boundaries with `plate`'s segments on the + side of `pole` given to `new`."""
+    result = []
+    for b in boundaries:
+        if plate not in (b.left, b.right):
+            result.append(b)
+            continue
+        side = b.mids() @ pole > 0.
+        start = 0
+        for k in range(1, len(side) + 1):
+            if k < len(side) and side[k] == side[start]:
+                continue
+            into = {plate: new} if side[start] else {}
+            part = Boundary(b.left, b.right, b.points[start:k + 1], b.kinds[start:k], b.overriding[start:k],
+                            b.closed_km[start:k].copy())
+            result += _relabel([part], into)
+            start = k
+    return result
 
 
 def _fill_overriding(b):
@@ -692,5 +820,5 @@ def from_network(world) -> RegionWorld:
             points, left, right = points[::-1], right, left
         count = len(points) - 1
         boundaries.append(Boundary(left, right, points, [s.kind] * count, [s.overriding] * count, np.zeros(count)))
-    return RegionWorld([Crust(c.plate, c.kind, c.shape, c.born_myr) for c in world.crust],
+    return RegionWorld([Crust(c.plate, c.kind, c.shape, c.born_myr, c.thickness_km) for c in world.crust],
                        {p: world.frame(p).copy() for p in regions}, regions, boundaries, dict(world.names))

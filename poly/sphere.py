@@ -447,6 +447,8 @@ def parts(geography, minimum_km2=1e-6):
     """The polygons of a geography as valid geographies, and the debris area dropped; checked against S2."""
     result, dropped = [], 0.
     whole = area_km2(geography)
+    if whole > SPHERE_KM2 - allowed_change(SPHERE_KM2):
+        return [_full()], 0.  # the whole sphere is one piece
     for rings in polygons(geography):
         piece, lost = part(rings, minimum_km2, whole)
         dropped += lost
@@ -484,6 +486,8 @@ def rotate_geography(geography, matrix, tolerance=None):
     """The same polygons rotated by `matrix` (rings keep their orientation)."""
     pieces, dropped = [], 0.
     whole = area_km2(geography)
+    if whole > SPHERE_KM2 - allowed_change(SPHERE_KM2, tolerance):
+        return _full()  # the whole sphere (a plate that is all there is), which S2 writes as one point
     for rings in polygons(geography):
         piece, lost = part([rotate(ring, matrix) for ring in rings], whole_km2=whole)
         dropped += lost
