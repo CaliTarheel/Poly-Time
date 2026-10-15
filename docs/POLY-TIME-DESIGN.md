@@ -96,6 +96,29 @@ features, and its region is where that crust is. Every step:
 The checks are the same: the plates tile the sphere, each plate's crust tiles it, and the area created
 equals the area destroyed, term by term.
 
+## Collisions, sutures and rifts (phase 2, continued)
+
+- **Continent keeps its volume.** Continental crust that loses area anywhere but down a trench
+  (collision, compression, slivers) thickens instead: each piece carries a mean thickness (35 km to
+  start), and the volume taken is added back to the piece, or to its plate's largest other continental
+  piece if it was taken whole. The ledger records the volume thickened and the total continental volume
+  every step. (One thickness per piece until continents carry a mesh.)
+- **Suture.** A collision records how far it has closed; at 100 km the two plates weld. The smaller
+  plate's crust passes into the larger's frame unchanged, the boundaries between them go, and its other
+  boundaries become the larger plate's with their state.
+- **Rifting by tension.** At the start of each step of a force-driven run, straight cuts (great circles)
+  through each large plate's centre and through each of its continents are tested, twelve directions
+  each. The plate moves rigidly, so each side of a cut needs the other to carry it: the external torque
+  on one side (drivers, neighbours' resistance, basal drag) fitted as an even pull across the cut is the
+  cut's tension. The strength along the cut is the mean of ocean (1.6e13 N/m) and continent (1e12 N/m)
+  by length, so continents are where plates break. The cut whose tension most exceeds its strength
+  splits the plate, at most one a step; the new plate starts in its parent's frame, takes the crust and
+  boundary state on its side, and the cut is typed from the motion at the next step. Both parts must
+  be at least 3 Mkm2.
+- The three-continent test world is continent-poor (9.4 Mkm2, under 2% of the sphere, against about
+  30% on Earth), so most of its cuts are nearly all ocean and most of its rifts are oceanic; on an
+  Earth-like world the continental weakness dominates.
+
 ## What carries over from Super-Light-Time
 
 - The force balance physics (slab pull, basal drag, ridge push, resistances), with inputs taken from
