@@ -82,35 +82,21 @@ class Balance:
             k = 3 * slot[plate]
             matrix[k:k + 3, k:k + 3] += block
             drag[plate] = block
-        # Boundaries, segment by segment.
-        pulled = {}
-        for left_plate, right_plate, a, b, kind, overriding in _segments(world):
-            mid = sphere.unit(a + b)
-            length_m = float(sphere.arc_km(a, b)) * 1e3
-            if length_m <= 0.:
-                continue
-            t_ = sphere.unit(b - a)
-            n = np.cross(t_, mid)
-            normal_c, along_c = p.resistance[kind]
-            left, right = 3 * slot[left_plate], 3 * slot[right_plate]
-            # Relative velocity of right over left at m: (w_R - w_L) x m R. Resistance on the right
-            # plate F = -L (c_n n n^T + c_t t t^T) v, equal and opposite on the left.
-            g = length_m * (normal_c * np.outer(n, n) + along_c * np.outer(t_, t_))
-            m = mid
-            cross = np.array([[0., -m[2], m[1]], [m[2], 0., -m[0]], [-m[1], m[0], 0.]])
-            block = R_M ** 2 * cross @ g @ cross.T
-            for i, j, sign in ((right, right, 1.), (left, left, 1.), (right, left, -1.), (left, right, -1.)):
-                matrix[i:i + 3, j:j + 3] += sign * block
-            if kind == 'trench':
-                down = right_plate if overriding == left_plate else left_plate
-                direction = -n if down == right_plate else n  # towards the overriding plate
-                k = 3 * slot[down]
-                torque[k:k + 3] += R_M * np.cross(m, p.slab_pull_n_per_m * length_m * direction)
-                pulled[down] = pulled.get(down, 0.) + length_m / 1e3
-            elif kind == 'ridge':
-                for plate, direction in ((right_plate, n), (left_plate, -n)):
-                    k = 3 * slot[plate]
-                    torque[k:k + 3] += R_M * np.cross(m, p.ridge_push_n_per_m * length_m * direction)
+        # Boundaries: every segment at once.
+        seg = _segment_arrays(world, slot, p)
+        count = len(plates)
+        big = np.zeros((count, count, 3, 3))
+        for i, j, sign in ((seg.right, seg.right, 1.), (seg.left, seg.left, 1.),
+                           (seg.right, seg.left, -1.), (seg.left, seg.right, -1.)):
+            np.add.at(big, (i, j), sign * seg.block)
+        matrix += big.transpose(0, 2, 1, 3).reshape(size, size)
+        pull = np.zeros((count, 3))
+        np.add.at(pull, seg.down[seg.trench], seg.slab_pull[seg.trench])
+        np.add.at(pull, seg.right[seg.ridge], seg.ridge_push[seg.ridge])
+        np.add.at(pull, seg.left[seg.ridge], -seg.ridge_push[seg.ridge])
+        torque += pull.ravel()
+        pulled_km = np.bincount(seg.down[seg.trench], seg.length_m[seg.trench] / 1e3, minlength=count)
+        pulled = {plate: float(pulled_km[k]) for plate, k in slot.items() if pulled_km[k] > 0.}
         omega = np.linalg.solve(matrix, torque)  # rad/s
         rotations = {plate: omega[3 * slot[plate]:3 * slot[plate] + 3] * SECONDS_PER_MYR for plate in plates}
         self.last = dict(pulled_km=pulled, speed_km_myr={
@@ -146,41 +132,83 @@ class Cut:
         return self.tension_n_per_m / self.strength_n_per_m
 
 
+@dataclass
+class Segments:
+    """Every boundary segment of a world as arrays, with the resistance block and drivers of each."""
+    left: np.ndarray        # plate slots
+    right: np.ndarray
+    mid: np.ndarray         # (N, 3) unit midpoints
+    normal: np.ndarray      # (N, 3) towards the right plate
+    length_m: np.ndarray
+    block: np.ndarray       # (N, 3, 3): torque on the right plate per unit relative rotation
+    trench: np.ndarray      # bool
+    ridge: np.ndarray       # bool
+    down: np.ndarray        # the downgoing plate's slot (trench segments; others arbitrary)
+    slab_pull: np.ndarray   # (N, 3) torque from slab pull on the downgoing plate (trench segments)
+    ridge_push: np.ndarray  # (N, 3) torque from ridge push on the right plate (ridge segments)
+
+
+def _segment_arrays(world, slot, p) -> Segments:
+    rows = [r for r in _segments(world)]
+    if not rows:
+        empty = np.zeros((0, 3))
+        return Segments(np.zeros(0, int), np.zeros(0, int), empty, empty, np.zeros(0), np.zeros((0, 3, 3)),
+                        np.zeros(0, bool), np.zeros(0, bool), np.zeros(0, int), empty, empty)
+    left = np.array([slot[r[0]] for r in rows])
+    right = np.array([slot[r[1]] for r in rows])
+    a = np.array([r[2] for r in rows], float)
+    b = np.array([r[3] for r in rows], float)
+    kind = np.array([r[4] for r in rows])
+    over = [r[5] for r in rows]
+    length_m = sphere.arc_km(a, b) * 1e3
+    keep = length_m > 0.
+    left, right, a, b, kind, length_m = left[keep], right[keep], a[keep], b[keep], kind[keep], length_m[keep]
+    over = [o for o, k in zip(over, keep) if k]
+    m = sphere.unit(a + b)
+    t_ = sphere.unit(b - a)
+    n = np.cross(t_, m)
+    normal_c = np.array([p.resistance[k][0] for k in kind])
+    along_c = np.array([p.resistance[k][1] for k in kind])
+    # Relative velocity of right over left at m: (w_R - w_L) x m R. Resistance on the right plate
+    # F = -L (c_n n n^T + c_t t t^T) v, equal and opposite on the left; torque R m x F.
+    g = length_m[:, None, None] * (normal_c[:, None, None] * n[:, :, None] * n[:, None, :]
+                                   + along_c[:, None, None] * t_[:, :, None] * t_[:, None, :])
+    cross = np.zeros((len(m), 3, 3))
+    cross[:, 0, 1], cross[:, 0, 2] = -m[:, 2], m[:, 1]
+    cross[:, 1, 0], cross[:, 1, 2] = m[:, 2], -m[:, 0]
+    cross[:, 2, 0], cross[:, 2, 1] = -m[:, 1], m[:, 0]
+    block = R_M ** 2 * cross @ g @ cross.transpose(0, 2, 1)
+    trench = kind == 'trench'
+    ridge = kind == 'ridge'
+    # The overriding plate is named by id; the downgoing one is the other.
+    over_is_left = np.array([o is not None and slot.get(o) == l for o, l in zip(over, left)])
+    down = np.where(over_is_left, right, left)
+    towards_overriding = np.where((down == right)[:, None], -n, n)
+    slab_pull = R_M * np.cross(m, p.slab_pull_n_per_m * length_m[:, None] * towards_overriding)
+    ridge_push = R_M * np.cross(m, p.ridge_push_n_per_m * length_m[:, None] * n)
+    return Segments(left, right, m, n, length_m, block, trench, ridge, down, slab_pull, ridge_push)
+
+
 def plate_torques(balance, world, rotations, plate):
     """The external torques (N m) on `plate`'s boundary segments under `rotations` (rad/Myr).
 
     Returns (segment midpoints, torques): drivers (slab pull, ridge push) and the resistance of its
     neighbours, as in `Balance.solve`, segment by segment.
     """
-    p = balance.parameters
-    mids, torques = [], []
-    w = {k: np.asarray(v, float) / SECONDS_PER_MYR for k, v in rotations.items()}
-    for left, right, a, b, kind, overriding in _segments(world):
-        if plate not in (left, right):
-            continue
-        m = sphere.unit(a + b)
-        length_m = float(sphere.arc_km(a, b)) * 1e3
-        if length_m <= 0.:
-            continue
-        t_ = sphere.unit(b - a)
-        n = np.cross(t_, m)
-        normal_c, along_c = p.resistance[kind]
-        g = length_m * (normal_c * np.outer(n, n) + along_c * np.outer(t_, t_))
-        cross = np.array([[0., -m[2], m[1]], [m[2], 0., -m[0]], [-m[1], m[0], 0.]])
-        block = R_M ** 2 * cross @ g @ cross.T
-        relative = block @ (w[right] - w[left])
-        torque = -relative if plate == right else relative
-        if kind == 'trench':
-            down = right if overriding == left else left
-            if down == plate:
-                direction = -n if down == right else n
-                torque = torque + R_M * np.cross(m, p.slab_pull_n_per_m * length_m * direction)
-        elif kind == 'ridge':
-            direction = n if plate == right else -n
-            torque = torque + R_M * np.cross(m, p.ridge_push_n_per_m * length_m * direction)
-        mids.append(m)
-        torques.append(torque)
-    return np.array(mids).reshape(-1, 3), np.array(torques).reshape(-1, 3)
+    plates = world.plates()
+    slot = {q: k for k, q in enumerate(plates)}
+    seg = _segment_arrays(world, slot, balance.parameters)
+    w = np.array([np.asarray(rotations[q], float) / SECONDS_PER_MYR for q in plates])
+    me = slot[plate]
+    mine = (seg.left == me) | (seg.right == me)
+    relative = np.einsum('nij,nj->ni', seg.block[mine], w[seg.right[mine]] - w[seg.left[mine]])
+    torque = np.where((seg.right[mine] == me)[:, None], -relative, relative)
+    pulled = mine & seg.trench & (seg.down == me)
+    torque[pulled[mine]] += seg.slab_pull[pulled]
+    pushed = mine & seg.ridge
+    sign = np.where(seg.right[pushed] == me, 1., -1.)
+    torque[pushed[mine]] += sign[:, None] * seg.ridge_push[pushed]
+    return seg.mid[mine], torque
 
 
 def cuts(balance, world, rotations, plate, rifting=None):
