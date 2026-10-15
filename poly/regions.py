@@ -30,6 +30,7 @@ import spherely
 
 from poly import sphere
 from poly.build import TRANSFORM_RATIO, _smooth
+from poly.mesh import ContinentMesh
 from poly.sphere import DETAIL_KM2
 from poly.topology import segment_motion
 from poly.world import (AGE_BAND_MYR, COLLISION_KM2, INITIATION_KM, MINIMUM_PLATE_KM2, SAMPLE_KM, TOLERANCE,
@@ -172,6 +173,7 @@ class RegionWorld:
     # ------------------------------------------------------------------- step
     def step(self, rotations_per_myr: dict, dt: float = 1.) -> dict:
         rotations_per_myr = self._complete(rotations_per_myr)
+        self._mesh_continents()
         crust_before = sum(c.area_km2() for c in self.crust)
         old_regions = dict(self.regions)
         old_index = self._index(rotations_per_myr=rotations_per_myr, dt=dt)
@@ -409,19 +411,31 @@ class RegionWorld:
     def _thicken(self, piece, area, mine):
         """Keep the volume of `area` km2 of continent just taken from `piece`; returns that volume.
 
-        The piece keeps it, thicker; one taken away whole hands it to its plate's largest other
-        continental piece. (Thickness is one number per piece until continents carry a mesh.)
+        The piece keeps it, thicker: on its mesh, near the ground that was lost; with one
+        thickness, everywhere. One taken away whole hands it to its plate's largest other
+        continental piece.
         """
         volume = area * piece.thickness_km
         left = piece.area_km2()
         if left >= TINY_KM2:
-            piece.thickness_km += volume / left
+            total = volume + left * piece.thickness_km
+            if piece.mesh is not None:
+                piece.mesh = piece.mesh.recut(piece.shape, left, total)
+            piece.thickness_km = total / left
             return volume
         others = [c for c in mine if c is not piece and c.kind == 'continent' and c.area_km2() >= TINY_KM2]
         if others:
             heir = max(others, key=lambda c: c.area_km2())
+            if heir.mesh is not None:
+                heir.mesh.add_volume(volume, heir.area_km2(), near=None if piece.mesh is None else piece.mesh.nodes)
             heir.thickness_km += volume / heir.area_km2()
         return volume
+
+    def _mesh_continents(self):
+        """Give every continental piece without a mesh one (a world built or loaded without them)."""
+        for c in self.crust:
+            if c.kind == 'continent' and getattr(c, 'mesh', None) is None:
+                c.mesh = ContinentMesh.build(c.shape, c.thickness_km)
 
     def _continent_km3(self) -> float:
         return sum(c.volume_km3() for c in self.crust if c.kind == 'continent')
@@ -500,11 +514,24 @@ class RegionWorld:
         moved = []
         for c in [c for c in self.crust if c.plate == plate]:
             part = sphere.intersection(c.shape, local)
-            if sphere.area_km2(part) < TINY_KM2:
+            part_km2 = sphere.area_km2(part)
+            if part_km2 < TINY_KM2:
                 continue
+            whole_km3 = c.volume_km3()
             c.shape = sphere.difference(c.shape, local)
             shape = part if np.allclose(carry, np.eye(3)) else sphere.rotate_geography(part, carry)
-            moved.append(Crust(to, c.kind, shape, c.born_myr, c.thickness_km))
+            given = Crust(to, c.kind, shape, c.born_myr, c.thickness_km)
+            if c.kind == 'continent' and getattr(c, 'mesh', None) is not None:
+                # The part takes the field as it is there; the rest keeps the remainder exactly.
+                taken = ContinentMesh.build(part, c.thickness_km, field=c.mesh.sample)
+                part_km3 = taken.volume_km3(part_km2) if taken is not None else part_km2 * c.thickness_km
+                given.thickness_km = part_km3 / part_km2
+                given.mesh = None if taken is None else taken.rotated(carry)
+                left_km2 = c.area_km2()
+                if left_km2 >= TINY_KM2:
+                    c.mesh = c.mesh.recut(c.shape, left_km2, whole_km3 - part_km3)
+                    c.thickness_km = (whole_km3 - part_km3) / left_km2
+            moved.append(given)
         self.crust = [c for c in self.crust if sphere.area_km2(c.shape) >= TINY_KM2] + moved
         self.regions[plate] = sphere.difference(self.regions[plate], piece)
         self.regions[to] = sphere.union(self.regions.get(to, sphere.EMPTY), piece)

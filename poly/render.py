@@ -42,8 +42,10 @@ def draw(world, path, width=720, boundaries=True):
             if not hit.any():
                 continue
             if piece.kind == 'continent':
-                f = min(max(getattr(piece, 'thickness_km', CONTINENT_KM) / CONTINENT_KM - 1., 0.), 1.)
-                colour[hit] = np.round(np.array(CONTINENT) * (1 - f) + THICKENED * f).astype(np.uint8)
+                mesh = getattr(piece, 'mesh', None)
+                thick = mesh.sample(local[hit]) if mesh is not None else getattr(piece, 'thickness_km', CONTINENT_KM)
+                f = np.clip(np.asarray(thick, float) / CONTINENT_KM - 1., 0., 1.)
+                colour[hit] = np.round(np.array(CONTINENT)[None] * (1 - f)[:, None] + THICKENED[None] * f[:, None]).astype(np.uint8)
             else:
                 age = 0. if piece.born_myr is None else max(world.time_myr - piece.born_myr, 0.)
                 f = min(age / OCEAN_SPAN_MYR, 1.)
