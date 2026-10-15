@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 from poly import sphere
 
 COLOURS = dict(ridge=(220, 40, 40), trench=(120, 40, 160), transform=(30, 150, 60),
-               converging=(240, 140, 20), collision=(120, 70, 30))
+               converging=(240, 140, 20), collision=(120, 70, 30), suture=(60, 30, 10))
 CONTINENT = (196, 170, 120)
 THICKENED = np.array([120, 85, 55])  # continent at twice its usual thickness or more
 CONTINENT_KM = 35.
@@ -56,6 +56,8 @@ def draw(world, path, width=720, boundaries=True):
             lines = list(world.boundary_lines())
         else:
             lines = [(world.network.points(i), s.kind) for i, s in world.network.sections.items()]
+        if hasattr(world, 'suture_lines'):
+            lines += [(points, 'suture') for points, _ in world.suture_lines()]
         for points, kind in lines:
             plon, plat = sphere.to_lonlat(points)
             x = (plon + 180.) / 360. * width
@@ -63,6 +65,6 @@ def draw(world, path, width=720, boundaries=True):
             for k in range(len(x) - 1):
                 if abs(x[k + 1] - x[k]) > width / 2:
                     continue  # crosses the map edge
-                pen.line([(x[k], y[k]), (x[k + 1], y[k + 1])], fill=COLOURS[kind], width=2)
+                pen.line([(x[k], y[k]), (x[k + 1], y[k + 1])], fill=COLOURS[kind], width=2 if kind != 'suture' else 1)
     picture.save(path)
     return plate_of.reshape(height, width)

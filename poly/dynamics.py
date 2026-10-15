@@ -116,6 +116,8 @@ class Rifting:
     # lithosphere is the weaker, so continents are where plates rift.
     ocean_strength_n_per_m: float = 1.6e13
     continent_strength_n_per_m: float = 1e12
+    suture_strength_n_per_m: float = 3e11   # an old suture is the weakest lithosphere there is
+    suture_reach_km: float = 150.           # a cut this close to a suture line follows it
     minimum_plate_km2: float = 20e6   # only plates this large are tested
     minimum_part_km2: float = 3e6     # and only cuts leaving both parts this large
     azimuths: int = 12                # cut directions tried through each centre
@@ -240,15 +242,30 @@ def cuts(balance, world, rotations, plate, rifting=None):
     frame = world.frame(plate)
     continents = [c for c in world.crust if c.plate == plate and c.kind == 'continent']
     centres = [_centre(region)] + [sphere.rotate(_centre(c.shape), frame) for c in continents]
+    # Old sutures on the plate: a cut is tried along the great circle that fits each, and any cut
+    # within reach of a suture is as weak as the suture there.
+    sutures = [line for line, _ in getattr(world, 'suture_lines', lambda: [])()
+               if spherely.contains(region, spherely.create_point(*map(float, sphere.to_lonlat(sphere.unit(line.mean(axis=0))))))]
+    along = []
+    for line in sutures:
+        if len(line) < 2:
+            continue
+        _, vectors = np.linalg.eigh(line.T @ line)
+        along.append((sphere.unit(line.mean(axis=0)), sphere.unit(vectors[:, 0])))  # centre, pole of the fit
+    suture_points = np.vstack(sutures) if sutures else np.zeros((0, 3))
     step = rifting.spacing_km / sphere.RADIUS_KM
     point_km2 = sphere.SPHERE_KM2 / len(balance.points)
     result = []
+    tried = []
     for centre in centres:
         e1 = sphere.unit(np.cross(centre, [0., 0., 1.]) if abs(centre[2]) < .9 else np.cross(centre, [1., 0., 0.]))
         e2 = np.cross(centre, e1)
         for k in range(rifting.azimuths):
             angle = math.pi * k / rifting.azimuths
-            pole = math.cos(angle) * e1 + math.sin(angle) * e2
+            tried.append((centre, math.cos(angle) * e1 + math.sin(angle) * e2))
+    tried += along
+    for centre, pole in tried:
+        if True:
             side = points @ pole > 0.
             if min(side.sum(), (~side).sum()) * point_km2 < rifting.minimum_part_km2:
                 continue
@@ -271,14 +288,21 @@ def cuts(balance, world, rotations, plate, rifting=None):
             tension = float(-torque @ arm / (R_M * (arm @ arm))) if arm @ arm > 0. else 0.
             continental = _in_any(line, [sphere.rotate_geography(c.shape, frame) for c in continents])
             fraction = float(continental.mean())
-            strength = fraction * rifting.continent_strength_n_per_m + (1. - fraction) * rifting.ocean_strength_n_per_m
+            each = np.where(continental, rifting.continent_strength_n_per_m, rifting.ocean_strength_n_per_m)
+            if len(suture_points):
+                near = sphere.RADIUS_KM * np.arccos(np.clip(line @ suture_points.T, -1., 1.)).min(axis=1)
+                each = np.where(near <= rifting.suture_reach_km, rifting.suture_strength_n_per_m, each)
+            strength = float(each.mean())
             result.append(Cut(plate, centre, pole, length_m / 1e3, tension, strength, fraction))
     return result
 
 
 def _centre(geography):
     c = spherely.centroid(geography)
-    return sphere.from_lonlat(spherely.get_x(c), spherely.get_y(c))
+    x, y = spherely.get_x(c), spherely.get_y(c)
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return np.array([1., 0., 0.])  # the whole sphere has no centre; any point will do
+    return sphere.from_lonlat(x, y)
 
 
 def _in_any(points, geographies):

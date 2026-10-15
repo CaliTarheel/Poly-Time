@@ -106,6 +106,21 @@ class RegionStepTests(unittest.TestCase):
         self.assertGreater(max(c.thickness_km for c in world.crust if c.kind == 'continent'), 35.)
         # A one-plate world still steps.
         assert_checks(self, world.step({2: np.zeros(3)}, 1.))
+        # The suture is remembered, in the welded plate's frame, and is where the plate is weakest.
+        self.assertEqual(len(world.sutures), 1)
+        (line, when), = list(world.suture_lines())
+        self.assertGreater(len(line), 2)
+        self.assertLess(when, world.time_myr)
+        balance = dynamics.Balance()
+        weak = dynamics.Rifting(minimum_plate_km2=1., minimum_part_km2=1.)
+        rotations = balance.solve(world)
+        with_suture = dynamics.cuts(balance, world, rotations, 2, weak)
+        sutures, world.sutures = world.sutures, []
+        without = dynamics.cuts(balance, world, rotations, 2, weak)
+        world.sutures = sutures
+        # One more cut is tried, along the suture, and every cut near it is weaker than without it.
+        self.assertEqual(len(with_suture), len(without) + 1)
+        self.assertLess(min(c.strength_n_per_m for c in with_suture), min(c.strength_n_per_m for c in without))
 
     def test_eight_plates_keep_their_crust_accounted_for(self):
         network_world, omegas = voronoi_world(count=8, seed=3, speed_km_myr=30., continents=3)

@@ -82,6 +82,9 @@ class RegionWorld:
     time_myr: float = 0.
     ledger: list = field(default_factory=list)
     next_ident: int = 0
+    # Where plates welded: each a dict(plate, points, time_myr) with the suture line in that plate's
+    # frame, carried with the plate like its crust. Sutures are where continents break again.
+    sutures: list = field(default_factory=list)
 
     # ------------------------------------------------------------------ views
     def plates(self) -> list:
@@ -152,6 +155,12 @@ class RegionWorld:
                 if k == len(b.kinds) or b.kinds[k] != b.kinds[start]:
                     yield b.points[start:k + 1], b.kinds[start]
                     start = k
+
+    def suture_lines(self):
+        """(points, time_myr) of every suture, in the world frame, for maps and for rifting."""
+        for s in getattr(self, 'sutures', []):
+            if s['plate'] in self.regions:
+                yield sphere.rotate(s['points'], self.frame(s['plate'])), s['time_myr']
 
     def areas(self) -> dict:
         result = {}
@@ -690,6 +699,9 @@ class RegionWorld:
         self.names[new] = '%s (rift)' % self.names.get(plate, 'Plate %d' % plate)
         area = sphere.area_km2(piece)
         self._give(plate, piece, new)
+        for s in getattr(self, 'sutures', []):
+            if s['plate'] == plate and np.mean(sphere.rotate(s['points'], self.frame(plate)) @ pole > 0.) > .5:
+                s['plate'] = new  # same frame as the parent for now
         self.boundaries = self._derive(self._index(_split_by_side(self.boundaries, plate, new, pole)), {})
         return dict(kind='rift', plate=plate, new=new, area_km2=area, length_km=cut.length_km,
                     tension_n_per_m=cut.tension_n_per_m, strength_n_per_m=cut.strength_n_per_m,
@@ -712,6 +724,14 @@ class RegionWorld:
                     continue
                 keep, gone = sorted((left, right), key=lambda p: -sphere.area_km2(self.regions[p]))
                 area = sphere.area_km2(self.regions[gone])
+                sutures = getattr(self, 'sutures', [])
+                sutures.append(dict(plate=keep, points=sphere.rotate(b.points[lo:hi + 1], self.frame(keep).T),
+                                    time_myr=self.time_myr))
+                carry = self.frame(keep).T @ self.frame(gone)
+                for s in sutures:
+                    if s['plate'] == gone:
+                        s['plate'], s['points'] = keep, sphere.rotate(s['points'], carry)
+                self.sutures = sutures
                 self._give(gone, self.regions[gone], keep)
                 self.regions.pop(gone, None)
                 self.crust = [c for c in self.crust if c.plate != gone]
