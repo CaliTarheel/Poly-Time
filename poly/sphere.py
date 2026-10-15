@@ -490,16 +490,20 @@ def parts(geography, minimum_km2=1e-6):
 
 
 def clean(geography, minimum_km2=1e-6):
-    """The same region rebuilt from valid polygons only (no zero-width lines or debris).
+    """The same region rebuilt from valid polygons only: no zero-width lines, slit holes or debris.
 
-    Returns (shape, debris area dropped, whether it was rebuilt). If the rebuilt area differs from
-    S2's own area of the input, the input is returned unchanged, so cleaning can never lose crust.
+    Polygon parts smaller than `minimum_km2` are debris too: with the level of detail (DETAIL_KM2)
+    passed, the crumbs left along boundaries that would ride along, add vertices and block
+    simplification. Returns (shape, debris area dropped, whether it was rebuilt); the caller books
+    the area change.
     """
     if spherely.get_type_id(geography) != spherely.GeographyType.GEOMETRYCOLLECTION.value:
-        # Polygons only already; rebuild only if some hole is a slit (encloses nothing), which
-        # otherwise rides along and multiplies with every later operation.
-        slit = any(abs(loop_area_km2(hole)) < SLIT_KM2 for rings in polygons(geography) for hole in rings[1:])
-        if not slit:
+        # Polygons only already; rebuild only if some hole is a slit (encloses nothing) or some part
+        # is below the level of detail, either of which otherwise multiplies with every operation.
+        rings_of = polygons(geography)
+        slit = any(abs(loop_area_km2(hole)) < SLIT_KM2 for rings in rings_of for hole in rings[1:])
+        small = any(abs(loop_area_km2(rings[0])) < minimum_km2 for rings in rings_of)
+        if not slit and not small:
             return geography, 0., True
     try:
         pieces, dropped = parts(geography, minimum_km2)
@@ -682,7 +686,7 @@ def node_shared(rings, node_km=NODE_KM, groups=None):
     return result
 
 
-def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2, rounds=8, groups=None):
+def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2, rounds=8, groups=None, stats=None):
     """Rings with small zig-zags and points on straight edges taken out, keeping shared edges shared.
 
     A vertex goes only if, in every ring that has it, it cuts off a triangle smaller than
@@ -728,6 +732,12 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
                          | (high == cluster) | (low != low[first][cluster]) | (high != high[first][cluster]))
         limit = np.where(occurrences > 1, area_km2, alone_km2)
         candidate = ~bad & (worst < limit) & (occurrences > 0)
+        if stats is not None:
+            stats.setdefault('rounds', []).append(dict(
+                clusters=int((occurrences > 0).sum()), shared=int((occurrences > 1).sum()),
+                long=int(np.logical_or.reduceat(long, np.r_[0]).sum()) if False else int(long.sum()),
+                bad=int((bad & (occurrences > 0)).sum()), small=int(((worst < limit) & (occurrences > 0)).sum()),
+                candidates=int(candidate.sum())))
         if not candidate.any():
             break
         # Only where the triangle a vertex cuts off is empty: no vertex of any ring inside it or
@@ -755,11 +765,15 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
             blocked = np.zeros(len(cand), bool)
             blocked[ks[inside]] = True
             candidate[cand[blocked]] = False
+            if stats is not None:
+                stats['rounds'][-1]['blocked_by_occupied_triangle'] = int(blocked.sum())
         # A vertex goes when its triangle is smaller than its neighbours' (ties by position), so no
         # two neighbours go in one round and the smallest triangles go first.
         key = worst + np.arange(clusters) * 1e-12
         lo, hi = low[first], high[first]
         go = candidate & ((key < key[lo]) | ~candidate[lo]) & ((key < key[hi]) | ~candidate[hi])
+        if stats is not None:
+            stats['rounds'][-1]['go'] = int(go.sum())
         if not go.any():
             break
         keep = ~go[cluster]

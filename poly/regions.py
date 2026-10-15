@@ -46,6 +46,7 @@ CRUMB_KM2 = 100.        # detached bits of a plate smaller than this are left wi
 SUTURE_KM = 100.        # a collision that has closed this far welds its two plates into one
 SIMPLIFY_KM2 = 100.     # a boundary vertex cutting off less than this with its neighbours is dropped
 SIMPLIFY_EVERY_MYR = 1. # outlines are simplified once this much time has passed, not every sub-step
+SIMPLIFY_GROWTH = 1.25  # or sooner, once the outlines have this many times the vertices they had after
 
 
 def _full():
@@ -262,16 +263,28 @@ class RegionWorld:
                 continue
             kept.append(piece)
         self.crust = kept
-        # Joining pieces whose edges coincide only to rounding leaves slit holes; left in, they multiply
-        # with every later step. Cleaned once here, after every change to the crust this step.
+        # Joining pieces whose edges coincide only to rounding leaves slit holes, and resolving
+        # overlaps leaves crumbs below the level of detail; left in, both multiply with every later
+        # step. Cleaned once here, after every change to the crust this step, and the area change
+        # booked: debris let go is a sliver lost, a slit filled is ground gained at a junction.
         for piece in self.crust:
-            piece.shape, _, _ = sphere.clean(piece.shape)
-        # Simplifying costs about as much as the rest of a sub-step; the vertices a few sub-steps
-        # add are bounded, so once a Myr is enough.
-        due = self.time_myr + dt - getattr(self, 'simplified_myr', -np.inf) >= SIMPLIFY_EVERY_MYR - 1e-9
+            area = piece.area_km2()
+            piece.shape, _, _ = sphere.clean(piece.shape, minimum_km2=DETAIL_KM2)
+            change = piece.area_km2() - area
+            if change < 0.:
+                entry['lost']['sliver'] -= change
+            elif change > 0.:
+                entry['gained']['junction'] += change
+        self.crust = [c for c in self.crust if c.area_km2() >= TINY_KM2]
+        # Simplifying costs about as much as the rest of a sub-step, so it runs once a Myr, or
+        # sooner when the outlines have grown by SIMPLIFY_GROWTH since the last time.
+        vertices = sum(len(r) for c in self.crust for poly in sphere.polygons(c.shape) for r in poly)
+        due = (self.time_myr + dt - getattr(self, 'simplified_myr', -np.inf) >= SIMPLIFY_EVERY_MYR - 1e-9
+               or vertices > SIMPLIFY_GROWTH * getattr(self, 'simplified_count', np.inf))
         entry['simplified_vertices'] = self._simplify() if due else 0
         if due:
             self.simplified_myr = self.time_myr + dt
+            self.simplified_count = sum(len(r) for c in self.crust for poly in sphere.polygons(c.shape) for r in poly)
         self.regions = self._from_crust()
         entry['events'] += self._regroup(entry)  # keeps regions and crust together as it moves pieces
         self.time_myr += dt
@@ -646,6 +659,17 @@ class RegionWorld:
                 continue
             inside = np.asarray(spherely.contains(self.regions[other], points))
             neighbour[inside & (neighbour < 0)] = other
+        # A probe that lands in a gap (debris below the level of detail let go, filled again next
+        # step) finds no neighbour; it does not end the run. Each such stretch takes the neighbour
+        # of the segment before it, round the ring.
+        missing = neighbour < 0
+        if missing.any() and not missing.all():
+            order = np.roll(np.arange(len(neighbour)), -int(np.argmin(missing)))  # start on a known one
+            last = neighbour[order[0]]
+            for k in order:
+                if neighbour[k] < 0:
+                    neighbour[k] = last
+                last = neighbour[k]
         # Runs of one neighbour, joined round the ring's start.
         runs, start = [], 0
         for k in range(1, len(neighbour) + 1):
