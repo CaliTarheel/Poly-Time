@@ -31,6 +31,7 @@ class Section:
     right: int
     kind: str
     overriding: int | None = None
+    closed_km: float = 0.  # closing accumulated while converging without a trench
 
     def __post_init__(self):
         self.interior = np.asarray(self.interior, float).reshape(-1, 3)
@@ -149,6 +150,69 @@ class Network:
                 s.interior = line[1:-1]
         return float(sphere.arc_km(start, self.junctions[junction]))
 
+    def reclassify(self, rotations_per_myr, margin=.2) -> list:
+        """Re-type ridges, transforms and converging boundaries from the plates' current motion.
+
+        Each segment is typed from the right plate's motion relative to the left (see
+        `segment_motion`), with a margin around the threshold so a boundary near it keeps its
+        type. Closing makes a converging boundary, never a trench: a trench is made by initiation.
+        Trenches and collisions keep their type here. A boundary whose type changes along it is
+        split where it changes; afterwards neighbours of one plate pair and type are joined.
+        """
+        from poly.build import TRANSFORM_RATIO, _smooth
+        events = []
+        for ident in list(self.sections):
+            s = self.sections[ident]
+            if s.kind in ('trench', 'collision'):
+                continue
+            points = self.points(ident)
+            opening, sliding = segment_motion(points, rotations_per_myr[s.left], rotations_per_myr[s.right])
+            ratio = np.abs(opening) / np.maximum(sliding, 1e-12)
+            if s.kind == 'transform':
+                moving = ratio > TRANSFORM_RATIO * (1. + margin)
+            else:
+                moving = ratio > TRANSFORM_RATIO * (1. - margin)
+            kinds = np.where(moving, np.where(opening > 0., 'ridge', 'converging'), 'transform')
+            kinds = [str(k) for k in _smooth(list(kinds))]
+            if set(kinds) == {s.kind}:
+                continue
+            events.append(dict(kind='retyped', section=ident, plates=(s.left, s.right), was=s.kind,
+                               now=sorted(set(kinds))))
+            cuts = [i for i in range(1, len(kinds)) if kinds[i] != kinds[i - 1]]
+            bounds = [0] + cuts + [len(kinds)]
+            ends = [s.start] + [self.add_junction(points[c]) for c in cuts] + [s.end]
+            closed = s.closed_km
+            del self.sections[ident]
+            for k in range(len(bounds) - 1):
+                lo, hi = bounds[k], bounds[k + 1]
+                kind = kinds[lo]
+                new = self.add_section(ends[k], ends[k + 1], points[lo + 1:hi], s.left, s.right, kind)
+                self.sections[new].closed_km = closed if kind == 'converging' else 0.
+        events += self.join_alike()
+        return events
+
+    def join_alike(self) -> list:
+        """Join the two boundaries at a junction of two when they have one plate pair and type."""
+        events = []
+        changed = True
+        while changed:
+            changed = False
+            for junction in list(self.junctions):
+                incident = self.incident(junction)
+                if len(incident) != 2:
+                    continue
+                a, b = (self.sections[i] for i in incident)
+                if a is b or a.start == a.end or b.start == b.end or a.kind != b.kind or a.overriding != b.overriding:
+                    continue
+                if {a.left, a.right} != {b.left, b.right}:
+                    continue
+                keep, drop = incident
+                if self._merge_run(drop, events, only=junction):
+                    self.sections[keep].closed_km = max(a.closed_km, b.closed_km)
+                    changed = True
+                    break
+        return events
+
     def length_km(self, ident) -> float:
         points = self.points(ident)
         return float(sphere.arc_km(points[:-1], points[1:]).sum())
@@ -178,10 +242,13 @@ class Network:
                     break
         return events
 
-    def _merge_run(self, ident, events) -> bool:
-        """Fold a short section into the neighbour of the same plate pair across a junction of two."""
+    def _merge_run(self, ident, events, only=None) -> bool:
+        """Fold a section into the neighbour of the same plate pair across a junction of two
+        (across `only`, if given)."""
         s = self.sections[ident]
         for junction in (s.start, s.end):
+            if only is not None and junction != only:
+                continue
             others = [o for o in self.incident(junction) if o != ident]
             if len(others) != 1:
                 continue
@@ -580,3 +647,18 @@ def _cut_loops(line, window=24):
         if not cut:
             i += 1
     return np.array(points)
+
+
+def segment_motion(points, left_omega, right_omega):
+    """Per segment of a polyline: opening across it (positive apart) and sliding along it, km/Myr.
+
+    The right plate's velocity relative to the left one, at each segment's middle, resolved across
+    and along the segment. Walking the polyline, the right plate is on the right.
+    """
+    points = np.asarray(points, float)
+    a, b = points[:-1], points[1:]
+    mid = sphere.unit(a + b)
+    tangent = sphere.unit(b - a)
+    toward_right = np.cross(tangent, mid)
+    velocity = np.cross(np.asarray(right_omega, float) - np.asarray(left_omega, float), mid) * sphere.RADIUS_KM
+    return np.einsum('ij,ij->i', velocity, toward_right), np.abs(np.einsum('ij,ij->i', velocity, tangent))

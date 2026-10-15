@@ -15,7 +15,7 @@ from poly import sphere
 from poly.topology import Network
 from poly.world import Crust, World
 
-TRANSFORM_RATIO = math.tan(math.radians(25.))  # slide more than ~2.1x the opening or closing: transform
+TRANSFORM_RATIO = math.tan(math.radians(15.))  # slide more than ~3.7x the opening or closing: transform
 MINIMUM_RUN = 3                                 # segments; shorter runs take their neighbours' kind
 
 

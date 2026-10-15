@@ -60,6 +60,18 @@ in collision zones. Poly-Time removes the grid so that none of this can happen s
 6. **Check the ledger.** Plate areas sum to the sphere; crust areas sum to each plate; the change of each
    is exactly created minus subducted plus recorded slivers. A step that does not balance is rejected.
 
+## How boundaries evolve (phase 2, started)
+
+- Every step, ridges, transforms and converging boundaries are re-typed from their plates' current
+  relative motion: opening makes ridge, closing makes converging, mostly sliding (more than about 3.7
+  times the opening or closing, i.e. within 15 degrees) makes transform. A 20% margin keeps a boundary
+  near the threshold from flickering. A boundary whose type changes along it is split there, and
+  neighbours of one plate pair and type are joined again.
+- Closing never makes a trench directly. A converging boundary records how far it has closed (its
+  overlap is booked as compression); at 100 km it becomes a trench. Ocean against continent: the ocean
+  goes down. Ocean against ocean: the older goes down. Continent against continent: collision.
+- A trench where more than 500 km2 of continental crust arrives in one step becomes a collision.
+
 ## What carries over from Super-Light-Time
 
 - The force balance physics (slab pull, basal drag, ridge push, resistances), with inputs taken from
