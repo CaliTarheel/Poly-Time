@@ -30,6 +30,7 @@ import spherely
 
 from poly import sphere
 from poly.build import TRANSFORM_RATIO, _smooth
+from poly.sphere import DETAIL_KM2
 from poly.topology import segment_motion
 from poly.world import (AGE_BAND_MYR, COLLISION_KM2, INITIATION_KM, MINIMUM_PLATE_KM2, SAMPLE_KM, TOLERANCE,
                         Crust, _merge_bands)
@@ -351,7 +352,18 @@ class RegionWorld:
                 continue
             entry['gained'][category] += area
             mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back), self.time_myr + .5 * dt))
-        self.crust = others + [c for c in mine if sphere.area_km2(c.shape) >= TINY_KM2]
+        # Pieces below the level of detail are not tracked: booked as a sliver and let go (the ground
+        # comes back to a neighbour as a junction gain when the regions are rebuilt).
+        kept = []
+        for c in mine:
+            area = sphere.area_km2(c.shape)
+            if area < TINY_KM2:
+                continue
+            if area < DETAIL_KM2 and c.kind == 'ocean':
+                entry['lost']['sliver'] += area
+                continue
+            kept.append(c)
+        self.crust = others + kept
 
     def _thicken(self, piece, area, mine):
         """Keep the volume of `area` km2 of continent just taken from `piece`; returns that volume.

@@ -64,7 +64,12 @@ def polygon(ring, holes=()):
 
 EMPTY = spherely.from_wkt('POLYGON EMPTY')
 DEBRIS_LIMIT_KM2 = 1.
-SLIT_KM2 = 1e-3  # a hole enclosing less than this is a slit left where edges nearly coincide
+# The model's level of detail. Nothing smaller is tracked: a hole, a loop or a leftover piece under
+# this is debris, dropped or merged (its area still shows in the ledger's drift), and an outline
+# vertex that cuts off less than this is not worth keeping. Islands and arcs at this scale will come
+# from a separate process, not from the crust geometry.
+DETAIL_KM2 = 4.
+SLIT_KM2 = DETAIL_KM2  # a hole enclosing less than this is a slit left where edges nearly coincide
 # Rebuilding a shape read back from S2 can cut a slit or fold of tens of km2 (an absolute amount,
 # whatever the plate's size). Allow 1e-4 of the shape and at least 100 km2: far inside the 0.1%
 # standard, and still orders of magnitude below a lost lobe or an inside-out shape.
@@ -677,7 +682,7 @@ def node_shared(rings, node_km=NODE_KM, groups=None):
     return result
 
 
-def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=1e-3, rounds=8, groups=None):
+def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2, rounds=8, groups=None):
     """Rings with small zig-zags and points on straight edges taken out, keeping shared edges shared.
 
     A vertex goes only if, in every ring that has it, it cuts off a triangle smaller than
