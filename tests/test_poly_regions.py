@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from poly import regions, sphere
+from poly import dynamics, regions, sphere
 from poly.build import cap_world, voronoi_world
 from poly.world import COLLISION_KM2, INITIATION_KM, Crust
 from tests.test_poly_evolve import EAST, disc
@@ -91,6 +91,20 @@ class RegionStepTests(unittest.TestCase):
         self.assertLess(abs(drift), 1e-6 * sphere.SPHERE_KM2)
         lost = sum(e['lost']['continent_at_trench'] + e['lost']['collision'] for e in world.ledger)
         self.assertAlmostEqual(world.areas()['continent'] + lost, continent, delta=1e-4 * continent + 1.)
+
+
+class RegionDynamicsTests(unittest.TestCase):
+    def test_the_force_balance_pulls_a_cap_towards_its_trench_and_the_books_close(self):
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        rotations = dynamics.Balance().solve(world)
+        self.assertGreater((rotations[1] - rotations[2])[2], 0.)  # east, towards the trench
+        entries = []
+        dynamics.run(world, 2, report=lambda w, entry: entries.append(entry))
+        self.assertGreaterEqual(len(entries), 2)
+        for entry in entries:
+            assert_checks(self, entry)
+        self.assertAlmostEqual(world.time_myr, 2., places=9)
+        self.assertGreater(sum(e['lost']['subducted'] for e in entries), 0.)
 
 
 if __name__ == '__main__':
