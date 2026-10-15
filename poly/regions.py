@@ -903,17 +903,18 @@ class RegionWorld:
                 if total < needed:
                     continue
                 strip = sphere.strip(np.array([arc_points[k] for k in ks]), ARC_WIDTH_KM / 2.)
-                built = self._island_arc(over, strip, entry)
+                built, used = self._island_arc(over, strip, entry, total)
                 if built > 0.:
-                    owed[ks] = 0.
+                    owed[ks] = owed[ks] * (total - used) / total  # what the strip did not take stays owed
                     events.append(dict(kind='island_arc', plate=over, plates=(b.left, b.right), area_km2=built,
-                                       magma_km3=total))
+                                       magma_km3=used))
                 elif total > 2. * needed:
                     owed[ks] = 0.  # nowhere to put it: lost to the mantle
         return events
 
-    def _island_arc(self, plate, strip, entry) -> float:
-        """Make the part of `strip` (world frame) over `plate`'s ocean continental crust ARC_THICK_KM thick."""
+    def _island_arc(self, plate, strip, entry, owed_km3):
+        """Make the part of `strip` (world frame) over `plate`'s ocean continental crust, as thick as
+        the magma owed allows up to ARC_THICK_KM; returns (km2 built, km3 of magma used)."""
         back = self.frame(plate).T
         local = sphere.rotate_geography(strip, back)
         ocean = [c for c in self.crust if c.plate == plate and c.kind == 'ocean']
@@ -921,18 +922,19 @@ class RegionWorld:
         for c in ocean:
             part = sphere.intersection(c.shape, local)
             area = sphere.area_km2(part)
-            if area < DETAIL_KM2:
+            if area < TINY_KM2:
                 continue
-            c.shape = sphere.difference(c.shape, local)
+            c.shape = sphere.difference(c.shape, part)  # exactly what the arc takes, every bit of it
             pieces.append(part)
             built += area
-        if built <= 0.:
-            return 0.
-        self.crust.append(Crust(plate, 'continent', sphere.union(*pieces), self.time_myr, ARC_THICK_KM))
+        if built < DETAIL_KM2:
+            return 0., 0.
+        thickness = min(ARC_THICK_KM, owed_km3 / built)
+        self.crust.append(Crust(plate, 'continent', sphere.union(*pieces), self.time_myr, thickness))
         entry['gained']['arc'] += built
         entry['lost']['arc'] += built
-        entry['arc_km3'] += built * ARC_THICK_KM
-        return built
+        entry['arc_km3'] += built * thickness
+        return built, built * thickness
 
     def _piece_at(self, plate, point):
         """The crust piece of `plate` under a world-frame `point`, or None."""
