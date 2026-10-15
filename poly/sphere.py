@@ -316,35 +316,52 @@ def simple_loops(ring, tolerance=1e-10):
 _EDGE = re.compile(r'(?:loop (\d+)\D*?)?edge (\d+)', re.IGNORECASE)
 
 
-def polygon_robust(ring, holes=(), attempts=24):
-    """`polygon`, dropping the vertex S2 names when it rejects a ring (crossing or repeated edges).
+def polygon_robust(ring, holes=(), attempts=24, minimum_km2=1e-6):
+    """`polygon`, repaired when S2 rejects a ring (crossing or repeated edges).
 
-    S2's own outputs are valid, but writing them as longitude and latitude moves points by ~1e-16,
-    which can make edges that nearly touch cross. Dropping the vertex at the offending edge moves
-    the outline by about that much; callers check the area against S2's own.
+    S2's own outputs are valid, but a ring read back and rotated can touch or cross itself: a strip
+    of no width that runs out and back along one line, or two lobes meeting at a point. A loop S2
+    says crosses itself is split at the crossing into loops, which keeps the signed area exactly;
+    loops of the ring's own orientation with real area are kept, the rest (folds, slits) are
+    debris. Only when no crossing is named is the vertex at the offending edge dropped, which moves
+    the outline by about the read-back error; callers check the area against S2's own.
     """
     loops = [tidy_ring(ring)] + [tidy_ring(h) for h in holes]
     loops = [loops[0]] + [h for h in loops[1:] if len(h) >= 3]
+    if len(loops[0]) < 3:
+        return EMPTY  # tidied away: a spike or a repeated point, nothing inside
     for _ in range(attempts):
         try:
             return polygon(loops[0], loops[1:])
         except (ValueError, RuntimeError) as error:
             found = [(int(m.group(1) or 0), int(m.group(2))) for m in _EDGE.finditer(str(error))]
+            if not found and abs(loop_area_km2(loops[0])) < max(minimum_km2, SLIT_KM2):
+                return EMPTY  # a loop S2 collapses to nothing (vertices a few mm apart): debris
             # S2 numbers loops in its own nesting order, which is ours only while that is simple;
             # an edge that is not there means it is not, and the caller rebuilds loop by loop.
             if not found or any(loop >= len(loops) or edge >= len(loops[loop]) for loop, edge in found):
                 raise
-            if 'cross' in str(error) and len(found) == 2 and found[0][0] == found[1][0] and found[0][0] < len(loops):
-                # Two edges of one loop cross: a slit or fold. Cut out the shorter stretch of the
-                # loop between them and put the crossing point in its place.
-                cut = _cut_crossing(loops[found[0][0]], found[0][1], found[1][1])
-                if cut is not None:
-                    loops[found[0][0]] = cut
-                    continue
-            # When two loops are named (a crossing), drop the vertex from the smaller one.
-            loop, edge = min(found, key=lambda le: len(loops[le[0]]) if le[0] < len(loops) else 1 << 30)
-            if loop >= len(loops):
-                raise
+            if 'cross' in str(error) and len(found) == 2 and found[0][0] == found[1][0]:
+                which = found[0][0]
+                pieces = _split_at_crossing(loops[which], found[0][1], found[1][1])
+                if pieces is not None:
+                    sign = np.sign(loop_area_km2(loops[which]))
+                    kept = [p for p in pieces if len(p) >= 3 and np.sign(loop_area_km2(p)) == sign
+                            and abs(loop_area_km2(p)) >= max(minimum_km2, SLIT_KM2)]
+                    if not kept:
+                        if which == 0:
+                            return EMPTY
+                        del loops[which]
+                        continue
+                    if which == 0:
+                        shell = union(*[polygon_robust(p, (), attempts, minimum_km2) for p in kept])
+                        cut = [polygon_robust(h[::-1], (), attempts, minimum_km2) for h in loops[1:]]
+                        return spherely.difference(shell, union(*cut)) if cut else shell
+                    rest = polygon_robust(loops[0], loops[1:which] + loops[which + 1:], attempts, minimum_km2)
+                    hole = union(*[polygon_robust(p[::-1], (), attempts, minimum_km2) for p in kept])
+                    return spherely.difference(rest, hole)
+            # When two loops are named (a crossing between loops), drop the vertex from the smaller.
+            loop, edge = min(found, key=lambda le: len(loops[le[0]]))
             if len(loops[loop]) <= 3:
                 if loop == 0:
                     raise
@@ -354,27 +371,21 @@ def polygon_robust(ring, holes=(), attempts=24):
     return polygon(loops[0], loops[1:])
 
 
-def _cut_crossing(loop, i, j):
-    """`loop` with the shorter stretch between crossing edges i and j replaced by their crossing."""
+def _split_at_crossing(loop, i, j):
+    """`loop` split at the crossing of its edges i and j into the two loops that meet there."""
     n = len(loop)
     i, j = sorted((i, j))
     a, b, c, d = loop[i], loop[(i + 1) % n], loop[j], loop[(j + 1) % n]
     meet = np.cross(np.cross(a, b), np.cross(c, d))
     norm = float(np.linalg.norm(meet))
     if norm < 1e-300:
-        return None
+        return None  # the edges lie along one great circle: no single crossing point
     meet /= norm
     if float(meet @ (a + b + c + d)) < 0.:
         meet = -meet
-    # Two loops meet at the crossing: vertices i+1..j, and the rest round the start. A slit or fold
-    # encloses (almost) nothing, so keep the stretch that encloses more and cut the other.
     inner = np.vstack((meet[None], loop[i + 1:j + 1]))
     outer = np.vstack((loop[:i + 1], meet[None], loop[j + 1:]))
-    if abs(loop_area_km2(inner)) <= abs(loop_area_km2(outer)) and len(inner) < len(loop):
-        result = outer
-    else:
-        result = inner
-    return result if len(result) >= 3 else None
+    return [inner, outer]
 
 
 def part(rings, minimum_km2=1e-6, whole_km2=None):
