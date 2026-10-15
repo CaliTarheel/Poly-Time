@@ -64,6 +64,7 @@ class Boundary:
     kinds: list
     overriding: list
     closed_km: np.ndarray
+    idents: object = None   # one int per segment, kept as the segment is carried from step to step
 
     def mids(self):
         return sphere.unit(self.points[:-1] + self.points[1:])
@@ -79,6 +80,7 @@ class RegionWorld:
     parents: dict = field(default_factory=dict)
     time_myr: float = 0.
     ledger: list = field(default_factory=list)
+    next_ident: int = 0
 
     # ------------------------------------------------------------------ views
     def plates(self) -> list:
@@ -94,10 +96,52 @@ class RegionWorld:
         return dict(self.regions)
 
     def segments(self):
-        """(left, right, a, b, kind, overriding) for every boundary segment, for the force balance."""
+        """(left, right, a, b, kind, overriding, age_myr) for every boundary segment, for the force balance.
+
+        `age_myr` is the age of the crust going down at a trench segment (None elsewhere), so slab
+        pull can depend on it.
+        """
+        ages = self._slab_ages()
         for b in self.boundaries:
             for k in range(len(b.points) - 1):
-                yield b.left, b.right, b.points[k], b.points[k + 1], b.kinds[k], b.overriding[k]
+                yield (b.left, b.right, b.points[k], b.points[k + 1], b.kinds[k], b.overriding[k],
+                       ages.get((id(b), k)))
+
+    def _slab_ages(self) -> dict:
+        """(boundary id, segment) -> age (Myr) of the crust SAMPLE_KM down the downgoing side of each trench."""
+        by_plate = {}
+        for b in self.boundaries:
+            if len(b.points) < 2:
+                continue
+            trench = [k for k, kind in enumerate(b.kinds) if kind == 'trench' and b.overriding[k] in (b.left, b.right)]
+            if not trench:
+                continue
+            mids = b.mids()
+            poles = sphere.unit(np.cross(b.points[:-1], b.points[1:]))
+            angle = SAMPLE_KM / sphere.RADIUS_KM
+            for k in trench:
+                down = b.right if b.overriding[k] == b.left else b.left
+                sign = 1. if down == b.left else -1.
+                point = sphere.unit(mids[k] * np.cos(angle) + sign * poles[k] * np.sin(angle))
+                by_plate.setdefault(down, []).append(((id(b), k), point))
+        ages = {}
+        for plate, items in by_plate.items():
+            keys = [key for key, _ in items]
+            local = sphere.rotate(np.array([p for _, p in items]), self.frame(plate).T)
+            lon, lat = sphere.to_lonlat(local)
+            where = spherely.points(lon, lat)
+            found = np.zeros(len(keys), bool)
+            for c in self.crust:
+                if c.plate != plate:
+                    continue
+                spherely.prepare(c.shape)
+                hit = np.asarray(spherely.contains(c.shape, where)) & ~found
+                if hit.any():
+                    age = 0. if c.born_myr is None else max(self.time_myr - c.born_myr, 0.)
+                    for k in np.flatnonzero(hit):
+                        ages[keys[k]] = age
+                    found |= hit
+        return ages
 
     def boundary_lines(self):
         """(points, kind) for every run of one kind, for maps."""
@@ -119,7 +163,7 @@ class RegionWorld:
         rotations_per_myr = self._complete(rotations_per_myr)
         crust_before = sum(c.area_km2() for c in self.crust)
         old_regions = dict(self.regions)
-        old_index = self._index()
+        old_index = self._index(rotations_per_myr=rotations_per_myr, dt=dt)
         motion = {p: sphere.rotation(np.asarray(rotations_per_myr[p], float) * dt) for p in self.plates()}
         for plate, matrix in motion.items():
             self.frames[plate] = matrix @ self.frame(plate)
@@ -437,15 +481,30 @@ class RegionWorld:
         return best
 
     # ---------------------------------------------------------- boundaries
-    def _index(self, boundaries=None) -> dict:
+    def _fresh(self, count) -> np.ndarray:
+        """`count` identities never used before."""
+        first = getattr(self, 'next_ident', 0)
+        self.next_ident = first + count
+        return np.arange(first, first + count)
+
+    def _index(self, boundaries=None, rotations_per_myr=None, dt=0.) -> dict:
+        """Per plate pair, each old boundary as (midpoints, kinds, overriding, closed_km, idents).
+
+        With `rotations_per_myr` and `dt`, the midpoints are carried by the pair's mean rotation, which
+        is where a boundary between two plates goes, so the new boundary is matched where it is now.
+        """
         index = {}
-        for b in self.boundaries if boundaries is None else boundaries:
-            entry = index.setdefault((b.left, b.right), [[], [], [], []])
-            entry[0].append(b.mids())
-            entry[1] += list(b.kinds)
-            entry[2] += list(b.overriding)
-            entry[3].append(b.closed_km)
-        return {pair: (np.vstack(m), k, o, np.concatenate(c)) for pair, (m, k, o, c) in index.items()}
+        for b in (self.boundaries if boundaries is None else boundaries):
+            if len(b.points) < 2:
+                continue
+            mids = b.mids()
+            if rotations_per_myr is not None and dt:
+                mean = .5 * (np.asarray(rotations_per_myr[b.left], float) + np.asarray(rotations_per_myr[b.right], float)) * dt
+                mids = sphere.rotate(mids, sphere.rotation(mean))
+            idents = b.idents if getattr(b, 'idents', None) is not None else self._fresh(len(b.kinds))
+            index.setdefault((b.left, b.right), []).append(
+                (mids, list(b.kinds), list(b.overriding), np.asarray(b.closed_km, float), np.asarray(idents)))
+        return index
 
     def _split_overlap(self, local, kind, over, p, q, stage, lost):
         if kind == 'trench' and over in (p, q):
@@ -472,37 +531,53 @@ class RegionWorld:
                     start = k
         return result
 
-    def _kind_of(self, index, piece, p, q):
-        """(kind, overriding) of the old boundary of p and q along a piece of overlap or gap.
+    def _inherit(self, index, b, rotations_per_myr):
+        """Fill `b`'s segment state from the old boundaries of its plates.
 
-        The piece is a strip along that boundary, so its vertices lie on or near it; each vertex
-        votes for the kind of the old segment nearest it, weighted by nothing but count.
+        Each segment takes the state and identity of the nearest old segment of the same plates
+        within INHERIT_KM, with one rule for continuity: a segment whose nearest old boundary differs
+        from its neighbours' is next to another contact of the same plates, not part of it, and takes
+        its neighbours' boundary when that is in reach. A segment with no old boundary in reach is a
+        new contact: typed from the motion, with a new identity.
         """
-        pair = (min(p, q), max(p, q))
-        if pair not in index:
-            return 'transform', None
-        mids, kinds, over, _ = index[pair]
-        points = np.vstack([ring for rings in sphere.polygons(piece) for ring in rings])
-        km = sphere.RADIUS_KM * np.arccos(np.clip(points @ mids.T, -1., 1.))
-        nearest = np.argmin(km, axis=1)
-        close = km[np.arange(len(points)), nearest] <= INHERIT_KM
-        if not close.any():
-            return 'transform', None
-        votes = {}
-        for k in nearest[close]:
-            votes[(kinds[k], over[k])] = votes.get((kinds[k], over[k]), 0) + 1
-        return max(votes, key=votes.get)
-
-    def _kind_at(self, index, point, p, q, rotations_per_myr):
-        """(kind, overriding, closed_km) of the old boundary of p and q nearest `point`, else from motion."""
-        pair = (min(p, q), max(p, q))
-        if pair in index:
-            mids, kinds, over, closed = index[pair]
-            km = sphere.arc_km(mids, point[None])
-            k = int(np.argmin(km))
-            if km[k] <= INHERIT_KM:
-                return kinds[k], over[k], float(closed[k])
-        return _kind_from_motion(point, pair, rotations_per_myr), None, 0.
+        pair = (b.left, b.right)
+        mids = b.mids()
+        n = len(mids)
+        candidates = index.get(pair, [])
+        choice, where, best = np.full(n, -1), np.zeros(n, int), np.full(n, np.inf)
+        distances = []
+        for c, (old_mids, *_) in enumerate(candidates):
+            km = sphere.RADIUS_KM * np.arccos(np.clip(mids @ old_mids.T, -1., 1.))
+            distances.append(km)
+            k = np.argmin(km, axis=1)
+            d = km[np.arange(n), k]
+            better = d < best
+            best[better], choice[better], where[better] = d[better], c, k[better]
+        choice[best > INHERIT_KM] = -1
+        for k in range(n):
+            neighbours = [choice[j] for j in (k - 1, k + 1) if 0 <= j < n]
+            if not neighbours or choice[k] in neighbours or len(set(neighbours)) != 1 or neighbours[0] < 0:
+                continue
+            c = neighbours[0]
+            j = int(np.argmin(distances[c][k]))
+            if distances[c][k, j] <= INHERIT_KM:
+                choice[k], where[k] = c, j
+        idents = np.zeros(n, int)
+        fresh = iter(self._fresh(int((choice < 0).sum())))
+        for k in range(n):
+            if choice[k] >= 0:
+                _, kinds, over, closed, old_idents = candidates[choice[k]]
+                j = where[k]
+                b.kinds.append(kinds[j])
+                b.overriding.append(over[j])
+                b.closed_km[k] = closed[j]
+                idents[k] = old_idents[j]
+            else:
+                b.kinds.append(_kind_from_motion(mids[k], pair, rotations_per_myr))
+                b.overriding.append(None)
+                b.closed_km[k] = 0.
+                idents[k] = next(fresh)
+        b.idents = idents
 
     def _derive(self, old_index, rotations_per_myr) -> list:
         """Boundaries where the new regions touch, carrying the old state by position."""
@@ -553,11 +628,7 @@ class RegionWorld:
             if len(line) < 2:
                 continue
             boundary = Boundary(plate, other, line, [], [], np.zeros(len(line) - 1))
-            for k, m in enumerate(boundary.mids()):
-                kind, over, closed = self._kind_at(old_index, m, plate, other, rotations_per_myr)
-                boundary.kinds.append(kind)
-                boundary.overriding.append(over)
-                boundary.closed_km[k] = closed
+            self._inherit(old_index, boundary, rotations_per_myr)
             result.append(boundary)
         return result
 
@@ -764,11 +835,12 @@ def _relabel(boundaries, into):
         if left == right:
             continue
         over = [into.get(o, o) for o in b.overriding]
+        idents = None if getattr(b, 'idents', None) is None else np.asarray(b.idents)
         if left < right:
-            result.append(Boundary(left, right, b.points, list(b.kinds), over, b.closed_km.copy()))
+            result.append(Boundary(left, right, b.points, list(b.kinds), over, b.closed_km.copy(), idents))
         else:
             result.append(Boundary(right, left, b.points[::-1], list(b.kinds)[::-1], over[::-1],
-                                   b.closed_km[::-1].copy()))
+                                   b.closed_km[::-1].copy(), None if idents is None else idents[::-1]))
     return result
 
 
@@ -785,8 +857,9 @@ def _split_by_side(boundaries, plate, new, pole):
             if k < len(side) and side[k] == side[start]:
                 continue
             into = {plate: new} if side[start] else {}
+            idents = None if getattr(b, 'idents', None) is None else np.asarray(b.idents)[start:k]
             part = Boundary(b.left, b.right, b.points[start:k + 1], b.kinds[start:k], b.overriding[start:k],
-                            b.closed_km[start:k].copy())
+                            b.closed_km[start:k].copy(), idents)
             result += _relabel([part], into)
             start = k
     return result
@@ -819,13 +892,16 @@ def _point_in(geography):
 def from_network(world) -> RegionWorld:
     """A regions-first world from a network-based one (same plates, crust and boundary types)."""
     regions = world.network.polygons()
-    boundaries = []
+    boundaries, next_ident = [], 0
     for ident, s in world.network.sections.items():
         points = world.network.points(ident)
         left, right = s.left, s.right
         if left > right:
             points, left, right = points[::-1], right, left
         count = len(points) - 1
-        boundaries.append(Boundary(left, right, points, [s.kind] * count, [s.overriding] * count, np.zeros(count)))
+        boundaries.append(Boundary(left, right, points, [s.kind] * count, [s.overriding] * count, np.zeros(count),
+                                   np.arange(next_ident, next_ident + count)))
+        next_ident += count
     return RegionWorld([Crust(c.plate, c.kind, c.shape, c.born_myr, c.thickness_km) for c in world.crust],
-                       {p: world.frame(p).copy() for p in regions}, regions, boundaries, dict(world.names))
+                       {p: world.frame(p).copy() for p in regions}, regions, boundaries, dict(world.names),
+                       next_ident=next_ident)

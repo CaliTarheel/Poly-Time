@@ -30,7 +30,12 @@ R_M = sphere.RADIUS_KM * 1e3
 
 @dataclass
 class Parameters:
-    slab_pull_n_per_m: float = 3e13
+    slab_pull_n_per_m: float = 3e13   # per metre of trench, for a slab of `slab_reference_myr`
+    # A slab's pull grows with the thickness of the lithosphere going down, which grows with the
+    # square root of its age: pull = slab_pull_n_per_m * sqrt(age / reference), capped. Ocean that
+    # is young when it reaches a trench (back-arc, a trench that has only just started) pulls little.
+    slab_reference_myr: float = 80.
+    slab_pull_cap: float = 1.25
     ridge_push_n_per_m: float = 3e12
     basal_drag_pa_s_per_m: float = 1e15
     # Boundary resistance, N per m of boundary per m/s of relative motion (across, along). Across a
@@ -160,10 +165,12 @@ def _segment_arrays(world, slot, p) -> Segments:
     b = np.array([r[3] for r in rows], float)
     kind = np.array([r[4] for r in rows])
     over = [r[5] for r in rows]
+    age = np.array([p.slab_reference_myr if len(r) < 7 or r[6] is None else r[6] for r in rows], float)
     length_m = sphere.arc_km(a, b) * 1e3
     keep = length_m > 0.
     left, right, a, b, kind, length_m = left[keep], right[keep], a[keep], b[keep], kind[keep], length_m[keep]
     over = [o for o, k in zip(over, keep) if k]
+    age = age[keep]
     m = sphere.unit(a + b)
     t_ = sphere.unit(b - a)
     n = np.cross(t_, m)
@@ -184,7 +191,8 @@ def _segment_arrays(world, slot, p) -> Segments:
     over_is_left = np.array([o is not None and slot.get(o) == l for o, l in zip(over, left)])
     down = np.where(over_is_left, right, left)
     towards_overriding = np.where((down == right)[:, None], -n, n)
-    slab_pull = R_M * np.cross(m, p.slab_pull_n_per_m * length_m[:, None] * towards_overriding)
+    strength = np.minimum(np.sqrt(np.maximum(age, 0.) / p.slab_reference_myr), p.slab_pull_cap)
+    slab_pull = R_M * np.cross(m, (p.slab_pull_n_per_m * strength * length_m)[:, None] * towards_overriding)
     ridge_push = R_M * np.cross(m, p.ridge_push_n_per_m * length_m[:, None] * n)
     return Segments(left, right, m, n, length_m, block, trench, ridge, down, slab_pull, ridge_push)
 
