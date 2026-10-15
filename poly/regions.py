@@ -364,15 +364,13 @@ class RegionWorld:
         back = self.frame(plate).T
         mine = [c for c in self.crust if c.plate == plate]
         others = [c for c in self.crust if c.plate != plate]
-        anchors = _vertices(mine)  # the plate's own outline, which every loss and gain was cut from
         # The losses are disjoint pieces of the plate's overlaps; joined by boundary kind, each crust
         # piece meets at most one geography per kind and is cut once, instead of once per loss.
         by_kind = {}
         for shape, kind in losses:
             if sphere.area_km2(shape) >= TINY_KM2:
                 by_kind.setdefault(kind, []).append(shape)
-        local_by_kind = {kind: sphere.rotate_geography(sphere.union(*shapes), back, anchors=anchors)
-                         for kind, shapes in by_kind.items()}
+        local_by_kind = {kind: sphere.rotate_geography(sphere.union(*shapes), back) for kind, shapes in by_kind.items()}
         if local_by_kind:
             all_local = sphere.union(*local_by_kind.values())
             for piece in mine:
@@ -392,7 +390,7 @@ class RegionWorld:
                     if category == 'continent_at_trench':
                         # Where the continent went down, arrival by arrival, not the middle of them all.
                         for shape in by_kind[kind]:
-                            part = sphere.intersection(whole, sphere.rotate_geography(shape, back, anchors=anchors))
+                            part = sphere.intersection(whole, sphere.rotate_geography(shape, back))
                             if sphere.area_km2(part) >= TINY_KM2:
                                 entry['continent_arrived'].append(
                                     (sphere.rotate(_point_in(part), self.frame(plate)), sphere.area_km2(part), plate))
@@ -405,7 +403,7 @@ class RegionWorld:
             if area < TINY_KM2:
                 continue
             entry['gained'][category] += area
-            mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back, anchors=anchors), self.time_myr + .5 * dt))
+            mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back), self.time_myr + .5 * dt))
         self.crust = others + [c for c in mine if sphere.area_km2(c.shape) >= TINY_KM2]
 
     def _thicken(self, piece, area, mine):
@@ -486,10 +484,8 @@ class RegionWorld:
         destroyed and booked as a sliver, so no plate holds the same ground twice.
         """
         doubled = sphere.intersection(piece, self.regions.get(to, sphere.EMPTY))
-        anchors = _vertices([c for c in self.crust if c.plate == plate])
-        anchors_to = _vertices([c for c in self.crust if c.plate == to])
         if sphere.area_km2(doubled) >= TINY_KM2:
-            local = sphere.rotate_geography(doubled, self.frame(plate).T, anchors=anchors)
+            local = sphere.rotate_geography(doubled, self.frame(plate).T)
             for c in [c for c in self.crust if c.plate == plate]:
                 area = sphere.area_km2(sphere.intersection(c.shape, local))
                 if area < TINY_KM2:
@@ -499,7 +495,7 @@ class RegionWorld:
                     entry['lost']['sliver'] += area
             self.regions[plate] = sphere.difference(self.regions[plate], doubled)
             piece = sphere.difference(piece, doubled)
-        local = sphere.rotate_geography(piece, self.frame(plate).T, anchors=anchors)
+        local = sphere.rotate_geography(piece, self.frame(plate).T)
         carry = self.frame(to).T @ self.frame(plate)
         moved = []
         for c in [c for c in self.crust if c.plate == plate]:
@@ -507,7 +503,7 @@ class RegionWorld:
             if sphere.area_km2(part) < TINY_KM2:
                 continue
             c.shape = sphere.difference(c.shape, local)
-            shape = part if np.allclose(carry, np.eye(3)) else sphere.rotate_geography(part, carry, anchors=anchors_to)
+            shape = part if np.allclose(carry, np.eye(3)) else sphere.rotate_geography(part, carry)
             moved.append(Crust(to, c.kind, shape, c.born_myr, c.thickness_km))
         self.crust = [c for c in self.crust if sphere.area_km2(c.shape) >= TINY_KM2] + moved
         self.regions[plate] = sphere.difference(self.regions[plate], piece)
@@ -884,12 +880,6 @@ class RegionWorld:
                              ('balance_error_km2', 'Crust created and destroyed do not balance')):
             if abs(entry[key]) > scale:
                 raise ValueError('%s: %.3g km2 off.' % (message, entry[key]))
-
-
-def _vertices(pieces):
-    """Every outline vertex of `pieces` (crust in one frame), for welding shapes onto."""
-    rings = [r for c in pieces for poly in sphere.polygons(c.shape) for r in poly]
-    return np.vstack(rings) if rings else np.zeros((0, 3))
 
 
 def _loss_category(boundary_kind, crust_kind):

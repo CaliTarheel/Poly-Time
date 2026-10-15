@@ -530,36 +530,14 @@ def clean(geography, minimum_km2=1e-6):
     return (union(*pieces) if pieces else EMPTY), dropped, True
 
 
-def weld(points, anchors):
-    """`points` with every one within SHARED_KM of an anchor replaced by that anchor, exactly.
-
-    A shape computed in one frame and rotated into another lands about 1e-16 off the vertices it
-    was built from. Two edges that close together and not identical cross back and forth, and
-    every operation between them leaves a slit or a tooth; welded onto the vertices already there,
-    the edges are the same edge and S2 treats them so.
-    """
-    from scipy.spatial import cKDTree
-    if anchors is None or not len(anchors) or not len(points):
-        return points
-    km, k = cKDTree(anchors).query(points, k=1, distance_upper_bound=SHARED_KM / RADIUS_KM)
-    hit = np.isfinite(km)
-    out = np.array(points, float)
-    out[hit] = anchors[k[hit]]
-    return out
-
-
-def rotate_geography(geography, matrix, tolerance=None, anchors=None):
-    """The same polygons rotated by `matrix` (rings keep their orientation).
-
-    With `anchors` (vertices in the target frame), rotated vertices within SHARED_KM of one are
-    welded onto it, so a shape built from a plate's own outline shares that outline exactly.
-    """
+def rotate_geography(geography, matrix, tolerance=None):
+    """The same polygons rotated by `matrix` (rings keep their orientation)."""
     pieces, dropped = [], 0.
     whole = area_km2(geography)
     if whole > SPHERE_KM2 - allowed_change(SPHERE_KM2, tolerance):
         return _full()  # the whole sphere (a plate that is all there is), which S2 writes as one point
     for rings in polygons(geography):
-        piece, lost = part([weld(rotate(ring, matrix), anchors) for ring in rings], whole_km2=whole)
+        piece, lost = part([rotate(ring, matrix) for ring in rings], whole_km2=whole)
         dropped += lost
         if not is_empty(piece):
             pieces.append(piece)
