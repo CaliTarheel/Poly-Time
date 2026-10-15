@@ -60,10 +60,10 @@ class SphereTests(unittest.TestCase):
         # The same when S2 will not take the polygon whole and it is rebuilt loop by loop.
         real = sphere.polygon_robust
 
-        def refuse_holes(ring, holes=(), attempts=24):
+        def refuse_holes(ring, holes=(), attempts=24, minimum_km2=1e-6):
             if len(holes):
                 raise ValueError('refused')
-            return real(ring, holes, attempts)
+            return real(ring, holes, attempts, minimum_km2)
         with mock.patch.object(sphere, 'polygon_robust', refuse_holes):
             region, _ = sphere.part([shell, hole], whole_km2=whole - cut)
         self.assertAlmostEqual(sphere.area_km2(region) / (whole - cut), 1., places=6)

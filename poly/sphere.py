@@ -70,6 +70,7 @@ DEBRIS_LIMIT_KM2 = 1.
 # from a separate process, not from the crust geometry.
 DETAIL_KM2 = 4.
 SLIT_KM2 = DETAIL_KM2  # a hole enclosing less than this is a slit left where edges nearly coincide
+TOOTH_COSINE = -.995   # a ring turning back this sharply (within about 6 degrees) at a vertex is a tooth
 # Rebuilding a shape read back from S2 can cut a slit or fold of tens of km2 (an absolute amount,
 # whatever the plate's size). Allow 1e-4 of the shape and at least 100 km2: far inside the 0.1%
 # standard, and still orders of magnitude below a lost lobe or an inside-out shape.
@@ -88,32 +89,42 @@ def _full():
 
 
 def strip(points, half_width_km):
-    """A band `half_width_km` either side of a polyline, as one polygon or the union of per-segment pieces."""
+    """A band `half_width_km` either side of a polyline, coarsely: the polyline is resampled every
+    two band widths or so before the band is drawn, so a boundary with teeth or wiggles finer than
+    the band gets a smooth band, never one drawn round every tooth. Where the offset outline of the
+    coarse polyline still crosses itself (a sharp turn), it is repaired at the crossings, and failing
+    that the band is the union of a quadrilateral per coarse segment.
+    """
     points = np.asarray(points, float)
     angle = half_width_km / RADIUS_KM
-    if len(points) >= 2:
-        length = np.r_[0., np.cumsum(arc_km(points[:-1], points[1:]))]
-        for spacing in (2. * half_width_km, 4. * half_width_km):
-            marks = np.unique(np.r_[np.searchsorted(length, np.arange(0., length[-1], spacing)), len(points) - 1])
-            coarse = points[marks]
-            # Coincident points have no direction between them (and would give NaN normals).
-            coarse = coarse[np.r_[True, arc_km(coarse[:-1], coarse[1:]) > 1e-6]]
-            if len(coarse) < 2:
-                return EMPTY
-            segment = unit(np.cross(coarse[:-1], coarse[1:]))
-            normal = unit(np.vstack((segment[:1], segment[:-1] + segment[1:], segment[-1:])))
-            left = unit(coarse * np.cos(angle) + normal * np.sin(angle))
-            right = unit(coarse * np.cos(angle) - normal * np.sin(angle))
-            ring = np.vstack((right, left[::-1]))
-            try:
-                band = polygon(ring)
-            except (ValueError, RuntimeError):
-                continue
-            if area_km2(band) > .5 * SPHERE_KM2:
-                band = polygon(ring[::-1])
+    if len(points) < 2:
+        return EMPTY
+    length = np.r_[0., np.cumsum(arc_km(points[:-1], points[1:]))]
+    for spacing in (2. * half_width_km, 4. * half_width_km):
+        marks = np.unique(np.r_[np.searchsorted(length, np.arange(0., length[-1], spacing)), len(points) - 1])
+        coarse = points[marks]
+        # Coincident points have no direction between them (and would give NaN normals).
+        coarse = coarse[np.r_[True, arc_km(coarse[:-1], coarse[1:]) > 1e-6]]
+        if len(coarse) < 2:
+            continue
+        segment = unit(np.cross(coarse[:-1], coarse[1:]))
+        normal = unit(np.vstack((segment[:1], segment[:-1] + segment[1:], segment[-1:])))
+        left = unit(coarse * np.cos(angle) + normal * np.sin(angle))
+        right = unit(coarse * np.cos(angle) - normal * np.sin(angle))
+        ring = np.vstack((right, left[::-1]))
+        try:
+            band = polygon_robust(ring)
+        except (ValueError, RuntimeError):
+            continue
+        if area_km2(band) > .5 * SPHERE_KM2:
+            band = spherely.difference(_full(), band)
+        if not is_empty(band):
             return band
+    # The coarsest polyline, a quadrilateral per segment.
+    marks = np.unique(np.r_[np.searchsorted(length, np.arange(0., length[-1], 4. * half_width_km)), len(points) - 1])
+    coarse = points[marks]
     pieces = []
-    for a, b in zip(points[:-1], points[1:]):
+    for a, b in zip(coarse[:-1], coarse[1:]):
         if float(arc_km(a, b)) < 1e-6:
             continue
         normal = unit(np.cross(a, b))
@@ -265,7 +276,7 @@ def loop_area_km2(loop) -> float:
     return float(2. * np.arctan2(numerator, denominator).sum()) * RADIUS_KM ** 2
 
 
-def tidy_ring(ring, tolerance=1e-10):
+def tidy_ring(ring, tolerance=1e-10, tooth_km2=0.):
     """A ring without near-duplicate vertices or zero-width spikes (A -> B -> A).
 
     Reading S2's shapes through longitude and latitude moves points by ~1e-16, leaving vertices
@@ -283,6 +294,12 @@ def tidy_ring(ring, tolerance=1e-10):
         w = np.roll(points, -1, axis=0) - points
         cosine = np.einsum('ij,ij->i', u, w) / (np.linalg.norm(u, axis=1) * np.linalg.norm(w, axis=1))
         spike = cosine < -1. + 1e-9  # the ring turns straight back here: a spike of no width
+        if tooth_km2 > 0.:
+            # A tooth: the ring turns back within TOOTH_COSINE (about 6 degrees) and the sliver it
+            # cuts off is below `tooth_km2` (the level of detail, when the caller asks for it).
+            # Boundaries grew combs of these, 1.2 km long and 30 m wide, that nothing else took out.
+            triangle = .5 * np.linalg.norm(np.cross(u, w), axis=1) * RADIUS_KM ** 2
+            spike |= (cosine < TOOTH_COSINE) & (triangle < tooth_km2)
         if not spike.any():
             break
         spike &= ~np.roll(spike, 1)  # one of two neighbouring spikes at a time
@@ -322,6 +339,7 @@ _EDGE = re.compile(r'(?:loop (\d+)\D*?)?edge (\d+)', re.IGNORECASE)
 
 
 def polygon_robust(ring, holes=(), attempts=24, minimum_km2=1e-6):
+    tooth = minimum_km2 if minimum_km2 >= DETAIL_KM2 else 0.
     """`polygon`, repaired when S2 rejects a ring (crossing or repeated edges).
 
     S2's own outputs are valid, but a ring read back and rotated can touch or cross itself: a strip
@@ -331,7 +349,7 @@ def polygon_robust(ring, holes=(), attempts=24, minimum_km2=1e-6):
     debris. Only when no crossing is named is the vertex at the offending edge dropped, which moves
     the outline by about the read-back error; callers check the area against S2's own.
     """
-    loops = [tidy_ring(ring)] + [tidy_ring(h) for h in holes]
+    loops = [tidy_ring(ring, tooth_km2=tooth)] + [tidy_ring(h, tooth_km2=tooth) for h in holes]
     loops = [loops[0]] + [h for h in loops[1:] if len(h) >= 3]
     if len(loops[0]) < 3:
         return EMPTY  # tidied away: a spike or a repeated point, nothing inside
@@ -420,7 +438,7 @@ def part(rings, minimum_km2=1e-6, whole_km2=None):
     if sum(abs(loop_area_km2(loop)) for loop in loops) < minimum_km2:
         return EMPTY, sum(abs(loop_area_km2(loop)) for loop in loops)
     try:
-        whole = polygon_robust(rings[0], [h for h in rings[1:] if simple_loops(h)])
+        whole = polygon_robust(rings[0], [h for h in rings[1:] if simple_loops(h)], minimum_km2=minimum_km2)
     except (ValueError, RuntimeError):
         whole = None
     if whole is not None and whole_km2 is not None and area_km2(whole) > .5 * SPHERE_KM2 > 1.5 * whole_km2:
@@ -453,7 +471,7 @@ def part(rings, minimum_km2=1e-6, whole_km2=None):
                 dropped += abs(loop_area_km2(loop))
                 continue
             try:
-                piece = polygon_robust(loop)
+                piece = polygon_robust(loop, minimum_km2=minimum_km2)
             except (ValueError, RuntimeError):
                 # Real area that S2 will not take: give up on rebuilding rather than lose it.
                 raise ValueError('A loop of %.3g km2 cannot be rebuilt.' % abs(loop_area_km2(loop)))
@@ -512,14 +530,36 @@ def clean(geography, minimum_km2=1e-6):
     return (union(*pieces) if pieces else EMPTY), dropped, True
 
 
-def rotate_geography(geography, matrix, tolerance=None):
-    """The same polygons rotated by `matrix` (rings keep their orientation)."""
+def weld(points, anchors):
+    """`points` with every one within SHARED_KM of an anchor replaced by that anchor, exactly.
+
+    A shape computed in one frame and rotated into another lands about 1e-16 off the vertices it
+    was built from. Two edges that close together and not identical cross back and forth, and
+    every operation between them leaves a slit or a tooth; welded onto the vertices already there,
+    the edges are the same edge and S2 treats them so.
+    """
+    from scipy.spatial import cKDTree
+    if anchors is None or not len(anchors) or not len(points):
+        return points
+    km, k = cKDTree(anchors).query(points, k=1, distance_upper_bound=SHARED_KM / RADIUS_KM)
+    hit = np.isfinite(km)
+    out = np.array(points, float)
+    out[hit] = anchors[k[hit]]
+    return out
+
+
+def rotate_geography(geography, matrix, tolerance=None, anchors=None):
+    """The same polygons rotated by `matrix` (rings keep their orientation).
+
+    With `anchors` (vertices in the target frame), rotated vertices within SHARED_KM of one are
+    welded onto it, so a shape built from a plate's own outline shares that outline exactly.
+    """
     pieces, dropped = [], 0.
     whole = area_km2(geography)
     if whole > SPHERE_KM2 - allowed_change(SPHERE_KM2, tolerance):
         return _full()  # the whole sphere (a plate that is all there is), which S2 writes as one point
     for rings in polygons(geography):
-        piece, lost = part([rotate(ring, matrix) for ring in rings], whole_km2=whole)
+        piece, lost = part([weld(rotate(ring, matrix), anchors) for ring in rings], whole_km2=whole)
         dropped += lost
         if not is_empty(piece):
             pieces.append(piece)
