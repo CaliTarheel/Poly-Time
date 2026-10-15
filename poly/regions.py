@@ -273,6 +273,8 @@ class RegionWorld:
             change = piece.area_km2() - area
             if change < 0.:
                 entry['lost']['sliver'] -= change
+                if piece.kind == 'continent':  # continent let go as debris still keeps its volume
+                    entry['thickened_km3'] += self._thicken(piece, -change, [c for c in self.crust if c.plate == piece.plate])
             elif change > 0.:
                 entry['gained']['junction'] += change
         self.crust = [c for c in self.crust if c.area_km2() >= TINY_KM2]
