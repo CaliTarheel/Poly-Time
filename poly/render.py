@@ -49,13 +49,17 @@ def draw(world, path, width=720, boundaries=True):
     picture = Image.fromarray(image.reshape(height, width, 3))
     if boundaries:
         pen = ImageDraw.Draw(picture)
-        for ident, section in world.network.sections.items():
-            plon, plat = sphere.to_lonlat(world.network.points(ident))
+        if hasattr(world, 'boundary_lines'):
+            lines = list(world.boundary_lines())
+        else:
+            lines = [(world.network.points(i), s.kind) for i, s in world.network.sections.items()]
+        for points, kind in lines:
+            plon, plat = sphere.to_lonlat(points)
             x = (plon + 180.) / 360. * width
             y = (90. - plat) / 180. * height
             for k in range(len(x) - 1):
                 if abs(x[k + 1] - x[k]) > width / 2:
                     continue  # crosses the map edge
-                pen.line([(x[k], y[k]), (x[k + 1], y[k + 1])], fill=COLOURS[section.kind], width=2)
+                pen.line([(x[k], y[k]), (x[k + 1], y[k + 1])], fill=COLOURS[kind], width=2)
     picture.save(path)
     return plate_of.reshape(height, width)

@@ -3,6 +3,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -45,6 +46,58 @@ class SphereTests(unittest.TestCase):
         self.assertEqual([len(loop) for loop in sphere.simple_loops(points)], [4])
         bow = sphere.from_lonlat([0., 2., 2., 1., 1., 3.], [0., 0., 1., 1., -1., -1.])
         self.assertEqual(len(_cut_loops(bow)), 4)
+
+    def test_a_hole_folded_over_itself_is_cut_out_once(self):
+        # Read back after a rotation, a hole can lap the same patch both ways round; it is still
+        # one hole, not a shell that the polygon is intersected with.
+        shell = sphere.from_lonlat([0., 30., 30., 0.], [0., 0., 30., 30.])
+        patch = sphere.from_lonlat([10., 12., 12., 10.], [10., 10., 12., 12.])
+        hole = np.vstack((patch, patch[:1], patch[::-1], patch[:1], patch[::-1]))
+        whole = sphere.area_km2(sphere.polygon(shell))
+        cut = sphere.area_km2(sphere.polygon(patch))
+        region, _ = sphere.part([shell, hole], whole_km2=whole - cut)
+        self.assertAlmostEqual(sphere.area_km2(region) / (whole - cut), 1., places=6)
+        # The same when S2 will not take the polygon whole and it is rebuilt loop by loop.
+        real = sphere.polygon_robust
+
+        def refuse_holes(ring, holes=(), attempts=24):
+            if len(holes):
+                raise ValueError('refused')
+            return real(ring, holes, attempts)
+        with mock.patch.object(sphere, 'polygon_robust', refuse_holes):
+            region, _ = sphere.part([shell, hole], whole_km2=whole - cut)
+        self.assertAlmostEqual(sphere.area_km2(region) / (whole - cut), 1., places=6)
+
+    def test_a_point_on_a_neighbours_edge_becomes_a_vertex_of_both(self):
+        # Two squares sharing the edge x = 10; the left one was cut at (10, 5), the right one not.
+        left = sphere.from_lonlat([0., 10., 10., 10., 0.], [0., 0., 5., 10., 10.])
+        right = sphere.from_lonlat([10., 20., 20., 10.], [0., 0., 10., 10.])
+        a, b = sphere.node_shared([left, right])
+        self.assertEqual((len(a), len(b)), (5, 5))
+        cut = sphere.from_lonlat(10., 5.)
+        self.assertLess(min(sphere.arc_km(b, cut[None])), 1e-6)
+        # A ring that comes back to within 0.1 m of itself (a pinch) keeps the two points apart.
+        pinch = sphere.from_lonlat([0., 10., 5., 10., 0., 5. + 1e-6], [0., 0., 5., 10., 10., 5.])
+        (kept,) = sphere.node_shared([pinch])
+        self.assertEqual(len(kept), 6)
+        self.assertGreater(sphere.arc_km(kept[2], kept[5]), 0.)
+
+    def test_simplifying_shared_rings_keeps_them_tiling_the_sphere(self):
+        # Two hemispheres meeting along the equator, drawn every 28 km with a 1 km zig-zag.
+        lon = np.arange(0., 360., .25)
+        lat = np.where(np.arange(len(lon)) % 2, .009, 0.)  # 0.009 degrees is 1 km
+        line = sphere.from_lonlat(lon, lat)
+        north, south = line, line[::-1]
+        rings, removed, _ = sphere.simplify_shared([north, south], area_km2=100.)
+        self.assertGreater(removed, len(line))  # most go from both rings
+        self.assertLess(len(rings[0]), len(line) // 2)
+        np.testing.assert_allclose(rings[0], rings[1][::-1])  # still the same edge, both ways round
+        self.assertTrue(all(sphere.arc_km(r, np.roll(r, -1, axis=0)).max() <= 150. for r in rings))
+        total = sum(sphere.area_km2(sphere.polygon(r)) for r in rings)
+        self.assertAlmostEqual(total / sphere.SPHERE_KM2, 1., places=9)
+        # Unshared, the same zig-zag stays: dropping a vertex there would open a gap or an overlap.
+        lone, _, _ = sphere.simplify_shared([north], area_km2=100.)
+        self.assertEqual(len(lone[0]), len(north))
 
 
 class LedgerTests(unittest.TestCase):

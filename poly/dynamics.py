@@ -65,13 +65,13 @@ class Balance:
     def solve(self, world) -> dict:
         """Rotation of every plate (rad/Myr) at which the torques balance; also stores the parts."""
         p = self.parameters
-        plates = world.network.plates()
+        plates = world.plates() if hasattr(world, 'segments') else world.network.plates()
         slot = {plate: k for k, plate in enumerate(plates)}
         size = 3 * len(plates)
         matrix = np.zeros((size, size))
         torque = np.zeros(size)
         # Basal drag: F = -c v over the area, v = w x r R, torque = R r x F = -c R^2 (I - r r^T) w.
-        regions = world.network.polygons()
+        regions = world.world_regions() if hasattr(world, 'world_regions') else world.network.polygons()
         drag = {}
         for plate, region in regions.items():
             spherely.prepare(region)
@@ -84,42 +84,49 @@ class Balance:
             drag[plate] = block
         # Boundaries, segment by segment.
         pulled = {}
-        for ident, s in world.network.sections.items():
-            points = world.network.points(ident)
-            a, b = points[:-1], points[1:]
+        for left_plate, right_plate, a, b, kind, overriding in _segments(world):
             mid = sphere.unit(a + b)
-            length = sphere.arc_km(a, b) * 1e3
-            tangent = sphere.unit(b - a)
-            toward_right = np.cross(tangent, mid)
-            normal_c, along_c = p.resistance[s.kind]
-            left, right = 3 * slot[s.left], 3 * slot[s.right]
-            for m, length_m, n, t in zip(mid, length, toward_right, tangent):
-                if length_m <= 0.:
-                    continue
-                # Relative velocity of right over left at m: (w_R - w_L) x m R. Resistance on the
-                # right plate F = -L (c_n n n^T + c_t t t^T) v, equal and opposite on the left.
-                g = length_m * (normal_c * np.outer(n, n) + along_c * np.outer(t, t))
-                cross = np.array([[0., -m[2], m[1]], [m[2], 0., -m[0]], [-m[1], m[0], 0.]])
-                # v = (w x m) R = -[m]x w R; torque from F at m: R m x F = R [m]x F.
-                block = R_M ** 2 * cross @ g @ cross.T
-                for i, j, sign in ((right, right, 1.), (left, left, 1.), (right, left, -1.), (left, right, -1.)):
-                    matrix[i:i + 3, j:j + 3] += sign * block
-                if s.kind == 'trench':
-                    down = s.right if s.overriding == s.left else s.left
-                    direction = -n if down == s.right else n  # towards the overriding plate
-                    force = p.slab_pull_n_per_m * length_m * direction
-                    k = 3 * slot[down]
-                    torque[k:k + 3] += R_M * np.cross(m, force)
-                    pulled[down] = pulled.get(down, 0.) + length_m / 1e3
-                elif s.kind == 'ridge':
-                    for plate, direction in ((s.right, n), (s.left, -n)):
-                        k = 3 * slot[plate]
-                        torque[k:k + 3] += R_M * np.cross(m, p.ridge_push_n_per_m * length_m * direction)
+            length_m = float(sphere.arc_km(a, b)) * 1e3
+            if length_m <= 0.:
+                continue
+            t_ = sphere.unit(b - a)
+            n = np.cross(t_, mid)
+            normal_c, along_c = p.resistance[kind]
+            left, right = 3 * slot[left_plate], 3 * slot[right_plate]
+            # Relative velocity of right over left at m: (w_R - w_L) x m R. Resistance on the right
+            # plate F = -L (c_n n n^T + c_t t t^T) v, equal and opposite on the left.
+            g = length_m * (normal_c * np.outer(n, n) + along_c * np.outer(t_, t_))
+            m = mid
+            cross = np.array([[0., -m[2], m[1]], [m[2], 0., -m[0]], [-m[1], m[0], 0.]])
+            block = R_M ** 2 * cross @ g @ cross.T
+            for i, j, sign in ((right, right, 1.), (left, left, 1.), (right, left, -1.), (left, right, -1.)):
+                matrix[i:i + 3, j:j + 3] += sign * block
+            if kind == 'trench':
+                down = right_plate if overriding == left_plate else left_plate
+                direction = -n if down == right_plate else n  # towards the overriding plate
+                k = 3 * slot[down]
+                torque[k:k + 3] += R_M * np.cross(m, p.slab_pull_n_per_m * length_m * direction)
+                pulled[down] = pulled.get(down, 0.) + length_m / 1e3
+            elif kind == 'ridge':
+                for plate, direction in ((right_plate, n), (left_plate, -n)):
+                    k = 3 * slot[plate]
+                    torque[k:k + 3] += R_M * np.cross(m, p.ridge_push_n_per_m * length_m * direction)
         omega = np.linalg.solve(matrix, torque)  # rad/s
         rotations = {plate: omega[3 * slot[plate]:3 * slot[plate] + 3] * SECONDS_PER_MYR for plate in plates}
         self.last = dict(pulled_km=pulled, speed_km_myr={
             plate: float(np.linalg.norm(w)) * sphere.RADIUS_KM for plate, w in rotations.items()})
         return rotations
+
+
+def _segments(world):
+    """(left, right, a, b, kind, overriding) for every boundary segment of either kind of world."""
+    if hasattr(world, 'segments'):
+        yield from world.segments()
+        return
+    for ident, s in world.network.sections.items():
+        points = world.network.points(ident)
+        for a, b in zip(points[:-1], points[1:]):
+            yield s.left, s.right, a, b, s.kind, s.overriding
 
 
 def run(world, steps, parameters=None, dt=1., report=None):
