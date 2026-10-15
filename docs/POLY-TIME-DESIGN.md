@@ -115,11 +115,18 @@ equals the area destroyed, term by term.
 
 ## Collisions, sutures and rifts (phase 2, continued)
 
-- **Continent keeps its volume.** Continental crust that loses area anywhere but down a trench
-  (collision, compression, slivers) thickens instead: each piece carries a mean thickness (35 km to
-  start), and the volume taken is added back to the piece, or to its plate's largest other continental
-  piece if it was taken whole. The ledger records the volume thickened and the total continental volume
-  every step. (One thickness per piece until continents carry a mesh.)
+- **Continent keeps its volume, on a mesh.** Continental crust that loses area anywhere but down a
+  trench (collision, compression, slivers) thickens instead. Each continental piece carries its
+  thickness as a field on a triangle mesh in the plate's frame (`poly/mesh.py`): the polygon's outline
+  vertices plus interior nodes about 200 km apart, triangulated in the gnomonic projection about the
+  piece's centre, 35 km everywhere to start. The piece's volume is the field integrated over the mesh,
+  and its mean thickness is what the ledger sees. When the polygon changes, the mesh is rebuilt on it
+  with the old field carried over, and the crust the new mesh is short of is put back onto the nodes
+  nearest the ground that was lost (within about 300 km), so a collision raises an orogen along the
+  collision, not a uniformly thicker continent. A rift gives each part the field as it is there; a
+  suture rotates the mesh into the new frame; a piece consumed whole passes its volume to its plate's
+  largest continent near where it was. The ledger records the volume thickened and the total
+  continental volume every step. Relief, erosion and arcs are processes on this mesh, to come.
 - **Suture.** A collision records how far it has closed; at 100 km the two plates weld. The smaller
   plate's crust passes into the larger's frame unchanged, the boundaries between them go, and its other
   boundaries become the larger plate's with their state. The suture line is kept, in the welded plate's
@@ -159,5 +166,5 @@ matching, initiation and rifting (about 70 of the 182 modules a step uses touch 
    consumption under prescribed rotations, closed ledger, tests, map rendering.
 2. **Topology events**: initiation, collision and suture, rifting and splitting, triple junctions.
 3. **Dynamics**: the force balance on polygons and boundary lines.
-4. **Crust**: continental TIN and its processes; isochron ocean properties.
+4. **Crust**: continental mesh (thickness: done) and its processes; isochron ocean properties.
 5. **Runs**: frames, viewer, GPlates export, comparison with Super-Light-Time runs.
