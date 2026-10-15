@@ -160,7 +160,48 @@ def polygons(geography):
     Rings keep the orientation S2 reports (shells counter-clockwise, holes clockwise), so
     `polygon(shell, holes)` rebuilds the same region.
     """
-    return _polygons_from_wkt(spherely.to_wkt(geography, precision=17).strip())
+    return _polygons_from_wkb(spherely.to_wkb(geography))
+
+
+def _polygons_from_wkb(data):
+    """The polygons in a WKB geometry (points and lines left out), read with numpy: exact and fast."""
+    import struct
+
+    result = []
+
+    def read(pos):
+        endian = '<' if data[pos] == 1 else '>'
+        (kind,) = struct.unpack_from(endian + 'I', data, pos + 1)
+        pos += 5
+        dims = 2 + (kind // 1000 in (1, 2)) + 2 * (kind // 1000 == 3)
+        kind %= 1000
+        if kind == 1:
+            return pos + 8 * dims
+        (count,) = struct.unpack_from(endian + 'I', data, pos)
+        pos += 4
+        if kind == 2:
+            return pos + 8 * dims * count
+        if kind == 3:
+            rings = []
+            for _ in range(count):
+                (n,) = struct.unpack_from(endian + 'I', data, pos)
+                pos += 4
+                values = np.frombuffer(data, endian + 'f8', n * dims, pos).reshape(n, dims)
+                pos += 8 * dims * n
+                points = from_lonlat(values[:, 0], values[:, 1])
+                if len(points) > 1 and np.allclose(points[0], points[-1], atol=1e-15):
+                    points = points[:-1]
+                rings.append(points)
+            if rings and len(rings[0]):
+                result.append(rings)
+            return pos
+        for _ in range(count):  # multi-geometries and collections
+            pos = read(pos)
+        return pos
+
+    if data:
+        read(0)
+    return result
 
 
 def _members(text):
@@ -426,7 +467,7 @@ def clean(geography, minimum_km2=1e-6):
     Returns (shape, debris area dropped, whether it was rebuilt). If the rebuilt area differs from
     S2's own area of the input, the input is returned unchanged, so cleaning can never lose crust.
     """
-    if not spherely.to_wkt(geography, precision=1).startswith('GEOMETRYCOLLECTION'):
+    if spherely.get_type_id(geography) != spherely.GeographyType.GEOMETRYCOLLECTION.value:
         # Polygons only already; rebuild only if some hole is a slit (encloses nothing), which
         # otherwise rides along and multiplies with every later operation.
         slit = any(abs(loop_area_km2(hole)) < SLIT_KM2 for rings in polygons(geography) for hole in rings[1:])
