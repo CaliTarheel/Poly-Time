@@ -115,7 +115,9 @@ class Rifting:
     # Strength of the lithosphere against being pulled apart, N per m of cut. Continental
     # lithosphere is the weaker, so continents are where plates rift.
     ocean_strength_n_per_m: float = 1.6e13
-    continent_strength_n_per_m: float = 1e12
+    # On the Earth-like world (30% continent) 1e12 gave a continental rift every 5 Myr, two to
+    # four times Earth's rate; 3e12 keeps the strongest-pulled ones and loses the marginal ones.
+    continent_strength_n_per_m: float = 3e12
     suture_strength_n_per_m: float = 3e11   # an old suture is the weakest lithosphere there is
     suture_reach_km: float = 150.           # a cut this close to a suture line follows it
     minimum_plate_km2: float = 20e6   # only plates this large are tested

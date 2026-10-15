@@ -128,7 +128,7 @@ equals the area destroyed, term by term.
   through each large plate's centre and through each of its continents are tested, twelve directions
   each. The plate moves rigidly, so each side of a cut needs the other to carry it: the external torque
   on one side (drivers, neighbours' resistance, basal drag) fitted as an even pull across the cut is the
-  cut's tension. The strength along the cut is the mean of ocean (1.6e13 N/m) and continent (1e12 N/m)
+  cut's tension. The strength along the cut is the mean of ocean (1.6e13 N/m) and continent (3e12 N/m)
   by length, so continents are where plates break; a stretch of cut within 150 km of an old suture is
   weaker still (3e11 N/m), and the great circle fitted to each suture is tried as a cut of its own, so
   plates break again where they welded. The cut whose tension most exceeds its strength splits the
