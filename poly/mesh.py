@@ -20,6 +20,8 @@ from scipy.spatial import Delaunay, cKDTree
 from poly import sphere
 
 SPACING_KM = 200.   # interior node spacing
+REFERENCE_KM = 35.  # thickness of continent at sea level
+ISOSTASY = .15      # elevation per km of extra thickness: (rho_mantle - rho_crust) / rho_mantle
 REACH_KM = 300.     # shortening thickens the crust within about this of where it happened
 MINIMUM_KM2 = 2e4   # a piece smaller than this (a 140 km disc) keeps one thickness, no mesh
 LOST_KM = 1.        # a node this far outside the piece's new outline was on the ground lost
@@ -100,6 +102,11 @@ class ContinentMesh:
         if covered <= 0.:
             return 0.
         return float((self.node_areas_km2() * self.thickness).sum()) * polygon_km2 / covered
+
+    def elevation_km(self, thickness=None):
+        """Airy isostatic elevation (km above sea level) of crust `thickness` km thick."""
+        thickness = self.thickness if thickness is None else np.asarray(thickness, float)
+        return ISOSTASY * (thickness - REFERENCE_KM)
 
     def sample(self, points):
         """Thickness at `points` (plate frame): inverse-distance over the three nearest nodes."""
