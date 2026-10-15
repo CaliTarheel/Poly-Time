@@ -289,6 +289,7 @@ class RegionWorld:
             self.simplified_count = sum(len(r) for c in self.crust for poly in sphere.polygons(c.shape) for r in poly)
         self.regions = self._from_crust()
         entry['events'] += self._regroup(entry)  # keeps regions and crust together as it moves pieces
+        rotations_per_myr = self._complete(rotations_per_myr)  # a plate that came apart moves with its parent
         self.time_myr += dt
         self.boundaries = self._derive(old_index, rotations_per_myr)
         entry['events'] += self._evolve(rotations_per_myr, dt, entry)
