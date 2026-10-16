@@ -42,6 +42,7 @@ LOSSES = ('subducted', 'continent_at_trench', 'collision', 'compression', 'slive
 INHERIT_KM = 300.   # a boundary segment takes the type of the nearest old one of the same plates within this
 PROBE_KM = .5       # how far outside a plate's outline its neighbour is looked for
 MARGIN = .2         # hysteresis around the transform threshold when re-typing
+MIN_RUN_KM = 50.    # a run of one boundary kind shorter than this takes its longer neighbour's kind
 TINY_KM2 = 1e-6     # areas below this are numerical
 CHECK_TOLERANCE = 1e-4  # of the sphere's area, per step (0.01%)
 CRUMB_KM2 = 100.        # detached bits of a plate smaller than this are left with it
@@ -1005,7 +1006,9 @@ class RegionWorld:
                     continue
                 threshold = TRANSFORM_RATIO * (1. + MARGIN if kind == 'transform' else 1. - MARGIN)
                 b.kinds[k] = ('ridge' if opening[k] > 0. else 'converging') if ratio[k] > threshold else 'transform'
-            b.kinds = [str(k) for k in _smooth(b.kinds)]
+            # Smoothed by length, not by count: along a slow boundary the segments are short and
+            # their directions noisy, and kinds that flipped every few metres made every flip a zone.
+            b.kinds = _smooth_runs(b.kinds, sphere.arc_km(b.points[:-1], b.points[1:]), MIN_RUN_KM)
             _fill_overriding(b)
             for k in range(len(b.kinds)):
                 if b.kinds[k] in ('converging', 'collision'):
@@ -1471,6 +1474,46 @@ def _split_by_side(boundaries, plate, new, pole):
             result += _relabel([part], into)
             start = k
     return result
+
+
+def _smooth_runs(kinds, lengths_km, minimum_km):
+    """Runs of one kind shorter than `minimum_km` take the kind of their longer neighbouring run.
+
+    Sweeps over the runs until none is short (or one is left); each sweep merges every short run
+    into its longer neighbour, so the work is a few passes however many runs there are.
+    """
+    kinds = [str(k) for k in kinds]
+    lengths_km = np.asarray(lengths_km, float)
+    if len(kinds) < 2:
+        return kinds
+    runs = []
+    start = 0
+    for i in range(1, len(kinds) + 1):
+        if i == len(kinds) or kinds[i] != kinds[start]:
+            runs.append([start, i, kinds[start], float(lengths_km[start:i].sum())])
+            start = i
+    for _ in range(64):
+        if len(runs) < 2 or min(r[3] for r in runs) >= minimum_km:
+            break
+        for k, run in enumerate(runs):
+            if run[3] >= minimum_km:
+                continue
+            before = runs[k - 1] if k > 0 else None
+            after = runs[k + 1] if k + 1 < len(runs) else None
+            pick = max((x for x in (before, after) if x is not None), key=lambda x: x[3])
+            run[2] = pick[2]
+        merged = [runs[0]]
+        for run in runs[1:]:
+            if run[2] == merged[-1][2]:
+                merged[-1][1] = run[1]
+                merged[-1][3] += run[3]
+            else:
+                merged.append(run)
+        runs = merged
+    out = []
+    for s, e, kind, _ in runs:
+        out += [kind] * (e - s)
+    return out
 
 
 def _fill_overriding(b):
