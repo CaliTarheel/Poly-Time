@@ -134,6 +134,9 @@ class RegionWorld:
     # Where plates welded: each a dict(plate, points, time_myr) with the suture line in that plate's
     # frame, carried with the plate like its crust. Sutures are where continents break again.
     sutures: list = field(default_factory=list)
+    # Pending root/island magma whose boundary retired. Kept explicitly, not silently discarded
+    # or emplaced by an invented geological rule; this is a cumulative inventory, in km3.
+    retired_arc_km3: object = field(default_factory=lambda: np.zeros(2))
 
     # ------------------------------------------------------------------ views
     def plates(self) -> list:
@@ -222,6 +225,8 @@ class RegionWorld:
         rotations_per_myr = self._complete(rotations_per_myr)
         self._mesh_continents()
         crust_before = sum(c.area_km2() for c in self.crust)
+        self.retired_arc_km3 = np.asarray(getattr(self, 'retired_arc_km3', np.zeros(2))).copy()
+        retired_before = self.retired_arc_km3.copy()
         old_regions = dict(self.regions)
         old_index = self._index(rotations_per_myr=rotations_per_myr, dt=dt)
         motion = {p: sphere.rotation(np.asarray(rotations_per_myr[p], float) * dt) for p in self.plates()}
@@ -340,11 +345,12 @@ class RegionWorld:
             self.simplified_myr = self.time_myr + dt
             self.simplified_count = sum(len(r) for c in self.crust for poly in sphere.polygons(c.shape) for r in poly)
         self.regions = self._from_crust()
-        entry['events'] += self._regroup(entry)  # keeps regions and crust together as it moves pieces
+        entry['events'] += self._regroup(entry, old_index)  # keeps regions and crust together as it moves pieces
         rotations_per_myr = self._complete(rotations_per_myr)  # a plate that came apart moves with its parent
         self.time_myr += dt
         self.boundaries = self._derive(old_index, rotations_per_myr)
         entry['events'] += self._evolve(rotations_per_myr, dt, entry)
+        entry['retired_arc_km3'] = (self.retired_arc_km3 - retired_before).tolist()
         entry['plates_km2'] = {p: sphere.area_km2(r) for p, r in self.regions.items()}
         crust_after = sum(c.area_km2() for c in self.crust)
         entry['rebuild_drift_km2'] = crust_after - crust_before - sum(entry['gained'].values()) + sum(entry['lost'].values())
@@ -414,8 +420,11 @@ class RegionWorld:
     def _complete(self, rotations_per_myr):
         rotations_per_myr = dict(rotations_per_myr)
         for plate in self.plates():
-            ancestor = plate
+            ancestor, seen = plate, set()
             while ancestor not in rotations_per_myr and ancestor in self.parents:
+                if ancestor in seen:
+                    raise ValueError('Cyclic motion ancestry for plate %d (at plate %d).' % (plate, ancestor))
+                seen.add(ancestor)
                 ancestor = self.parents[ancestor]
             rotations_per_myr.setdefault(plate, rotations_per_myr.get(ancestor, np.zeros(3)))
         return rotations_per_myr
@@ -674,7 +683,7 @@ class RegionWorld:
     def _continent_km3(self) -> float:
         return sum(c.volume_km3() for c in self.crust if c.kind == 'continent')
 
-    def _regroup(self, entry=None) -> list:
+    def _regroup(self, entry=None, boundary_index=None) -> list:
         """Plates that came apart become separate plates; slivers and vanished plates go to neighbours."""
         events = []
         for plate in list(self.plates()):
@@ -696,7 +705,7 @@ class RegionWorld:
                 into = self._main_neighbours(crumbs, plate)
                 for other in sorted(set(i for i in into if i is not None)):
                     batch = [g for g, i in zip(crumbs, into) if i == other]
-                    self._give(plate, sphere.union(*batch), other, entry)
+                    self._give(plate, sphere.union(*batch), other, entry, boundary_index)
                     events.append(dict(kind='crumbs_given', plate=plate, into=other, count=len(batch),
                                        area_km2=sum(sphere.area_km2(g) for g in batch)))
             for piece in pieces:
@@ -705,32 +714,39 @@ class RegionWorld:
                     self.frames[new] = self.frame(plate).copy()
                     self.parents[new] = plate
                     self.names[new] = '%s (part)' % self.names.get(plate, 'Plate %d' % plate)
-                    self._give(plate, piece, new)
+                    self._give(plate, piece, new, boundary_index=boundary_index)
                     events.append(dict(kind='plate_split', plate=plate, new=new, area_km2=sphere.area_km2(piece)))
                 else:
                     into = self._main_neighbour(piece, plate)
                     if into is None:
                         continue
-                    self._give(plate, piece, into, entry)
+                    self._give(plate, piece, into, entry, boundary_index)
                     events.append(dict(kind='absorbed', plate=plate, into=into, area_km2=sphere.area_km2(piece)))
             if not keep and plate in self.regions and sphere.area_km2(self.regions[plate]) < MINIMUM_PLATE_KM2:
                 rest = self.regions[plate]
                 if sphere.area_km2(rest) >= TINY_KM2:
                     into = self._main_neighbour(rest, plate)
                     if into is not None:
-                        self._give(plate, rest, into, entry)
+                        self._give(plate, rest, into, entry, boundary_index)
                 if sphere.area_km2(self.regions.get(plate, sphere.EMPTY)) < TINY_KM2:
                     self.regions.pop(plate, None)
                     self.crust = [c for c in self.crust if c.plate != plate]
                     events.append(dict(kind='plate_gone', plate=plate))
         return events
 
-    def _give(self, plate, piece, to, entry=None):
+    def _give(self, plate, piece, to, entry=None, boundary_index=None):
         """Move the world-frame region `piece` (and the crust in it) from `plate` to `to`.
 
         Where `to` already has crust (the plates overlapped there by rounding), `plate`'s copy is
         destroyed and booked as a sliver, so no plate holds the same ground twice.
         """
+        from poly.transfer import transfer_sutures
+        remaining = sphere.difference(self.regions[plate], piece)
+        self.sutures = transfer_sutures(getattr(self, 'sutures', []), plate, to, piece,
+                                        self.frame(plate), self.frame(to),
+                                        whole=sphere.area_km2(remaining) < TINY_KM2)
+        if boundary_index is not None:
+            self._transfer_index(boundary_index, plate, to, piece, remaining)
         doubled = sphere.intersection(piece, self.regions.get(to, sphere.EMPTY))
         if sphere.area_km2(doubled) >= TINY_KM2:
             local = sphere.rotate_geography(doubled, self.frame(plate).T)
@@ -822,14 +838,105 @@ class RegionWorld:
             if len(b.points) < 2:
                 continue
             mids = b.mids()
+            edges = np.stack((b.points[:-1], b.points[1:]), axis=1)
             if rotations_per_myr is not None and dt:
                 mean = .5 * (np.asarray(rotations_per_myr[b.left], float) + np.asarray(rotations_per_myr[b.right], float)) * dt
                 mids = sphere.rotate(mids, sphere.rotation(mean))
+                edges = sphere.rotate(edges, sphere.rotation(mean))
             idents = b.idents if getattr(b, 'idents', None) is not None else self._fresh(len(b.kinds))
             arcs = b.arcs()
             index.setdefault((b.left, b.right), []).append(
-                (mids, list(b.kinds), list(b.overriding), np.asarray(b.closed_km, float), np.asarray(idents), arcs))
+                (mids, list(b.kinds), list(b.overriding), np.asarray(b.closed_km, float), np.asarray(idents), arcs.copy(), edges))
         return index
+
+    def _retire_arcs(self, amount):
+        """Keep unassigned pending magma explicitly, without assuming where it is emplaced."""
+        self.retired_arc_km3 = np.asarray(getattr(self, 'retired_arc_km3', np.zeros(2))) + amount
+
+    def _transfer_index(self, index, plate, to, piece, remaining):
+        """Relabel the old segments adjacent to an ownership transfer, in place.
+
+        The index has already been carried to the current world frame. A segment belongs to the
+        transferred component when it is nearer that component than the source's remaining ground.
+        This also works when a trench's half-stage index is slightly off its new outline. Internal
+        boundaries retire; unrelated contacts of the same plates keep their state.
+        """
+        whole = sphere.area_km2(remaining) < TINY_KM2
+        result = {}
+        for pair, candidates in index.items():
+            if plate not in pair:
+                result.setdefault(pair, []).extend(candidates)
+                continue
+            for mids, kinds, over, closed, idents, arcs, edges in candidates:
+                if whole:
+                    given = np.ones(len(mids), bool)
+                else:
+                    lon, lat = sphere.to_lonlat(mids)
+                    where = spherely.points(lon, lat)
+                    given = np.asarray(spherely.distance(where, piece)) <= np.asarray(spherely.distance(where, remaining)) + 1e-6
+                for moves, mask in ((False, ~given), (True, given)):
+                    if not mask.any():
+                        continue
+                    into = {plate: to} if moves else {}
+                    left, right = (into.get(p, p) for p in pair)
+                    if left == right:
+                        self._retire_arcs(arcs[mask].sum(axis=0))
+                        continue
+                    selected = np.flatnonzero(mask)
+                    new_edges = edges[mask] if left < right else edges[mask, ::-1]
+                    new_pair = tuple(sorted((left, right)))
+                    result.setdefault(new_pair, []).append((
+                        mids[mask], [kinds[k] for k in selected],
+                        [into.get(over[k], over[k]) for k in selected],
+                        closed[mask], idents[mask], arcs[mask], new_edges))
+        index.clear()
+        index.update(result)
+
+    def _remap_arcs(self, index, boundaries):
+        """Conserve pending magma across segment subdivision, coarsening and retirement.
+
+        Categorical state is inherited separately. Each old inventory is shared by the lengths of
+        nearby new segments for which its old segment is nearest. On coarsening, an old segment with
+        no such descendant gives its bank to the nearest surviving segment. No successor within
+        INHERIT_KM means explicit retirement. This is a local geometric remap, not magma production.
+        """
+        from poly.transfer import segment_distances
+        for pair, candidates in index.items():
+            new = [b for b in boundaries if (b.left, b.right) == pair and len(b.kinds)]
+            amounts = np.concatenate([c[5] for c in candidates])
+            if not np.any(amounts):
+                continue
+            if not new:
+                self._retire_arcs(amounts.sum(axis=0))
+                continue
+            old_mids = np.concatenate([c[0] for c in candidates])
+            old_edges = np.concatenate([c[6] for c in candidates])
+            mids = np.concatenate([b.mids() for b in new])
+            edges = np.concatenate([np.stack((b.points[:-1], b.points[1:]), axis=1) for b in new])
+            lengths = sphere.arc_km(edges[:, 0], edges[:, 1])
+            distance = segment_distances(mids, old_edges)
+            nearest = np.argmin(distance, axis=1)
+            near = distance[np.arange(len(mids)), nearest] <= INHERIT_KM
+            fallback = segment_distances(old_mids, edges)
+            assigned = np.zeros((len(mids), 2))
+            for k, amount in enumerate(amounts):
+                if not np.any(amount):
+                    continue
+                children = np.flatnonzero((nearest == k) & near & (lengths > 0.))
+                if len(children):
+                    weights = lengths[children] / lengths[children].sum()
+                    assigned[children] += weights[:, None] * amount
+                else:
+                    child = int(np.argmin(fallback[k]))
+                    if fallback[k, child] <= INHERIT_KM:
+                        assigned[child] += amount
+                    else:
+                        self._retire_arcs(amount)
+            start = 0
+            for b in new:
+                stop = start + len(b.kinds)
+                b.arc_km3 = assigned[start:stop].copy()
+                start = stop
 
     def _split_overlap(self, local, kind, over, p, q, stage, lost):
         if kind == 'trench' and over in (p, q):
@@ -915,12 +1022,11 @@ class RegionWorld:
         fresh = iter(self._fresh(int((choice < 0).sum())))
         for k in range(n):
             if choice[k] >= 0:
-                _, kinds, over, closed, old_idents, arcs = candidates[choice[k]]
+                _, kinds, over, closed, old_idents, arcs, _ = candidates[choice[k]]
                 j = where[k]
                 b.kinds.append(kinds[j])
                 b.overriding.append(over[j])
                 b.closed_km[k] = closed[j]
-                b.arc_km3[k] = arcs[j]
                 idents[k] = old_idents[j]
             else:
                 b.kinds.append(_kind_from_motion(mids[k], pair, rotations_per_myr))
@@ -939,6 +1045,7 @@ class RegionWorld:
             for rings in sphere.polygons(self.regions[p]):
                 for ring in rings:
                     boundaries += self._trace(p, ring, plates, old_index, rotations_per_myr)
+        self._remap_arcs(old_index, boundaries)
         return boundaries
 
     def _trace(self, plate, ring, plates, old_index, rotations_per_myr) -> list:
@@ -1258,9 +1365,6 @@ class RegionWorld:
         self.names[new] = '%s (rift)' % self.names.get(plate, 'Plate %d' % plate)
         area = sphere.area_km2(piece)
         self._give(plate, piece, new)
-        for s in getattr(self, 'sutures', []):
-            if s['plate'] == plate and np.mean(sphere.rotate(s['points'], self.frame(plate)) @ pole > 0.) > .5:
-                s['plate'] = new  # same frame as the parent for now
         self.boundaries = self._derive(self._index(_split_by_side(self.boundaries, plate, new, pole)), {})
         return dict(kind='rift', plate=plate, new=new, area_km2=area, length_km=cut.length_km,
                     tension_n_per_m=cut.tension_n_per_m, strength_n_per_m=cut.strength_n_per_m,
@@ -1286,20 +1390,29 @@ class RegionWorld:
                 sutures = getattr(self, 'sutures', [])
                 sutures.append(dict(plate=keep, points=sphere.rotate(b.points[lo:hi + 1], self.frame(keep).T),
                                     time_myr=self.time_myr))
-                carry = self.frame(keep).T @ self.frame(gone)
-                for s in sutures:
-                    if s['plate'] == gone:
-                        s['plate'], s['points'] = keep, sphere.rotate(s['points'], carry)
                 self.sutures = sutures
                 self._give(gone, self.regions[gone], keep)
                 self.regions.pop(gone, None)
                 self.crust = [c for c in self.crust if c.plate != gone]
-                self.parents[gone] = keep
+                # A rift child can grow larger than its parent, then weld the parent back in.
+                # Keep its original motion ancestry in that case: redirecting the ancestor back
+                # to its descendant would make a cycle and break prescribed-motion fallback.
+                ancestor, seen = keep, set()
+                while ancestor in self.parents and ancestor != gone:
+                    if ancestor in seen:
+                        raise ValueError('Cyclic motion ancestry while welding plate %d.' % gone)
+                    seen.add(ancestor)
+                    ancestor = self.parents[ancestor]
+                if ancestor != gone:
+                    self.parents[gone] = keep
                 into = {p: (keep if q == gone else q) for p, q in into.items()}
                 into[gone] = keep
                 events.append(dict(kind='suture', plates=(b.left, b.right), into=keep, gone=gone,
                                    area_km2=area, closed_km=closed))
         if into:
+            for b in self.boundaries:
+                if into.get(b.left, b.left) == into.get(b.right, b.right):
+                    self._retire_arcs(b.arcs().sum(axis=0))
             self.boundaries = self._derive(self._index(_relabel(self.boundaries, into)), rotations_per_myr)
         return events
 
