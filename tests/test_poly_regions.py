@@ -283,6 +283,61 @@ class RegionStepTests(unittest.TestCase):
         self.assertAlmostEqual(world.areas()['continent'] + lost - made, continent, delta=1e-4 * continent + 1.)
 
 
+class HotspotTests(unittest.TestCase):
+    def test_a_plume_under_moving_ocean_leaves_a_plateau_and_a_chain_of_islands(self):
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        world.hotspots, world.hotspot_rng = [], np.random.default_rng(1)
+        # One strong plume under the cap, well inside it; the rest of the quota is switched off.
+        world.hotspots.append(dict(point=sphere.from_lonlat(0., 10.), born_myr=0., dies_myr=1e9,
+                                   strength_km3_per_myr=regions.HOTSPOT_STRONG_KM3_PER_MYR, bank_km3=0., head_km3=regions.LIP_KM3))
+        with mock.patch.object(regions, 'HOTSPOT_COUNT', 1):
+            volume = world._continent_km3()
+            events = []
+            for _ in range(6):
+                entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
+                assert_checks(self, entry)
+                events += entry['events']
+        lips = [e for e in events if e['kind'] == 'lip']
+        self.assertEqual(len(lips), 1)
+        self.assertEqual(lips[0]['on'], 'ocean')
+        self.assertGreater(lips[0]['area_km2'], 1e5)
+        magma = sum(e['hotspot_km3'] for e in world.ledger)
+        self.assertAlmostEqual(world._continent_km3() / (volume + magma), 1., delta=1e-6)
+        self.assertEqual(sum(e['gained']['hotspot'] for e in world.ledger), sum(e['lost']['hotspot'] for e in world.ledger))
+        made = [c for c in world.crust if c.kind == 'continent' and c.plate == 1]
+        self.assertTrue(made)
+        # A strong plume under a plate moving 40 km/Myr leaves a ridge welded to its plateau, carried
+        # east: a track several degrees long, not a heap.
+        verts = np.vstack([sphere.rotate(r, world.frame(1)) for c in made for poly in sphere.polygons(c.shape) for r in poly])
+        lon = sphere.to_lonlat(verts)[0]
+        self.assertGreater(lon.max() - lon.min(), 3.)
+        self.assertGreater(lon.max(), 2.5)  # the plateau's centre has moved well east of the plume
+        self.assertTrue(world.lip_points())
+
+    def test_a_plume_under_a_continent_thickens_it_where_it_sits(self):
+        world = regions.from_network(cap_world(cap_omega=np.zeros(3))[0])
+        continent = sphere.polygon(disc((0., 0.), 10.))
+        for piece in world.crust:
+            if piece.plate == 1:
+                piece.shape = sphere.difference(piece.shape, continent)
+        world.crust.append(Crust(1, 'continent', continent))
+        world.hotspots, world.hotspot_rng = [], np.random.default_rng(1)
+        world.hotspots.append(dict(point=sphere.from_lonlat(5., 0.), born_myr=0., dies_myr=1e9,
+                                   strength_km3_per_myr=regions.HOTSPOT_STRONG_KM3_PER_MYR, bank_km3=0., head_km3=regions.LIP_KM3))
+        with mock.patch.object(regions, 'HOTSPOT_COUNT', 1), mock.patch.object(regions, 'ARC_KM3_PER_KM_MYR', 0.):
+            volume = world._continent_km3()
+            for _ in range(3):
+                entry = world.step({1: np.zeros(3), 2: np.zeros(3)}, 1.)
+                assert_checks(self, entry)
+        magma = sum(e['hotspot_km3'] for e in world.ledger)
+        self.assertGreater(magma, regions.LIP_KM3)
+        self.assertAlmostEqual(world._continent_km3() / (volume + magma), 1., delta=1e-6)
+        (piece,) = [c for c in world.crust if c.kind == 'continent' and getattr(c, 'mesh', None) is not None]
+        lon = sphere.to_lonlat(sphere.rotate(piece.mesh.nodes, world.frame(1)))[0]
+        east, west = lon > 2.5, lon < -2.5
+        self.assertGreater(piece.mesh.thickness[east].mean(), piece.mesh.thickness[west].mean() + .5)
+
+
 class RollbackTests(unittest.TestCase):
     def test_a_retreating_trench_sheds_a_forearc_that_opens_a_back_arc(self):
         # The cap goes down under the stationary world plate; its slab is old enough to retreat.
@@ -317,6 +372,26 @@ class RollbackTests(unittest.TestCase):
         self.assertAlmostEqual(sphere.area_km2(world.regions[forearc]) / area_before, 1., delta=.25)
         self.assertTrue(any(b.left == forearc or b.right == forearc for b in world.boundaries
                             if (b.left, b.right) in ((2, forearc), (forearc, 2))))
+
+
+    def test_a_forearc_welds_back_to_its_parent_when_its_back_arc_has_had_its_time(self):
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        for c in world.crust:
+            if c.plate == 1 and c.kind == 'ocean':
+                c.born_myr = -100.
+        rotations = {1: EAST, 2: np.zeros(3)}
+        world.step(rotations, 1.)
+        (shed,) = world.shed_forearcs(rotations)
+        forearc = shed['new']
+        plates = len(world.plates())
+        with mock.patch.object(regions, 'BACKARC_LIFE_MYR', 0.):
+            events = world.shed_forearcs(world.prescribe({1: EAST, 2: np.zeros(3), forearc: np.zeros(3)}))
+        self.assertEqual([e['kind'] for e in events], ['forearc_welded'])
+        self.assertEqual(events[0]['into'], 2)
+        self.assertNotIn(forearc, world.plates())
+        self.assertEqual(len(world.plates()), plates - 1)
+        self.assertNotIn(forearc, world.forearcs)
+        self.assertAlmostEqual(sum(sphere.area_km2(g) for g in world.regions.values()) / sphere.SPHERE_KM2, 1., delta=1e-6)
 
 
 class RegionDynamicsTests(unittest.TestCase):

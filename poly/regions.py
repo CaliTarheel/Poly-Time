@@ -36,9 +36,9 @@ from poly.topology import segment_motion
 from poly.world import (AGE_BAND_MYR, COLLISION_KM2, INITIATION_KM, MINIMUM_PLATE_KM2, SAMPLE_KM, TOLERANCE,
                         Crust, _merge_bands)
 
-GAINS = ('ridge', 'trench_opening', 'sliver', 'junction', 'escape', 'arc', 'accreted')
+GAINS = ('ridge', 'trench_opening', 'sliver', 'junction', 'escape', 'arc', 'accreted', 'hotspot')
 LOSSES = ('subducted', 'continent_at_trench', 'collision', 'compression', 'sliver', 'junction', 'escape', 'arc',
-          'accreted', 'overridden')
+          'accreted', 'overridden', 'hotspot')
 INHERIT_KM = 300.   # a boundary segment takes the type of the nearest old one of the same plates within this
 PROBE_KM = .5       # how far outside a plate's outline its neighbour is looked for
 MARGIN = .2         # hysteresis around the transform threshold when re-typing
@@ -100,6 +100,27 @@ ROLLBACK_MIN_RUN_KM = 1000.
 FOREARC_MAX_RUN_KM = 3000.
 ROLLBACK_MARGIN_KM_MYR = 10.
 FOREARC_MIN_KM2 = 1e4
+BACKARC_LIFE_MYR = 25.  # a back-arc opens this long, then the forearc welds back to its parent (Lau after South Fiji)
+# Hotspots: plumes fixed in the mantle frame, HOTSPOT_COUNT alive at a time, each for
+# HOTSPOT_LIFE_MYR (born again elsewhere when one dies), making magma at a strength drawn
+# log-uniformly between HOTSPOT_KM3_PER_MYR (weak) and HOTSPOT_STRONG_KM3_PER_MYR (Hawaii, ~1e5
+# km3/Myr). A plume head arrives first: LIP_KM3 at once, a plateau LIP_THICK_KM thick over ocean
+# (Ontong Java, Kerguelen) or flood basalt into a continent, which rifting finds weak within
+# LIP_REACH_KM for LIP_WEAK_MYR after. Thereafter the tail builds islands over ocean in chunks of
+# HOTSPOT_ISLAND_KM2 at HOTSPOT_THICK_KM (welding with the chunk before, so a strong plume makes a
+# ridge and a weak one a string of islands as the plate carries them off) and thickens a continent
+# it sits under. Every chunk is booked as a `hotspot` gain and loss and the magma as hotspot_km3.
+HOTSPOT_COUNT = 12
+HOTSPOT_LIFE_MYR = (50., 150.)
+HOTSPOT_KM3_PER_MYR = 1e4
+HOTSPOT_STRONG_KM3_PER_MYR = 1.5e5
+HOTSPOT_ISLAND_KM2 = 500.
+HOTSPOT_THICK_KM = 20.
+LIP_KM3 = 5e6
+LIP_THICK_KM = 30.
+LIP_REACH_KM = 800.
+LIP_WEAK_MYR = 30.
+LIP_STRENGTH_N_PER_M = 5e11
 # Terranes: a continent piece smaller than this reaching a trench is not shortened into itself but
 # docks onto the overriding plate with its volume (islands, arcs, microcontinents: Kohistan,
 # Wrangellia); larger ones collide and suture as before.
@@ -248,7 +269,7 @@ class RegionWorld:
         # so carrying the region is carrying the crust, and the rebuild below keeps them together.
         moved = {p: sphere.rotate_geography(r, motion[p]) for p, r in self.regions.items()}
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
-                     events=[], continent_arrived=[], thickened_km3=0., arc_km3=0., eroded_km3=0.,
+                     events=[], continent_arrived=[], thickened_km3=0., arc_km3=0., hotspot_km3=0., eroded_km3=0.,
                      sediment_to_sea_km3=0.)
         lost = {p: [] for p in moved}      # (world geography, boundary kind, overriding plate or None)
         gained = {p: [] for p in moved}    # (world geography, gain category)
@@ -1039,8 +1060,95 @@ class RegionWorld:
             events += self._arcs(b, opening, dt, entry)
         for point, area, plate in entry['continent_arrived']:
             events += self._collide(point, area, plate)
+        events += self._hotspots(dt, entry)
         events += self._sutures(rotations_per_myr)
         return events
+
+    def _hotspots(self, dt, entry) -> list:
+        """Plumes under the moving plates: a plateau when one is born, then a chain of islands or a
+        thickened continent along its track (see HOTSPOT_COUNT)."""
+        events = []
+        spots = getattr(self, 'hotspots', None)
+        if spots is None:
+            return events  # a world without plumes, until enable_hotspots
+        rng = getattr(self, 'hotspot_rng', None)
+        if rng is None:
+            rng = self.hotspot_rng = np.random.default_rng(getattr(self, 'hotspot_seed', 7))
+        live = [h for h in spots if h['dies_myr'] > self.time_myr]
+        first = not spots  # the world's first plumes are old ones, their heads long delivered
+        while len(live) < HOTSPOT_COUNT:
+            point = sphere.unit(rng.normal(size=3))
+            strength = float(np.exp(rng.uniform(np.log(HOTSPOT_KM3_PER_MYR), np.log(HOTSPOT_STRONG_KM3_PER_MYR))))
+            life = float(rng.uniform(*HOTSPOT_LIFE_MYR))
+            spot = dict(point=point, born_myr=self.time_myr, dies_myr=self.time_myr + (life * float(rng.uniform(.1, 1.)) if first else life),
+                        strength_km3_per_myr=strength, bank_km3=0., head_km3=0. if first else LIP_KM3)
+            spots.append(spot)
+            live.append(spot)
+        regions = self.world_regions()
+        chunk = HOTSPOT_ISLAND_KM2 * HOTSPOT_THICK_KM
+        for spot in live:
+            point = spot['point']
+            here = _point(point)
+            plate = next((p for p, g in regions.items() if spherely.contains(g, here)), None)
+            if plate is None:
+                continue
+            magma = spot['strength_km3_per_myr'] * dt
+            head = spot.pop('head_km3', 0.)
+            piece = self._meshed_at(plate, point)
+            if piece is not None:
+                # Under a continent: the magma thickens it where the plume sits (flood basalt and
+                # underplating); the plume head all at once.
+                area = piece.area_km2()
+                local = sphere.rotate(point, self.frame(plate).T)
+                piece.mesh.add_volume(magma + head, area, near=local[None])
+                piece.thickness_km += (magma + head) / area
+                entry['hotspot_km3'] += magma + head
+                if head > 0.:
+                    events.append(dict(kind='lip', plate=plate, on='continent', volume_km3=head, point=point.tolist()))
+                    self._remember_lip(point)
+                continue
+            spot['bank_km3'] += magma
+            if head > 0.:
+                # The plume head: a plateau over the ocean, as big as the volume allows at LIP_THICK_KM.
+                radius = np.sqrt(head / LIP_THICK_KM / np.pi)
+                disc = sphere.polygon(sphere.disc(point, radius))
+                built, used, _ = self._island_arc(plate, disc, entry, head, LIP_THICK_KM, category='hotspot')
+                if built > 0.:
+                    entry['hotspot_km3'] += used
+                    events.append(dict(kind='lip', plate=plate, on='ocean', area_km2=built, volume_km3=used, point=point.tolist()))
+                    self._remember_lip(point)
+                    spot['bank_km3'] += head - used
+                else:
+                    spot['bank_km3'] += head
+            built_now = 0
+            while spot['bank_km3'] >= chunk and built_now < 50:
+                disc = sphere.polygon(sphere.disc(point, np.sqrt(HOTSPOT_ISLAND_KM2 / np.pi)))
+                built, used, _ = self._island_arc(plate, disc, entry, chunk, HOTSPOT_THICK_KM, category='hotspot')
+                if built <= 0.:
+                    break  # nothing but land or a gap under it: the bank waits
+                entry['hotspot_km3'] += used
+                spot['bank_km3'] -= used
+                built_now += 1
+        return events
+
+    def enable_hotspots(self, seed=7):
+        """Give the world its plumes (none until this is called): HOTSPOT_COUNT of them, placed and
+        timed by a generator seeded with `seed`, so a run is repeatable."""
+        self.hotspots = []
+        self.hotspot_seed = seed
+        self.hotspot_rng = np.random.default_rng(seed)
+        return self
+
+    def _remember_lip(self, point):
+        lips = getattr(self, 'lips', None)
+        if lips is None:
+            lips = self.lips = []
+        lips.append(dict(point=np.asarray(point, float), time_myr=self.time_myr))
+
+    def lip_points(self):
+        """World-frame points of the plume heads that arrived within LIP_WEAK_MYR: rifting finds the
+        lithosphere weak there (plumes are where continents come apart)."""
+        return [l['point'] for l in getattr(self, 'lips', []) if self.time_myr - l['time_myr'] <= LIP_WEAK_MYR]
 
     def _arcs(self, b, opening, dt, entry) -> list:
         """Magma behind each trench segment of `b`: into the overriding continent, or owed over its
@@ -1212,7 +1320,7 @@ class RegionWorld:
         disc = sphere.polygon(sphere.disc(centre, np.sqrt(ISLAND_KM2 / np.pi)))
         return self._island_arc(plate, disc, entry, ISLAND_KM2 * ISLAND_THICK_KM, ISLAND_THICK_KM)
 
-    def _island_arc(self, plate, strip, entry, owed_km3, thick_km=ARC_THICK_KM):
+    def _island_arc(self, plate, strip, entry, owed_km3, thick_km=ARC_THICK_KM, category='arc'):
         """Make the part of `strip` (world frame) over `plate`'s ocean continental crust, as thick as
         the magma owed allows up to `thick_km`; returns (km2 built, km3 of magma used, the piece)."""
         back = self.frame(plate).T
@@ -1245,9 +1353,10 @@ class RegionWorld:
         else:
             arc = Crust(plate, 'continent', shape, self.time_myr, thickness)
             self.crust.append(arc)
-        entry['gained']['arc'] += built
-        entry['lost']['arc'] += built
-        entry['arc_km3'] += built * thickness
+        entry['gained'][category] += built
+        entry['lost'][category] += built
+        if category == 'arc':
+            entry['arc_km3'] += built * thickness
         return built, built * thickness, arc
 
     def _meshed_at(self, plate, point):
@@ -1260,8 +1369,33 @@ class RegionWorld:
 
     def shed_forearcs(self, rotations_per_myr) -> list:
         """Shed a forearc plate from the first trench run whose slab retreats faster than its
-        overriding plate advances (see FOREARC_KM); one per call, since the boundaries change."""
+        overriding plate advances (see FOREARC_KM); one per call, since the boundaries change.
+        First, forearcs whose back-arc has opened for BACKARC_LIFE_MYR weld back to their parents."""
         forearcs = self.forearcs = getattr(self, 'forearcs', {})
+        born = self.forearc_born = getattr(self, 'forearc_born', {})
+        events = []
+        for f, over in list(forearcs.items()):
+            if f not in self.regions:
+                forearcs.pop(f, None)
+                continue
+            if over not in self.regions or self.time_myr - born.get(f, self.time_myr) >= BACKARC_LIFE_MYR:
+                keep = over if over in self.regions else self._main_neighbour(self.regions[f], f)
+                if keep is None:
+                    continue
+                area = sphere.area_km2(self.regions[f])
+                self._give(f, self.regions[f], keep)
+                self.regions.pop(f, None)
+                self.crust = [c for c in self.crust if c.plate != f]
+                self.parents[f] = keep
+                forearcs.pop(f, None)
+                born.pop(f, None)
+                for g, o in list(forearcs.items()):
+                    if o == f:
+                        forearcs[g] = keep
+                self.boundaries = self._derive(self._index(_relabel(self.boundaries, {f: keep})), {})
+                events.append(dict(kind='forearc_welded', plate=f, into=keep, area_km2=area))
+        if events:
+            return events
         for b in list(self.boundaries):
             if len(b.points) < 2:
                 continue
@@ -1298,6 +1432,7 @@ class RegionWorld:
                     self.names[new] = 'forearc of %s' % self.names.get(over, 'Plate %d' % over)
                     self._give(over, region, new)
                     forearcs[new] = over
+                    born[new] = self.time_myr
                     spherely.prepare(region)
                     self.boundaries = self._derive(self._index(_split_by_mask(
                         self.boundaries, over, new, lambda mids: np.asarray(spherely.contains(region, _points(mids))))), {})

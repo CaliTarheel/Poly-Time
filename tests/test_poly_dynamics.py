@@ -7,6 +7,24 @@ from poly import dynamics, sphere
 from poly.build import cap_world, voronoi_world
 
 
+class SuctionTests(unittest.TestCase):
+    def test_trench_suction_draws_the_overriding_plate_toward_its_trench(self):
+        from poly import regions
+        from poly.build import cap_world
+        world = regions.from_network(cap_world(cap_omega=(0., 0., .005))[0])
+        world.step({1: (0., 0., .005), 2: np.zeros(3)}, 1.)  # the cap's east edge is a trench under plate 2
+        # The overriding plate here is the whole rest of the sphere, so the pull of one trench barely
+        # moves it; a strong suction either way shows the direction unmistakably.
+        pushed = dynamics.Balance(dynamics.Parameters(trench_suction=-1.)).solve(world)
+        drawn = dynamics.Balance(dynamics.Parameters(trench_suction=1.)).solve(world)
+        trench = sphere.from_lonlat(40., 0.)  # the trench runs along lon 40; the cap lies to the west
+        west = np.array([0., -1., 0.])  # toward the cap at that point
+        v0 = float(np.cross(pushed[2], trench) @ west) * sphere.RADIUS_KM
+        v1 = float(np.cross(drawn[2], trench) @ west) * sphere.RADIUS_KM
+        self.assertGreater(v1, v0 + 5.)  # km/Myr toward the cap
+        self.assertGreater(v1, 0.)
+
+
 class ConstraintTests(unittest.TestCase):
     def test_a_tied_plate_follows_its_parent_plus_the_extra(self):
         from poly import regions

@@ -171,7 +171,21 @@ equals the area destroyed, term by term.
   moves with its parent plus the slab's retreat where that outruns the parent's own advance, so
   the gap behind it opens as back-arc ocean through the ridge rule, and an advancing overriding
   plate (Andes) opens nothing. Forearcs are exempt from the small-plate absorption; a forearc that
-  loses its trench moves with its parent.
+  loses its trench moves with its parent. The tie is imposed inside the force balance (the
+  forearc's column folds into its parent's), so the subducting plate still meets its trench's
+  resistance. A back-arc opens for 25 Myr, then the forearc welds back to its parent and the margin
+  can shed again, as the Lau basin followed the South Fiji basin. The overriding plate is drawn
+  toward its trench by a fifth of the slab's pull (trench suction), so margins advance over their
+  slabs as the Americas do.
+- **Hotspots and plume heads.** Switched on per world (`enable_hotspots(seed)`), twelve plumes
+  live at a time, fixed in the mantle frame, each for 50 to 150 Myr and born again elsewhere when
+  one dies, with strengths from 1e4 to 1.5e5 km3/Myr (Hawaii at the top); the first twelve are old
+  plumes whose heads have long arrived. A plume head arrives first: 5e6 km3 at once, a plateau 30 km thick over
+  ocean (which then rides, docks and resists subduction like any terrane) or flood basalt into a
+  continent, and rifting finds the lithosphere weak within 800 km for 30 Myr after. The tail then
+  builds islands over ocean in 500 km2 chunks 20 km thick, welding with the chunk before, so a
+  strong plume leaves a ridge and a weak one a string of islands as the plate carries them off,
+  and thickens a continent it sits under. All of it is booked (`hotspot` gain and loss, hotspot_km3).
 - **Ocean depth from age.** The floor subsides as it cools (Stein & Stein's GDH1: 2.6 km at the
   ridge, 0.365 km per root-Myr to 20 Myr, levelling towards 5.65 km); the maps tint ocean by it. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.
