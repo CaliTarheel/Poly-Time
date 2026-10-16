@@ -30,8 +30,14 @@ def _tint(elevation_km):
     return np.round(out).astype(np.uint8)
 
 
-def draw(world, path, width=720, boundaries=True):
-    """Write a PNG map of `world` to `path` and return the per-pixel plate array."""
+MESH = (90, 70, 40)  # the continental mesh, when asked for
+
+
+def draw(world, path, width=720, boundaries=True, mesh=False):
+    """Write a PNG map of `world` to `path` and return the per-pixel plate array.
+
+    With `mesh`, the triangles of every continental mesh are outlined, to show the level of detail.
+    """
     height = width // 2
     lon = np.linspace(-180., 180., width, endpoint=False) + 180. / width
     lat = np.linspace(90., -90., height, endpoint=False) - 90. / height
@@ -56,8 +62,8 @@ def draw(world, path, width=720, boundaries=True):
             if not hit.any():
                 continue
             if piece.kind == 'continent':
-                mesh = getattr(piece, 'mesh', None)
-                thick = mesh.sample(local[hit]) if mesh is not None else getattr(piece, 'thickness_km', CONTINENT_KM)
+                field = getattr(piece, 'mesh', None)
+                thick = field.sample(local[hit]) if field is not None else getattr(piece, 'thickness_km', CONTINENT_KM)
                 colour[hit] = _tint(ISOSTASY * (np.asarray(thick, float) - CONTINENT_KM) * np.ones(int(hit.sum())))
             else:
                 age = 0. if piece.born_myr is None else max(world.time_myr - piece.born_myr, 0.)
@@ -94,5 +100,19 @@ def draw(world, path, width=720, boundaries=True):
                 if abs(x[k + 1] - x[k]) > width / 2:
                     continue  # crosses the map edge
                 pen.line([(x[k], y[k]), (x[k + 1], y[k + 1])], fill=COLOURS[kind], width=2 if kind != 'suture' else 1)
+    if mesh:
+        for piece in world.crust:
+            field = getattr(piece, 'mesh', None)
+            if field is None or len(field.triangles) == 0:
+                continue
+            tri = np.asarray(field.triangles)
+            edges = np.unique(np.sort(np.vstack((tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]])), axis=1), axis=0)
+            plon, plat = sphere.to_lonlat(sphere.rotate(field.nodes, world.frame(piece.plate)))
+            x = (plon + 180.) / 360. * width
+            y = (90. - plat) / 180. * height
+            for i, j in edges:
+                if abs(x[i] - x[j]) > width / 2:
+                    continue  # crosses the map edge
+                pen.line([(x[i], y[i]), (x[j], y[j])], fill=MESH, width=1)
     picture.save(path)
     return plate_of.reshape(height, width)
