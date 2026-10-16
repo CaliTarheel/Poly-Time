@@ -31,9 +31,10 @@ import spherely
 from poly import sphere
 from poly.build import TRANSFORM_RATIO, _smooth
 from poly.mesh import ContinentMesh
+from poly.policy import PlatePolicy, main_neighbours
 from poly.sphere import DETAIL_KM2
 from poly.topology import segment_motion
-from poly.world import (AGE_BAND_MYR, COLLISION_KM2, INITIATION_KM, MINIMUM_PLATE_KM2, SAMPLE_KM, TOLERANCE,
+from poly.world import (AGE_BAND_MYR, COLLISION_KM2, INITIATION_KM, SAMPLE_KM, TOLERANCE,
                         Crust, _merge_bands)
 
 GAINS = ('ridge', 'trench_opening', 'sliver', 'junction', 'escape', 'arc', 'accreted')
@@ -45,7 +46,7 @@ MARGIN = .2         # hysteresis around the transform threshold when re-typing
 MIN_RUN_KM = 50.    # a run of one boundary kind shorter than this takes its longer neighbour's kind
 TINY_KM2 = 1e-6     # areas below this are numerical
 CHECK_TOLERANCE = 1e-4  # of the sphere's area, per step (0.01%)
-CRUMB_KM2 = 100.        # detached bits of a plate smaller than this are left with it
+CRUMB_KM2 = 100.        # historical default; live worlds use plate_policy.numerical_crumb_km2
 SUTURE_KM = 100.        # a collision that has closed this far welds its two plates into one
 SIMPLIFY_KM2 = 100.     # a boundary vertex cutting off less than this with its neighbours is dropped
 SIMPLIFY_EVERY_MYR = 1. # outlines are simplified once this much time has passed, not every sub-step
@@ -137,6 +138,7 @@ class RegionWorld:
     # Pending root/island magma whose boundary retired. Kept explicitly, not silently discarded
     # or emplaced by an invented geological rule; this is a cumulative inventory, in km3.
     retired_arc_km3: object = field(default_factory=lambda: np.zeros(2))
+    plate_policy: PlatePolicy = field(default_factory=PlatePolicy)
 
     # ------------------------------------------------------------------ views
     def plates(self) -> list:
@@ -691,7 +693,7 @@ class RegionWorld:
             area = sphere.area_km2(region)
             pieces, _ = sphere.parts(region)
             pieces.sort(key=lambda g: -sphere.area_km2(g))
-            if area < MINIMUM_PLATE_KM2:
+            if area < self.plate_policy.minimum_plate_km2:
                 pieces = [region] if area >= TINY_KM2 else []
                 keep = []
             else:
@@ -699,8 +701,8 @@ class RegionWorld:
             # Crumbs left where overlaps and gaps were split, often enclosed by another plate, go to
             # the plate beside them in one hand-over per neighbour; left with their own plate they
             # would sit inside the other plate's crust as holes and be split again every step.
-            crumbs = [g for g in pieces if sphere.area_km2(g) < CRUMB_KM2] if keep else []
-            pieces = [g for g in pieces if sphere.area_km2(g) >= CRUMB_KM2 or not keep]
+            crumbs = [g for g in pieces if sphere.area_km2(g) < self.plate_policy.numerical_crumb_km2] if keep else []
+            pieces = [g for g in pieces if sphere.area_km2(g) >= self.plate_policy.numerical_crumb_km2 or not keep]
             if crumbs:
                 into = self._main_neighbours(crumbs, plate)
                 for other in sorted(set(i for i in into if i is not None)):
@@ -709,7 +711,7 @@ class RegionWorld:
                     events.append(dict(kind='crumbs_given', plate=plate, into=other, count=len(batch),
                                        area_km2=sum(sphere.area_km2(g) for g in batch)))
             for piece in pieces:
-                if sphere.area_km2(piece) >= MINIMUM_PLATE_KM2:
+                if sphere.area_km2(piece) >= self.plate_policy.minimum_plate_km2:
                     new = max(list(self.regions) + list(self.frames) + list(self.parents)) + 1
                     self.frames[new] = self.frame(plate).copy()
                     self.parents[new] = plate
@@ -722,7 +724,7 @@ class RegionWorld:
                         continue
                     self._give(plate, piece, into, entry, boundary_index)
                     events.append(dict(kind='absorbed', plate=plate, into=into, area_km2=sphere.area_km2(piece)))
-            if not keep and plate in self.regions and sphere.area_km2(self.regions[plate]) < MINIMUM_PLATE_KM2:
+            if not keep and plate in self.regions and sphere.area_km2(self.regions[plate]) < self.plate_policy.minimum_plate_km2:
                 rest = self.regions[plate]
                 if sphere.area_km2(rest) >= TINY_KM2:
                     into = self._main_neighbour(rest, plate)
@@ -797,28 +799,10 @@ class RegionWorld:
         self.regions[to] = sphere.union(self.regions.get(to, sphere.EMPTY), piece)
 
     def _main_neighbours(self, pieces, plate):
-        """The nearest other plate to each of `pieces` (None if there is no other plate)."""
-        array = np.array(pieces, dtype=object)
-        best, best_km = [None] * len(pieces), np.full(len(pieces), np.inf)
-        for other, region in self.regions.items():
-            if other == plate:
-                continue
-            km = np.asarray(spherely.distance(array, region), float)
-            closer = km < best_km
-            best_km[closer] = km[closer]
-            for k in np.flatnonzero(closer):
-                best[k] = other
-        return best
+        return main_neighbours(pieces, plate, self.regions)
 
     def _main_neighbour(self, piece, plate):
-        best, best_km = None, np.inf
-        for other, region in self.regions.items():
-            if other == plate:
-                continue
-            km = spherely.distance(piece, region)
-            if km < best_km:
-                best, best_km = other, km
-        return best
+        return self._main_neighbours([piece], plate)[0]
 
     # ---------------------------------------------------------- boundaries
     def _fresh(self, count) -> np.ndarray:
@@ -1668,4 +1652,4 @@ def from_network(world) -> RegionWorld:
         next_ident += count
     return RegionWorld([Crust(c.plate, c.kind, c.shape, c.born_myr, c.thickness_km) for c in world.crust],
                        {p: world.frame(p).copy() for p in regions}, regions, boundaries, dict(world.names),
-                       next_ident=next_ident)
+                       next_ident=next_ident, plate_policy=world.plate_policy)

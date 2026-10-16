@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from poly import sphere
+from poly.policy import PlatePolicy
 from poly.topology import BoundaryCollision, Network
 
 GAINS = ('ridge', 'trench_opening', 'sliver', 'junction')
@@ -36,7 +37,7 @@ INITIATION_KM = 100.
 COLLISION_KM2 = 500.
 # How far either side of a boundary its crust is sampled to choose which plate goes down.
 SAMPLE_KM = 150.
-# A plate smaller than this is absorbed by the neighbour it shares the most boundary with.
+# Historical threshold retained for imports; live worlds use their explicit plate_policy.
 MINIMUM_PLATE_KM2 = 1e6
 # Two boundaries of one plate closer than this (away from a junction they share) are a neck: the
 # plate is cut across it before they can meet, and the far side becomes a plate of its own.
@@ -76,6 +77,7 @@ class World:
     time_myr: float = 0.
     ledger: list = field(default_factory=list)
     overriding_rule: object = staticmethod(lambda left, right: max(left, right))
+    plate_policy: PlatePolicy = field(default_factory=PlatePolicy)
 
     def frame(self, plate):
         return self.frames.setdefault(plate, np.eye(3))
@@ -191,7 +193,7 @@ class World:
         neighbours = {o for s in self.network.sections.values() if plate in (s.left, s.right)
                       for o in (s.left, s.right) if o != plate}
         if into is None:
-            into = max(neighbours, key=lambda o: self.network.shared_km(plate, o))
+            into = min(neighbours, key=lambda o: (-self.network.shared_km(plate, o), o))
         area = sum(c.area_km2() for c in self.crust if c.plate == plate)
         carry = self.frame(into).T @ self.frame(plate)
         moved = []
@@ -238,7 +240,7 @@ class World:
             if not necks:
                 continue
             area = sphere.area_km2(self.network.polygon(plate))
-            if area < 4. * MINIMUM_PLATE_KM2:
+            if area < 4. * self.plate_policy.minimum_plate_km2:
                 continue
             events.append(self.split(plate, necks[0]))
         return events
@@ -272,8 +274,8 @@ class World:
             if plate not in self.network.plates():
                 continue
             region = self.network.polygon(plate)
-            if sphere.area_km2(region) < MINIMUM_PLATE_KM2:
-                events.append(self.absorb(plate, reason='smaller than %.0f km2' % MINIMUM_PLATE_KM2))
+            if sphere.area_km2(region) < self.plate_policy.minimum_plate_km2:
+                events.append(self.absorb(plate, reason='smaller than %.0f km2' % self.plate_policy.minimum_plate_km2))
         return events
 
     def _evolve(self, rotations_per_myr, dt, entry) -> list:

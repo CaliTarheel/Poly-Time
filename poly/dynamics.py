@@ -23,6 +23,7 @@ import numpy as np
 import spherely
 
 from poly import sphere
+from poly.quadrature import basal_moment_m2
 
 SECONDS_PER_MYR = 3.15576e13
 R_M = sphere.RADIUS_KM * 1e3
@@ -50,6 +51,9 @@ class Parameters:
     # No plate moves further than this in one sub-step; a step is split to keep to it.
     step_limit_km: float = 50.
     sample_points: int = 20000
+    # Below this many global samples, integrate basal drag exactly from polygon edges.
+    # This avoids zero/one-point drag tensors on small plates without changing the force law.
+    minimum_drag_samples: int = 128
 
 
 def _fibonacci(count):
@@ -65,6 +69,8 @@ class Balance:
 
     def __init__(self, parameters: Parameters | None = None):
         self.parameters = parameters or Parameters()
+        if self.parameters.sample_points < 4 or self.parameters.minimum_drag_samples < 1:
+            raise ValueError('sample_points must be >= 4 and minimum_drag_samples >= 1')
         self.points = _fibonacci(self.parameters.sample_points)
         self.point_area_m2 = 4. * math.pi * R_M ** 2 / len(self.points)
         lon, lat = sphere.to_lonlat(self.points)
@@ -81,12 +87,19 @@ class Balance:
         # Basal drag: F = -c v over the area, v = w x r R, torque = R r x F = -c R^2 (I - r r^T) w.
         regions = world.world_regions() if hasattr(world, 'world_regions') else world.network.polygons()
         drag = {}
+        quadrature = {}
         for plate, region in regions.items():
             spherely.prepare(region)
             inside = np.asarray(spherely.contains(region, self.geographies))
             r = self.points[inside]
-            moment = np.eye(3) * len(r) - r.T @ r
-            block = p.basal_drag_pa_s_per_m * R_M ** 2 * self.point_area_m2 * moment
+            if len(r) < p.minimum_drag_samples:
+                moment_m2 = basal_moment_m2(region)
+                method = 'polygon_boundary'
+            else:
+                moment_m2 = self.point_area_m2 * (np.eye(3) * len(r) - r.T @ r)
+                method = 'global_samples'
+            quadrature[plate] = dict(method=method, samples=len(r))
+            block = p.basal_drag_pa_s_per_m * R_M ** 2 * moment_m2
             k = 3 * slot[plate]
             matrix[k:k + 3, k:k + 3] += block
             drag[plate] = block
@@ -107,7 +120,7 @@ class Balance:
         pulled = {plate: float(pulled_km[k]) for plate, k in slot.items() if pulled_km[k] > 0.}
         omega = np.linalg.solve(matrix, torque)  # rad/s
         rotations = {plate: omega[3 * slot[plate]:3 * slot[plate] + 3] * SECONDS_PER_MYR for plate in plates}
-        self.last = dict(pulled_km=pulled, speed_km_myr={
+        self.last = dict(pulled_km=pulled, drag_quadrature=quadrature, speed_km_myr={
             plate: float(np.linalg.norm(w)) * sphere.RADIUS_KM for plate, w in rotations.items()})
         return rotations
 
