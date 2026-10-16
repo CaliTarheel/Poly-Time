@@ -487,15 +487,16 @@ class RegionWorld:
         coast = 0.
         for r in rings:
             nxt = np.roll(r, -1, axis=0)
+            lengths = sphere.arc_km(r, nxt)
             mids = sphere.unit(r + nxt)
-            within = tree.query(mids, k=1)[0] * sphere.RADIUS_KM <= ESCAPE_REACH_KM
+            within = (tree.query(mids, k=1)[0] * sphere.RADIUS_KM <= ESCAPE_REACH_KM) & (lengths > 0.)
             if not within.any():
                 continue
-            pole = sphere.unit(np.cross(r, nxt))
-            outward = sphere.unit(mids * np.cos(probe_angle) - pole * np.sin(probe_angle))  # right of the ring
+            pole = sphere.unit(np.cross(r[within], nxt[within]))  # a zero-length edge has no pole
+            outward = sphere.unit(mids[within] * np.cos(probe_angle) - pole * np.sin(probe_angle))  # right of the ring
             lon, lat = sphere.to_lonlat(sphere.rotate(outward, self.frame(piece.plate).T))
             fronts = np.asarray(spherely.contains(sea, spherely.points(lon, lat)))
-            coast += float(sphere.arc_km(r, nxt)[within & fronts].sum())
+            coast += float(lengths[within][fronts].sum())
         if coast <= 0.:
             return
         width = piece.escape_km2 / coast  # km outward along the coast within reach
