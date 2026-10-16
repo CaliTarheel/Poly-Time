@@ -844,18 +844,29 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
         turn = np.sign(np.einsum('ij,ij->i', np.cross(a, v), b))  # a left turn: the triangle is on the left
         change = -triangle * turn  # of the area on the ring's left (the right loses the same)
         delta = np.zeros(len(rings))
-        for _ in range(rounds):
+        for _ in range(rounds + 1):
             going = go[cluster]
             delta = np.bincount(ring_of, weights=np.where(going, change, 0.), minlength=len(rings))
             over = np.abs(net + delta) > budget
             if not over.any():
                 break
+            # A ring over its budget keeps the smallest changes that fit, smallest first (the teeth
+            # and the dust go, the sawtooth of real width waits), and holds the rest in every ring
+            # that shares them.
+            idx = np.flatnonzero(going & over[ring_of])
+            if not len(idx):
+                break  # over from earlier rounds alone: nothing of this round's to hold
+            order = idx[np.lexsort((np.abs(change[idx]), ring_of[idx]))]
+            running = np.cumsum(change[order])
+            starts = np.r_[0, np.flatnonzero(np.diff(ring_of[order])) + 1]
+            sizes_run = np.diff(np.r_[starts, len(order)])
+            base = np.repeat(running[starts] - change[order][starts], sizes_run)
+            fits = np.abs(net[ring_of[order]] + running - base) <= budget[ring_of[order]]
             held = np.zeros(clusters, bool)
-            held[cluster[going & over[ring_of]]] = True
+            held[cluster[order[~fits]]] = True
+            if not held.any():
+                held[cluster[order]] = True  # rounding: nothing fits, hold them all
             go &= ~held
-        else:
-            going = go[cluster]
-            delta = np.bincount(ring_of, weights=np.where(going, change, 0.), minlength=len(rings))
         if stats is not None:
             stats['rounds'][-1]['go'] = int(go.sum())
         if not go.any():
