@@ -136,8 +136,10 @@ equals the area destroyed, term by term.
 - **Arcs.** Magma rises into the overriding plate 150 km behind every trench, 30 km3 per km of trench
   per Myr at 50 km/Myr of convergence (Earth's arcs add 20-40). Where that point is continent, the
   mesh thickens there: an Andean arc. Where it is ocean, the magma is owed on the trench segments
-  (carried by their identity) and shows first as islands, then as a ribbon. A share of it (5%) is
-  banked for islands and spent in chunks of 50 km2, 20 km thick, each at a site fixed along a trench
+  (carried by their identity) and shows first as islands, then as a ribbon. Nothing emerges until
+  the segment's root holds a ridge's worth (600 km3 per km of trench: 20 Myr at the reference
+  convergence, 11 Myr at 90 km/Myr; Earth's arcs take 5-15 Myr to break the surface). From then a
+  share of the magma (5%) is banked for islands and spent in chunks of 50 km2, 20 km thick, each at a site fixed along a trench
   segment by the segment's identity and never within 70 km of an island already there while a free
   site remains; once no site is free a chunk goes beside the island nearest the magma and welds with
   every island it touches, so islands grow and grow together. Islands take no magma themselves. The

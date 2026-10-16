@@ -66,15 +66,19 @@ def draw(world, path, width=720, boundaries=True):
         image[inside] = colour
     picture = Image.fromarray(image.reshape(height, width, 3))
     pen = ImageDraw.Draw(picture)
-    # Islands smaller than a few pixels would fall between pixel centres: a dot each.
+    # Islands smaller than a few pixels would fall between pixel centres: a dot each, at the
+    # island's own size with a floor of a pixel and a half.
     pixel_km2 = sphere.SPHERE_KM2 / (width * height)
+    pixel_km = 2. * np.pi * sphere.RADIUS_KM / width
     for piece in world.crust:
-        if piece.kind == 'continent' and getattr(piece, 'mesh', None) is None and piece.area_km2() < 4. * pixel_km2:
+        area = piece.area_km2()
+        if piece.kind == 'continent' and getattr(piece, 'mesh', None) is None and area < 4. * pixel_km2:
             centre = spherely.centroid(piece.shape)
             local = sphere.from_lonlat(float(spherely.get_x(centre)), float(spherely.get_y(centre)))
             plon, plat = sphere.to_lonlat(sphere.rotate(local, world.frame(piece.plate)))
             x, y = (float(plon) + 180.) / 360. * width, (90. - float(plat)) / 180. * height
-            pen.ellipse([x - 1.5, y - 1.5, x + 1.5, y + 1.5], fill=tuple(int(v) for v in _tint(np.array([0.]))[0]))
+            r = max(.75, np.sqrt(area / np.pi) / pixel_km)
+            pen.ellipse([x - r, y - r, x + r, y + r], fill=tuple(int(v) for v in _tint(np.array([0.]))[0]))
     if boundaries:
         if hasattr(world, 'boundary_lines'):
             lines = list(world.boundary_lines())
