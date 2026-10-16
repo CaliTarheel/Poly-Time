@@ -104,8 +104,9 @@ class RegionStepTests(unittest.TestCase):
         # The continent shortened, and kept its volume by thickening, on its mesh, where it was shortened:
         # it was carried east into the trench, so its eastern side is the thick side.
         self.assertLess(world.areas()['continent'], area)
-        self.assertAlmostEqual(world._continent_km3() / volume, 1., delta=1e-3)
-        (piece,) = [c for c in world.crust if c.kind == 'continent']
+        magma = sum(e['arc_km3'] for e in world.ledger)  # islands behind the trench are continent too
+        self.assertAlmostEqual(world._continent_km3() / (volume + magma), 1., delta=1e-3)
+        (piece,) = [c for c in world.crust if c.kind == 'continent' and getattr(c, 'mesh', None) is not None]
         self.assertGreater(piece.thickness_km, 35.)
         self.assertIsNotNone(piece.mesh)
         self.assertAlmostEqual(piece.mesh.volume_km3(piece.area_km2()) / piece.volume_km3(), 1., delta=1e-6)
@@ -150,16 +151,53 @@ class RegionStepTests(unittest.TestCase):
             assert_checks(self, entry)
         magma = sum(e['arc_km3'] for e in world.ledger)
         self.assertGreater(magma, 0.)
-        self.assertEqual(sum(e['gained']['arc'] for e in world.ledger), 0.)  # no island arc: it went into continent
-        (piece,) = [c for c in world.crust if c.kind == 'continent']
+        # Islands may form where the trench runs past the continent; no ribbon does, and the books close.
+        self.assertFalse(any(x['kind'] == 'island_arc' for e in world.ledger for x in e['events']))
+        self.assertEqual(sum(e['gained']['arc'] for e in world.ledger), sum(e['lost']['arc'] for e in world.ledger))
+        (piece,) = [c for c in world.crust if c.kind == 'continent' and getattr(c, 'mesh', None) is not None]
         self.assertAlmostEqual(world._continent_km3() / (volume + magma), 1., delta=1e-6)
         lon = sphere.to_lonlat(sphere.rotate(piece.mesh.nodes, world.frame(2)))[0]
         west, east = lon < np.median(lon), lon >= np.median(lon)
         self.assertGreater(piece.mesh.thickness[west].mean(), piece.mesh.thickness[east].mean())
 
+    def test_magma_behind_an_ocean_trench_shows_as_spaced_islands_before_the_ribbon(self):
+        worlds = [regions.from_network(cap_world(cap_omega=EAST)[0]) for _ in range(2)]
+        runs = []
+        with mock.patch.object(regions, 'ARC_KM3_PER_KM_MYR', 20. * regions.ARC_KM3_PER_KM_MYR), \
+                mock.patch.object(regions, 'ARC_THICK_KM', 1e9):  # never a ribbon here
+            for world in worlds:
+                events = []
+                for _ in range(10):
+                    entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
+                    assert_checks(self, entry)
+                    events += entry['events']
+                    if sum(e['kind'] == 'island' for e in events) >= 3:
+                        break
+                runs.append([(e['kind'], round(e['area_km2'], 6)) for e in events if e['kind'] in ('island', 'island_arc')])
+        world = worlds[0]
+        islands = [e for e in runs[0] if e[0] == 'island']
+        self.assertGreaterEqual(len(islands), 3)
+        self.assertEqual(runs[0], runs[1])  # deterministic: the same world builds the same islands
+        self.assertFalse(any(e[0] == 'island_arc' for e in runs[0]))
+        for _, area in islands:
+            self.assertLessEqual(area, regions.ISLAND_KM2 * 1.001)
+        self.assertAlmostEqual(islands[0][1] / regions.ISLAND_KM2, 1., delta=.05)  # a whole chunk at a free site
+        built = sum(e['gained']['arc'] for e in world.ledger)
+        self.assertEqual(built, sum(e['lost']['arc'] for e in world.ledger))
+        pieces = [c for c in world.crust if c.kind == 'continent' and c.plate == 2]
+        self.assertAlmostEqual(sum(c.area_km2() for c in pieces) / built, 1., delta=1e-6)
+        for c in pieces:
+            self.assertAlmostEqual(c.thickness_km, regions.ISLAND_THICK_KM)
+        radius = np.sqrt(regions.ISLAND_KM2 / np.pi)
+        for i, a in enumerate(pieces):
+            for b in pieces[i + 1:]:
+                self.assertGreaterEqual(spherely.distance(a.shape, b.shape) / 1e3, regions.ISLAND_SPACING_KM - 2. * radius - 1.)
+        self.assertLess(abs(entry['tiling_error_km2']), TOLERANCE_KM2)
+
     def test_magma_behind_an_ocean_trench_builds_an_island_arc(self):
         world = regions.from_network(cap_world(cap_omega=EAST)[0])
-        with mock.patch.object(regions, 'ARC_KM3_PER_KM_MYR', 20. * regions.ARC_KM3_PER_KM_MYR):
+        with mock.patch.object(regions, 'ARC_KM3_PER_KM_MYR', 20. * regions.ARC_KM3_PER_KM_MYR), \
+                mock.patch.object(regions, 'ISLAND_SHARE', 0.):  # the ribbon alone
             events = []
             for _ in range(8):
                 entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
@@ -192,7 +230,8 @@ class RegionStepTests(unittest.TestCase):
         drift = sum(e['rebuild_drift_km2'] for e in world.ledger)
         self.assertLess(abs(drift), 1e-6 * sphere.SPHERE_KM2)
         lost = sum(e['lost']['continent_at_trench'] + e['lost']['collision'] for e in world.ledger)
-        self.assertAlmostEqual(world.areas()['continent'] + lost, continent, delta=1e-4 * continent + 1.)
+        made = sum(e['gained']['arc'] + e['gained']['escape'] for e in world.ledger)
+        self.assertAlmostEqual(world.areas()['continent'] + lost - made, continent, delta=1e-4 * continent + 1.)
 
 
 class RegionDynamicsTests(unittest.TestCase):

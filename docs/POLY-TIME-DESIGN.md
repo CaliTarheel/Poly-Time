@@ -136,10 +136,20 @@ equals the area destroyed, term by term.
 - **Arcs.** Magma rises into the overriding plate 150 km behind every trench, 30 km3 per km of trench
   per Myr at 50 km/Myr of convergence (Earth's arcs add 20-40). Where that point is continent, the
   mesh thickens there: an Andean arc. Where it is ocean, the magma is owed on the trench segments
-  (carried by their identity) and, once a run of them is owed enough for a strip 60 km wide and 20 km
-  thick along it, the strip is built as continental crust over the plate's ocean: an island arc,
-  booked as an `arc` gain and loss, that then moves, collides, welds and rifts like any continent.
-  The ledger records the magma added every step.
+  (carried by their identity) and shows first as islands, then as a ribbon. A share of it (5%) is
+  banked for islands and spent in chunks of 50 km2, 20 km thick, each at a site fixed along a trench
+  segment by the segment's identity and never within 70 km of an island already there while a free
+  site remains; once no site is free a chunk goes beside the island nearest the magma and welds with
+  every island it touches, so islands grow and grow together. Islands take no magma themselves. The
+  rest is the submarine ridge and root, and once a run of segments is owed enough for a strip 60 km
+  wide and 30 km thick along it (60 Myr at the reference convergence) the strip is built as
+  continental crust over the plate's ocean: a mature arc ribbon. Earth's arcs show no
+  characteristic volcano spacing (de Bremond d'Ars, Jaupart and Sparks 1995: 16 arcs, 479 volcanic
+  systems, spacings distributed as random points along a ribbon), with means from about 27 km in
+  Central America to about 70 km in the Aleutians, and 0.5 to 10 km2 of land per km of arc after
+  30 to 50 Myr; the chunk, the share and the spacing are knobs set inside those ranges. Every chunk
+  and strip is booked as an `arc` gain and loss, and what is built then moves, collides, welds and
+  rifts like any continent. The ledger records the magma added every step.
 - **Ocean depth from age.** The floor subsides as it cools (Stein & Stein's GDH1: 2.6 km at the
   ridge, 0.365 km per root-Myr to 20 Myr, levelling towards 5.65 km); the maps tint ocean by it. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.

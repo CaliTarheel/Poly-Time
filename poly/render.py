@@ -65,8 +65,17 @@ def draw(world, path, width=720, boundaries=True):
                 colour[hit] = np.round(SHALLOW * (1 - f) + DEEP * f).astype(np.uint8)
         image[inside] = colour
     picture = Image.fromarray(image.reshape(height, width, 3))
+    pen = ImageDraw.Draw(picture)
+    # Islands smaller than a few pixels would fall between pixel centres: a dot each.
+    pixel_km2 = sphere.SPHERE_KM2 / (width * height)
+    for piece in world.crust:
+        if piece.kind == 'continent' and getattr(piece, 'mesh', None) is None and piece.area_km2() < 4. * pixel_km2:
+            centre = spherely.centroid(piece.shape)
+            local = sphere.from_lonlat(float(spherely.get_x(centre)), float(spherely.get_y(centre)))
+            plon, plat = sphere.to_lonlat(sphere.rotate(local, world.frame(piece.plate)))
+            x, y = (float(plon) + 180.) / 360. * width, (90. - float(plat)) / 180. * height
+            pen.ellipse([x - 1.5, y - 1.5, x + 1.5, y + 1.5], fill=tuple(int(v) for v in _tint(np.array([0.]))[0]))
     if boundaries:
-        pen = ImageDraw.Draw(picture)
         if hasattr(world, 'boundary_lines'):
             lines = list(world.boundary_lines())
         else:

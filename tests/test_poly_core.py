@@ -104,6 +104,17 @@ class SphereTests(unittest.TestCase):
         self.assertLess(len(tidy), n)
         self.assertLessEqual(abs(sphere.loop_area_km2(tidy)), abs(sphere.loop_area_km2(ring)) + sphere.DETAIL_KM2)
 
+    def test_the_left_area_of_a_loop_is_right_either_side_of_a_hemisphere(self):
+        small = sphere.from_lonlat([0., 120., 240.], [10., 10., 10.])
+        self.assertAlmostEqual(sphere.left_area_km2(small) / sphere.area_km2(sphere.polygon(small)), 1., places=9)
+        self.assertAlmostEqual(sphere.left_area_km2(small[::-1]) / sphere.area_km2(sphere.polygon(small[::-1])), 1., places=9)
+        equator = sphere.from_lonlat(np.arange(0., 360., 1.), np.zeros(360))
+        self.assertAlmostEqual(sphere.left_area_km2(equator) / (.5 * sphere.SPHERE_KM2), 1., places=9)
+
+    def test_a_disc_has_its_area(self):
+        ring = sphere.disc(sphere.from_lonlat(30., -40.), 4.)
+        self.assertAlmostEqual(sphere.area_km2(sphere.polygon(ring)) / (np.pi * 16.), 1., delta=.02)
+
     def test_simplifying_shared_rings_keeps_them_tiling_the_sphere(self):
         # Two hemispheres meeting along the equator, drawn every 28 km with a 1 km zig-zag.
         lon = np.arange(0., 360., .25)

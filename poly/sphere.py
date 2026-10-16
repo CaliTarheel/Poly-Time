@@ -88,6 +88,19 @@ def _full():
     return spherely.union(polygon(ring), polygon(ring[::-1]))
 
 
+def disc(centre, radius_km, count=24):
+    """A ring of `count` points `radius_km` from `centre`, counter-clockwise seen from outside."""
+    c = unit(centre)
+    a = np.cross(c, [0., 0., 1.])
+    if np.linalg.norm(a) < 1e-6:
+        a = np.cross(c, [1., 0., 0.])
+    a = unit(a)
+    b = np.cross(c, a)
+    t = np.linspace(0., 2. * np.pi, count, endpoint=False)[:, None]
+    angle = radius_km / RADIUS_KM
+    return unit(c[None] * np.cos(angle) + (a[None] * np.cos(t) + b[None] * np.sin(t)) * np.sin(angle))
+
+
 def strip(points, half_width_km):
     """A band `half_width_km` either side of a polyline, coarsely: the polyline is resampled every
     two band widths or so before the band is drawn, so a boundary with teeth or wiggles finer than
@@ -277,6 +290,21 @@ def loop_area_km2(loop) -> float:
     numerator = np.einsum('j,ij->i', a, np.cross(b, c))
     denominator = 1. + b @ a + np.einsum('ij,ij->i', b, c) + c @ a
     return float(2. * np.arctan2(numerator, denominator).sum()) * RADIUS_KM ** 2
+
+
+def left_area_km2(loop) -> float:
+    """Area on the left of a loop of great-circle edges, km2, by Gauss-Bonnet: 2 pi less the turning.
+
+    Good for any simple loop, a hemisphere included (`loop_area_km2` fans out from one vertex and
+    is only reliable below a hemisphere).
+    """
+    loop = np.asarray(loop, float)
+    if len(loop) < 3:
+        return 0.
+    a, v, b = np.roll(loop, 1, axis=0), loop, np.roll(loop, -1, axis=0)
+    n1, n2 = np.cross(a, v), np.cross(v, b)
+    turning = np.arctan2(np.einsum('ij,ij->i', n1, b), np.einsum('ij,ij->i', n1, n2))
+    return float(2. * np.pi - turning.sum()) * RADIUS_KM ** 2
 
 
 def tidy_ring(ring, tolerance=1e-10, tooth_km2=0.):
@@ -712,7 +740,11 @@ def node_shared(rings, node_km=NODE_KM, groups=None):
     return result
 
 
-def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2, rounds=8, groups=None, stats=None):
+SIMPLIFY_NET = 1e-4  # simplifying may move a ring's enclosed area by this fraction of it, net
+
+
+def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2, rounds=8, groups=None, stats=None,
+                    net_fraction=SIMPLIFY_NET):
     """Rings with small zig-zags and points on straight edges taken out, keeping shared edges shared.
 
     A vertex goes only if, in every ring that has it, it cuts off a triangle smaller than
@@ -720,7 +752,10 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
     two rings share stays shared, so rings that tiled the sphere still tile it; the triangle just
     changes sides. A vertex only one ring has lies on another ring's edge, or nowhere shared, and
     goes only below `alone_km2`. Junctions (neighbours differ), and vertices whose removal would
-    leave an edge longer than `max_edge_km`, stay. Returns the new rings, how many vertices went,
+    leave an edge longer than `max_edge_km`, stay. Zig-zags cancel, but every vertex of a convex
+    ring cuts off area on the same side, so the net change of each ring's area is held within
+    `net_fraction` of it: a small island keeps its outline instead of being whittled to a pentagon
+    (and its crust turned into the sea around it). Returns the new rings, how many vertices went,
     and how many went from each ring.
     """
     from scipy.spatial import cKDTree
@@ -732,6 +767,11 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
     start = sizes.copy()
     points = np.vstack(rings)
     ring_of = np.repeat(np.arange(len(rings)), sizes)
+    # A ring's budget is set by the smaller side of it, whichever side its polygon is on (the
+    # ring of an island and the ring of the hole it sits in bound the same 50 km2).
+    left = np.array([left_area_km2(r) for r in rings])
+    budget = net_fraction * np.minimum(left, SPHERE_KM2 - left)
+    net = np.zeros(len(rings))
     # Which vertices are the same point, once: taking vertices out never moves the others.
     clusters, cluster = _shared_clusters(points)
     removed = 0
@@ -798,10 +838,29 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
         key = worst + np.arange(clusters) * 1e-12
         lo, hi = low[first], high[first]
         go = candidate & ((key < key[lo]) | ~candidate[lo]) & ((key < key[hi]) | ~candidate[hi])
+        # Each ring's area moves by the triangles its vertices cut off, less where the ring turns
+        # back on itself; what this round would move is held within the ring's budget by keeping
+        # the vertices of any ring that would go over it (from every ring that shares them).
+        turn = np.sign(np.einsum('ij,ij->i', np.cross(a, v), b))  # a left turn: the triangle is on the left
+        change = -triangle * turn  # of the area on the ring's left (the right loses the same)
+        delta = np.zeros(len(rings))
+        for _ in range(rounds):
+            going = go[cluster]
+            delta = np.bincount(ring_of, weights=np.where(going, change, 0.), minlength=len(rings))
+            over = np.abs(net + delta) > budget
+            if not over.any():
+                break
+            held = np.zeros(clusters, bool)
+            held[cluster[going & over[ring_of]]] = True
+            go &= ~held
+        else:
+            going = go[cluster]
+            delta = np.bincount(ring_of, weights=np.where(going, change, 0.), minlength=len(rings))
         if stats is not None:
             stats['rounds'][-1]['go'] = int(go.sum())
         if not go.any():
             break
+        net += delta
         keep = ~go[cluster]
         removed += int((~keep).sum())
         points, ring_of, cluster = points[keep], ring_of[keep], cluster[keep]
