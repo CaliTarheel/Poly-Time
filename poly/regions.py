@@ -83,6 +83,23 @@ ISLAND_SPACING_KM = 70.
 # 20 Myr at the reference convergence, 11 Myr at 90 km/Myr). Earth's arcs take 5-15 Myr to break
 # the surface. A third of the ribbon's threshold, so islands always come first.
 ARC_EMERGE_KM3_PER_KM = 600.
+# Slab rollback: a trench whose slab retreats faster than its overriding plate advances sheds a
+# forearc plate, from the trench to FOREARC_KM behind it (the arc rides with it), that moves with
+# the hinge; the gap behind it opens as back-arc ocean through the ridge rule. The hinge retreats at
+# ROLLBACK_KM_MYR for a slab ROLLBACK_REFERENCE_MYR old, as the square root of its age, capped
+# (hinges retreat at 0-50 km/Myr in a mantle frame, Marianas and Tonga fastest); a trench run
+# shorter than ROLLBACK_MIN_RUN_KM keeps its forearc attached, and one longer than
+# FOREARC_MAX_RUN_KM sheds in stretches of that length, each its own forearc with its own hinge
+# (Izu-Bonin, Mariana and Tonga are separate basins along one margin). A back-arc opens only where
+# the retreat outruns the overriding plate's advance by ROLLBACK_MARGIN_KM_MYR.
+FOREARC_KM = 250.
+ROLLBACK_KM_MYR = 20.
+ROLLBACK_REFERENCE_MYR = 80.
+ROLLBACK_CAP = 1.5
+ROLLBACK_MIN_RUN_KM = 1000.
+FOREARC_MAX_RUN_KM = 3000.
+ROLLBACK_MARGIN_KM_MYR = 10.
+FOREARC_MIN_KM2 = 1e4
 # Terranes: a continent piece smaller than this reaching a trench is not shortened into itself but
 # docks onto the overriding plate with its volume (islands, arcs, microcontinents: Kohistan,
 # Wrangellia); larger ones collide and suture as before.
@@ -677,12 +694,14 @@ class RegionWorld:
     def _regroup(self, entry=None) -> list:
         """Plates that came apart become separate plates; slivers and vanished plates go to neighbours."""
         events = []
+        forearcs = getattr(self, 'forearcs', {})
         for plate in list(self.plates()):
             region = self.regions[plate]
             area = sphere.area_km2(region)
             pieces, _ = sphere.parts(region)
             pieces.sort(key=lambda g: -sphere.area_km2(g))
-            if area < MINIMUM_PLATE_KM2:
+            minimum = FOREARC_MIN_KM2 if plate in forearcs else MINIMUM_PLATE_KM2
+            if area < minimum:
                 pieces = [region] if area >= TINY_KM2 else []
                 keep = []
             else:
@@ -713,7 +732,7 @@ class RegionWorld:
                         continue
                     self._give(plate, piece, into, entry)
                     events.append(dict(kind='absorbed', plate=plate, into=into, area_km2=sphere.area_km2(piece)))
-            if not keep and plate in self.regions and sphere.area_km2(self.regions[plate]) < MINIMUM_PLATE_KM2:
+            if not keep and plate in self.regions and sphere.area_km2(self.regions[plate]) < minimum:
                 rest = self.regions[plate]
                 if sphere.area_km2(rest) >= TINY_KM2:
                     into = self._main_neighbour(rest, plate)
@@ -1239,6 +1258,116 @@ class RegionWorld:
                 return c
         return None
 
+    def shed_forearcs(self, rotations_per_myr) -> list:
+        """Shed a forearc plate from the first trench run whose slab retreats faster than its
+        overriding plate advances (see FOREARC_KM); one per call, since the boundaries change."""
+        forearcs = self.forearcs = getattr(self, 'forearcs', {})
+        for b in list(self.boundaries):
+            if len(b.points) < 2:
+                continue
+            for lo, hi in _runs_of(b.kinds, 'trench'):
+                for over in sorted({o for o in b.overriding[lo:hi] if o in (b.left, b.right)}):
+                    if over in forearcs or over not in self.regions or over not in rotations_per_myr:
+                        continue
+                    ks = [k for k in range(lo, hi) if b.overriding[k] == over]
+                    lengths = np.cumsum([float(sphere.arc_km(b.points[k], b.points[k + 1])) for k in ks])
+                    if len(ks) and lengths[-1] > FOREARC_MAX_RUN_KM:
+                        ks = ks[:max(int(np.searchsorted(lengths, FOREARC_MAX_RUN_KM)), 2)]  # the first stretch; the rest later
+                    hinge = self._hinge(b, ks, over)
+                    if hinge is None or hinge['length_km'] < ROLLBACK_MIN_RUN_KM:
+                        continue
+                    advance = float(np.cross(np.asarray(rotations_per_myr[over], float), hinge['centre']) @ hinge['toward']) * sphere.RADIUS_KM
+                    retreat = _rollback_km_myr(hinge['age_myr'])
+                    if retreat <= advance + ROLLBACK_MARGIN_KM_MYR:
+                        continue
+                    # The forearc: the overriding plate within FOREARC_KM of the run, on its side.
+                    points = b.points[ks[0]:ks[-1] + 2]
+                    poles = sphere.unit(np.cross(points[:-1], points[1:]))
+                    sign = 1. if over == b.left else -1.
+                    half = .5 * FOREARC_KM / sphere.RADIUS_KM
+                    mids = b.mids()[ks]
+                    inward = sphere.unit(mids * np.cos(half) + sign * poles * np.sin(half))
+                    band = sphere.strip(inward, .5 * FOREARC_KM)
+                    region = sphere.intersection(self.regions[over], band)
+                    area = sphere.area_km2(region)
+                    if area < FOREARC_MIN_KM2:
+                        continue
+                    new = max(list(self.regions) + list(self.frames) + list(self.parents)) + 1
+                    self.frames[new] = self.frame(over).copy()
+                    self.parents[new] = over
+                    self.names[new] = 'forearc of %s' % self.names.get(over, 'Plate %d' % over)
+                    self._give(over, region, new)
+                    forearcs[new] = over
+                    spherely.prepare(region)
+                    self.boundaries = self._derive(self._index(_split_by_mask(
+                        self.boundaries, over, new, lambda mids: np.asarray(spherely.contains(region, _points(mids))))), {})
+                    return [dict(kind='forearc', plate=over, new=new, area_km2=area, length_km=hinge['length_km'],
+                                 rollback_km_myr=retreat, advance_km_myr=advance, slab_age_myr=hinge['age_myr'])]
+        return []
+
+    def _hinge(self, b, ks, over):
+        """The trench run `ks` of `b` under `over`: its centre, the unit vector toward the subducting
+        plate (tangent at the centre), its length and the mean age of the slab going down."""
+        if not ks:
+            return None
+        down = b.right if over == b.left else b.left
+        sign = 1. if over == b.left else -1.
+        points = b.points
+        lengths = np.array([float(sphere.arc_km(points[k], points[k + 1])) for k in ks])
+        total = float(lengths.sum())
+        if total <= 0.:
+            return None
+        mids = b.mids()[ks]
+        poles = sphere.unit(np.cross(points[ks], points[[k + 1 for k in ks]]))
+        centre = sphere.unit((mids * lengths[:, None]).sum(axis=0))
+        toward = (-sign * poles * lengths[:, None]).sum(axis=0)
+        toward = toward - centre * float(toward @ centre)
+        if np.linalg.norm(toward) < 1e-12:
+            return None
+        toward = sphere.unit(toward)
+        ages = np.array([self._age(b, k, down) for k in ks])
+        return dict(centre=centre, toward=toward, length_km=total, age_myr=float((ages * lengths).sum() / total))
+
+    def hinge_extras(self, rotations_per_myr) -> dict:
+        """What each forearc plate's rotation adds to its parent's: {forearc: (parent, extra rad/Myr)},
+        the slab's retreat where that outruns the parent's own advance toward the trench."""
+        forearcs = getattr(self, 'forearcs', {})
+        extras = {}
+        for f, over in forearcs.items():
+            if f not in self.regions or over not in rotations_per_myr or over not in self.regions:
+                continue
+            w_over = np.asarray(rotations_per_myr[over], float)
+            runs = []
+            for b in self.boundaries:
+                if f not in (b.left, b.right) or len(b.points) < 2:
+                    continue
+                ks = [k for k, kind in enumerate(b.kinds) if kind == 'trench' and b.overriding[k] == f]
+                hinge = self._hinge(b, ks, f)
+                if hinge is not None:
+                    runs.append(hinge)
+            if not runs:
+                extras[f] = (over, np.zeros(3))
+                continue
+            best = max(runs, key=lambda h: h['length_km'])
+            advance = float(np.cross(w_over, best['centre']) @ best['toward']) * sphere.RADIUS_KM
+            extra = max(_rollback_km_myr(best['age_myr']) - advance, 0.) / sphere.RADIUS_KM
+            extras[f] = (over, extra * np.cross(best['centre'], best['toward']))
+        return extras
+
+    def prescribe(self, rotations_per_myr, balance=None) -> dict:
+        """Forearc plates move with the hinge: their overriding plate's motion, plus the slab's
+        retreat where that outruns the plate's own advance (the balance imposes the same tie when
+        it is solved with `hinge_extras`; this applies it to given rotations)."""
+        forearcs = getattr(self, 'forearcs', {})
+        if not forearcs:
+            return rotations_per_myr
+        out = dict(rotations_per_myr)
+        for f, (over, extra) in self.hinge_extras(out).items():
+            out[f] = np.asarray(out[over], float) + extra
+            if balance is not None:
+                balance.last['speed_km_myr'][f] = float(np.linalg.norm(out[f])) * sphere.RADIUS_KM
+        return out
+
     def rift(self, cut) -> dict:
         """Split `cut.plate` along the great circle normal to `cut.pole`; the + side becomes a new plate.
 
@@ -1295,6 +1424,11 @@ class RegionWorld:
                 self.regions.pop(gone, None)
                 self.crust = [c for c in self.crust if c.plate != gone]
                 self.parents[gone] = keep
+                forearcs = getattr(self, 'forearcs', {})
+                forearcs.pop(gone, None)
+                for f, o in list(forearcs.items()):
+                    if o == gone:
+                        forearcs[f] = keep
                 into = {p: (keep if q == gone else q) for p, q in into.items()}
                 into[gone] = keep
                 events.append(dict(kind='suture', plates=(b.left, b.right), into=keep, gone=gone,
@@ -1455,14 +1589,29 @@ def _relabel(boundaries, into):
     return result
 
 
+def _rollback_km_myr(age_myr):
+    """How fast a hinge retreats over a slab `age_myr` old."""
+    return ROLLBACK_KM_MYR * min(np.sqrt(max(float(age_myr), 0.) / ROLLBACK_REFERENCE_MYR), ROLLBACK_CAP)
+
+
+def _points(xyz):
+    lon, lat = sphere.to_lonlat(np.asarray(xyz, float))
+    return spherely.points(lon, lat)
+
+
 def _split_by_side(boundaries, plate, new, pole):
     """The boundaries with `plate`'s segments on the + side of `pole` given to `new`."""
+    return _split_by_mask(boundaries, plate, new, lambda mids: mids @ pole > 0.)
+
+
+def _split_by_mask(boundaries, plate, new, inside):
+    """The boundaries with `plate`'s segments whose midpoints `inside` says are given to `new`."""
     result = []
     for b in boundaries:
         if plate not in (b.left, b.right):
             result.append(b)
             continue
-        side = b.mids() @ pole > 0.
+        side = np.asarray(inside(b.mids()), bool)
         start = 0
         for k in range(1, len(side) + 1):
             if k < len(side) and side[k] == side[start]:
