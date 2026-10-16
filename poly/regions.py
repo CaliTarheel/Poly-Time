@@ -23,12 +23,13 @@ tiles it, and that the area created equals the area destroyed, term by term.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 import numpy as np
 import spherely
 
-from poly import sphere
+from poly import acceptance, sphere
 from poly.build import TRANSFORM_RATIO, _smooth
 from poly.mesh import ContinentMesh
 from poly.policy import PlatePolicy, main_neighbours
@@ -45,7 +46,7 @@ PROBE_KM = .5       # how far outside a plate's outline its neighbour is looked 
 MARGIN = .2         # hysteresis around the transform threshold when re-typing
 MIN_RUN_KM = 50.    # a run of one boundary kind shorter than this takes its longer neighbour's kind
 TINY_KM2 = 1e-6     # areas below this are numerical
-CHECK_TOLERANCE = 1e-4  # of the sphere's area, per step (0.01%)
+CHECK_TOLERANCE = acceptance.GEOMETRY_KM2 / sphere.SPHERE_KM2  # compatibility alias: 1 ppm
 CRUMB_KM2 = 100.        # historical default; live worlds use plate_policy.numerical_crumb_km2
 SUTURE_KM = 100.        # a collision that has closed this far welds its two plates into one
 SIMPLIFY_KM2 = 100.     # a boundary vertex cutting off less than this with its neighbours is dropped
@@ -224,7 +225,23 @@ class RegionWorld:
 
     # ------------------------------------------------------------------- step
     def step(self, rotations_per_myr: dict, dt: float = 1.) -> dict:
+        """Advance atomically: a failed candidate leaves this world untouched.
+
+        Historical ledger entries are append-only during a step, so only their
+        list is copied. Geometry, meshes, boundary inventories and all other
+        mutable state belong to the candidate until every check passes.
+        """
+        if not np.isfinite(dt) or dt < 0.:
+            raise ValueError('Step duration must be finite and nonnegative.')
+        candidate = deepcopy(self, {id(self.ledger): list(self.ledger)})
+        entry = candidate._step_in_place(rotations_per_myr, dt)
+        self.__dict__.clear()
+        self.__dict__.update(candidate.__dict__)
+        return entry
+
+    def _step_in_place(self, rotations_per_myr: dict, dt: float = 1.) -> dict:
         rotations_per_myr = self._complete(rotations_per_myr)
+        continent_before = self._continent_km3()
         self._mesh_continents()
         crust_before = sum(c.area_km2() for c in self.crust)
         self.retired_arc_km3 = np.asarray(getattr(self, 'retired_arc_km3', np.zeros(2))).copy()
@@ -239,7 +256,8 @@ class RegionWorld:
         moved = {p: sphere.rotate_geography(r, motion[p]) for p, r in self.regions.items()}
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
                      events=[], continent_arrived=[], thickened_km3=0., arc_km3=0., eroded_km3=0.,
-                     sediment_to_sea_km3=0.)
+                     sediment_to_sea_km3=0., continent_before_km3=continent_before,
+                     numerical_area_added_km2=0., numerical_area_removed_km2=0.)
         lost = {p: [] for p in moved}      # (world geography, boundary kind, overriding plate or None)
         gained = {p: [] for p in moved}    # (world geography, gain category)
         stage_cache = {}
@@ -319,6 +337,7 @@ class RegionWorld:
             area = piece.area_km2()
             if area < DETAIL_KM2 and piece.kind == 'ocean':
                 entry['lost']['sliver'] += area
+                entry['numerical_area_removed_km2'] += area
                 continue
             kept.append(piece)
         self.crust = kept
@@ -331,10 +350,12 @@ class RegionWorld:
             piece.shape, _, _ = sphere.clean(piece.shape, minimum_km2=DETAIL_KM2)
             change = piece.area_km2() - area
             if change < 0.:
+                entry['numerical_area_removed_km2'] -= change
                 entry['lost']['sliver'] -= change
                 if piece.kind == 'continent':  # continent let go as debris still keeps its volume
                     entry['thickened_km3'] += self._thicken(piece, -change, [c for c in self.crust if c.plate == piece.plate])
             elif change > 0.:
+                entry['numerical_area_added_km2'] += change
                 entry['gained']['junction'] += change
         self.crust = [c for c in self.crust if c.area_km2() >= TINY_KM2]
         # Simplifying costs about as much as the rest of a sub-step, so it runs once a Myr, or
@@ -342,7 +363,7 @@ class RegionWorld:
         vertices = sum(len(r) for c in self.crust for poly in sphere.polygons(c.shape) for r in poly)
         due = (self.time_myr + dt - getattr(self, 'simplified_myr', -np.inf) >= SIMPLIFY_EVERY_MYR - 1e-9
                or vertices > SIMPLIFY_GROWTH * getattr(self, 'simplified_count', np.inf))
-        entry['simplified_vertices'] = self._simplify() if due else 0
+        entry['simplified_vertices'] = self._simplify(entry) if due else 0
         if due:
             self.simplified_myr = self.time_myr + dt
             self.simplified_count = sum(len(r) for c in self.crust for poly in sphere.polygons(c.shape) for r in poly)
@@ -371,7 +392,7 @@ class RegionWorld:
                 regions[plate] = region
         return regions
 
-    def _simplify(self) -> int:
+    def _simplify(self, entry=None) -> int:
         """Take out the zig-zags and points on straight edges that splitting along stage lines leaves.
 
         Every crust ring is simplified together in the world frame, so a vertex leaves both plates'
@@ -409,6 +430,10 @@ class RegionWorld:
                 continue
             if abs(sphere.area_km2(shape) - area) <= count * SIMPLIFY_KM2 + 1.:
                 c.shape = shape
+                if entry is not None:
+                    change = c.area_km2() - area
+                    entry['numerical_area_added_km2'] += max(change, 0.)
+                    entry['numerical_area_removed_km2'] += max(-change, 0.)
                 if c.kind == 'continent':
                     # The outline moved a little; the crust keeps its volume on the new area.
                     grown = c.area_km2()
@@ -1477,22 +1502,9 @@ class RegionWorld:
 
     # ---------------------------------------------------------------- check
     def _check(self, entry):
-        total = sum(entry['plates_km2'].values())
-        entry['tiling_error_km2'] = total - sphere.SPHERE_KM2
-        crust = {}
-        for piece in self.crust:
-            crust[piece.plate] = crust.get(piece.plate, 0.) + piece.area_km2()
-        entry['crust_vs_plate_error_km2'] = max((abs(crust.get(p, 0.) - a) for p, a in entry['plates_km2'].items()), default=0.)
-        entry['balance_error_km2'] = sum(entry['gained'].values()) - sum(entry['lost'].values())
-        entry['continent_km3'] = self._continent_km3()
-        # Regions are rebuilt from the crust every step, so rebuilding error cannot accumulate; a step
-        # is refused beyond 1e-4 of the sphere (0.01%, ~51,000 km2), ten times inside the 0.1% standard.
-        scale = CHECK_TOLERANCE * sphere.SPHERE_KM2
-        for key, message in (('tiling_error_km2', 'Plates no longer tile the sphere'),
-                             ('crust_vs_plate_error_km2', 'Crust no longer tiles its plate'),
-                             ('balance_error_km2', 'Crust created and destroyed do not balance')):
-            if abs(entry[key]) > scale:
-                raise ValueError('%s: %.3g km2 off.' % (message, entry[key]))
+        acceptance.geometry(self, FULL, entry)
+        acceptance.budgets(self, entry)
+
 
 
 def _loss_category(boundary_kind, crust_kind):
