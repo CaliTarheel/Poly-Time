@@ -36,8 +36,9 @@ from poly.topology import segment_motion
 from poly.world import (AGE_BAND_MYR, COLLISION_KM2, INITIATION_KM, MINIMUM_PLATE_KM2, SAMPLE_KM, TOLERANCE,
                         Crust, _merge_bands)
 
-GAINS = ('ridge', 'trench_opening', 'sliver', 'junction', 'escape', 'arc')
-LOSSES = ('subducted', 'continent_at_trench', 'collision', 'compression', 'sliver', 'junction', 'escape', 'arc')
+GAINS = ('ridge', 'trench_opening', 'sliver', 'junction', 'escape', 'arc', 'accreted')
+LOSSES = ('subducted', 'continent_at_trench', 'collision', 'compression', 'sliver', 'junction', 'escape', 'arc',
+          'accreted', 'overridden')
 INHERIT_KM = 300.   # a boundary segment takes the type of the nearest old one of the same plates within this
 PROBE_KM = .5       # how far outside a plate's outline its neighbour is looked for
 MARGIN = .2         # hysteresis around the transform threshold when re-typing
@@ -81,6 +82,10 @@ ISLAND_SPACING_KM = 70.
 # 20 Myr at the reference convergence, 11 Myr at 90 km/Myr). Earth's arcs take 5-15 Myr to break
 # the surface. A third of the ribbon's threshold, so islands always come first.
 ARC_EMERGE_KM3_PER_KM = 600.
+# Terranes: a continent piece smaller than this reaching a trench is not shortened into itself but
+# docks onto the overriding plate with its volume (islands, arcs, microcontinents: Kohistan,
+# Wrangellia); larger ones collide and suture as before.
+TERRANE_KM2 = 1e6
 
 
 def _full():
@@ -226,7 +231,7 @@ class RegionWorld:
         moved = {p: sphere.rotate_geography(r, motion[p]) for p, r in self.regions.items()}
         entry = dict(time_myr=self.time_myr + dt, gained={k: 0. for k in GAINS}, lost={k: 0. for k in LOSSES},
                      events=[], continent_arrived=[], thickened_km3=0., arc_km3=0.)
-        lost = {p: [] for p in moved}      # (world geography, boundary kind)
+        lost = {p: [] for p in moved}      # (world geography, boundary kind, overriding plate or None)
         gained = {p: [] for p in moved}    # (world geography, gain category)
         stage_cache = {}
 
@@ -266,7 +271,7 @@ class RegionWorld:
                 if sphere.area_km2(remaining) >= TINY_KM2:
                     self._split_overlap(remaining, 'junction', None, p, q, stage, lost)
                 for plate, start in zip((p, q), before):
-                    given = [shape for shape, _ in lost[plate][start:]]
+                    given = [shape for shape, *_ in lost[plate][start:]]
                     if given:
                         holding[plate] = sphere.difference(holding[plate], sphere.union(*given))
         # Gaps: within a run's zone, split along that pair's half-stage line; the rest to the nearest plate.
@@ -419,18 +424,27 @@ class RegionWorld:
         # The losses are disjoint pieces of the plate's overlaps; joined by boundary kind, each crust
         # piece meets at most one geography per kind and is cut once, instead of once per loss.
         by_kind = {}
-        for shape, kind in losses:
+        for shape, kind, over in losses:
             if sphere.area_km2(shape) >= TINY_KM2:
-                by_kind.setdefault(kind, []).append(shape)
-        local_by_kind = {kind: sphere.rotate_geography(sphere.union(*shapes), back) for kind, shapes in by_kind.items()}
+                by_kind.setdefault((kind, over), []).append(shape)
+        local_by_kind = {key: sphere.rotate_geography(sphere.union(*shapes), back) for key, shapes in by_kind.items()}
         if local_by_kind:
             all_local = sphere.union(*local_by_kind.values())
             for piece in mine:
                 whole = sphere.intersection(piece.shape, all_local)
                 if sphere.area_km2(whole) < TINY_KM2:
                     continue
+                if piece.kind == 'continent' and piece.area_km2() < TERRANE_KM2:
+                    # A terrane reaching a trench docks whole onto the overriding plate.
+                    to = next((over for (kind, over), local in local_by_kind.items()
+                               if kind == 'trench' and over in self.regions
+                               and sphere.area_km2(sphere.intersection(whole, local)) >= DETAIL_KM2), None)
+                    if to is not None and self._dock(piece, plate, to, others, entry):
+                        continue
                 continental = 0.
-                for kind, local in local_by_kind.items():
+                before_km2 = piece.area_km2()
+                before_km3 = piece.volume_km3() if piece.kind == 'continent' else 0.
+                for (kind, over), local in local_by_kind.items():
                     taken = sphere.intersection(whole, local)
                     area = sphere.area_km2(taken)
                     if area < TINY_KM2:
@@ -441,16 +455,25 @@ class RegionWorld:
                         continental += area
                     if category == 'continent_at_trench':
                         # Where the continent went down, arrival by arrival, not the middle of them all.
-                        for shape in by_kind[kind]:
+                        for shape in by_kind[(kind, over)]:
                             part = sphere.intersection(whole, sphere.rotate_geography(shape, back))
                             if sphere.area_km2(part) >= TINY_KM2:
                                 entry['continent_arrived'].append(
                                     (sphere.rotate(_point_in(part), self.frame(plate)), sphere.area_km2(part), plate))
                 piece.shape = sphere.difference(piece.shape, whole)
-                if continental >= TINY_KM2:
+                if piece.kind == 'continent' and continental >= TINY_KM2:
                     # Continent is too light to go away: it shortens and thickens, keeping its volume,
                     # and some of it escapes sideways over the plate's own ocean.
-                    entry['thickened_km3'] += self._thicken(piece, continental, mine)
+                    left = piece.area_km2()
+                    if left >= TINY_KM2:
+                        if piece.mesh is not None:
+                            recut = piece.mesh.recut(piece.shape, left, before_km3)
+                            if recut is not None:
+                                piece.mesh = recut
+                        piece.thickness_km = before_km3 / left
+                    else:
+                        self._bequeath(piece, before_km3, mine)
+                    entry['thickened_km3'] += continental * before_km3 / max(before_km2, TINY_KM2)
                     self._escape(piece, continental, mine, entry)
         for shape, category in gains:
             area = sphere.area_km2(shape)
@@ -459,6 +482,73 @@ class RegionWorld:
             entry['gained'][category] += area
             mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back), self.time_myr + .5 * dt))
         self.crust = others + [c for c in mine if sphere.area_km2(c.shape) >= TINY_KM2]
+
+    def _bequeath(self, piece, volume, mine):
+        """A continent piece taken away whole hands its volume to its plate's largest other continent."""
+        others = [c for c in mine if c is not piece and c.kind == 'continent' and c.area_km2() >= TINY_KM2]
+        if not others:
+            return
+        heir = max(others, key=lambda c: c.area_km2())
+        if heir.mesh is not None:
+            heir.mesh.add_volume(volume, heir.area_km2(), near=None if piece.mesh is None else piece.mesh.nodes)
+        heir.thickness_km += volume / heir.area_km2()
+
+    def _dock(self, piece, plate, to, others, entry) -> bool:
+        """Dock the continent `piece` of `plate`, a terrane that has reached a trench, onto plate `to`.
+
+        The whole piece crosses as a body, with its volume and its thickness field, and the trench
+        then runs round it (the regions are rebuilt from the crust). It replaces the ocean under it
+        (an `accreted` gain and loss, and the ocean `overridden`); where it lands on continent, a
+        terrane docked a step earlier included, that much stacks onto it as thickness where it
+        lands. `others` is the crust of the other plates, which the caller writes back. Returns
+        whether the piece was dealt with here.
+        """
+        area = piece.area_km2()
+        volume = piece.volume_km3()
+        if area < DETAIL_KM2:
+            return False
+        carry = self.frame(to).T @ self.frame(plate)
+        shape = sphere.rotate_geography(piece.shape, carry)
+        theirs = [c for c in others if c.plate == to]
+        for c in [c for c in theirs if c.kind == 'continent']:
+            part = sphere.intersection(shape, c.shape)
+            a = sphere.area_km2(part)
+            if a < TINY_KM2:
+                continue
+            share = volume * a / area
+            if getattr(c, 'mesh', None) is not None:
+                near = np.vstack([r for poly in sphere.polygons(part) for r in poly])
+                c.mesh.add_volume(share, c.area_km2(), near=near)
+            c.thickness_km += share / c.area_km2()
+            entry['thickened_km3'] += share
+            entry['lost']['continent_at_trench'] += a
+            shape = sphere.difference(shape, part)
+        left = sphere.area_km2(shape)
+        if left < DETAIL_KM2:
+            entry['lost']['continent_at_trench'] += left  # a crumb: gone
+            piece.shape = sphere.EMPTY  # all of it stacked: the caller drops the empty piece
+            return True
+        docked_km3 = volume * left / area
+        overridden = 0.
+        for c in [c for c in theirs if c.kind == 'ocean']:
+            part = sphere.intersection(c.shape, shape)
+            a = sphere.area_km2(part)
+            if a >= TINY_KM2:
+                c.shape = sphere.difference(c.shape, part)
+                overridden += a
+        piece.plate, piece.shape = to, shape
+        piece.thickness_km = docked_km3 / left
+        if getattr(piece, 'mesh', None) is not None:
+            rotated = piece.mesh.rotated(carry)
+            recut = rotated.recut(shape, left, docked_km3) if left < .999 * area else None
+            piece.mesh = recut if recut is not None else rotated
+        # Books: the terrane leaves one plate and joins the other (a loss and a gain of the same
+        # continent), and the ocean it covers on the plate it joins is gone.
+        entry['gained']['accreted'] += left
+        entry['lost']['accreted'] += left
+        entry['lost']['overridden'] += overridden
+        entry['events'].append(dict(kind='accreted', plates=(plate, to), area_km2=left, volume_km3=docked_km3))
+        return True
 
     def _thicken(self, piece, area, mine):
         """Keep the volume of `area` km2 of continent just taken from `piece`; returns that volume.
@@ -728,11 +818,34 @@ class RegionWorld:
 
     def _split_overlap(self, local, kind, over, p, q, stage, lost):
         if kind == 'trench' and over in (p, q):
-            lost[q if over == p else p].append((local, 'trench'))
+            lost[q if over == p else p].append((local, 'trench', over))
             return
-        mine = sphere.intersection(local, stage((p, q), p))
-        lost[p].append((sphere.difference(local, mine), kind))
-        lost[q].append((mine, kind))
+        mine = sphere.intersection(local, stage((p, q), p))  # what q loses
+        theirs = sphere.difference(local, mine)              # what p loses
+        # In the leftovers no zone covers, continent yields last: ocean goes before continent on
+        # either side (a terrane just docked sticks out past the coarse zone of its trench). Along a
+        # collision or a converging boundary the continent shortens as it should.
+        for a, b, their_continent in ((p, q, self._continent_world(p)), (q, p, self._continent_world(q))) if kind == 'junction' else ():
+            loses = theirs if a == p else mine
+            keep = sphere.intersection(loses, their_continent)
+            if sphere.area_km2(keep) >= TINY_KM2:
+                if a == p:
+                    theirs, mine = sphere.difference(theirs, keep), sphere.union(mine, keep)
+                else:
+                    mine, theirs = sphere.difference(mine, keep), sphere.union(theirs, keep)
+        lost[p].append((theirs, kind, None))
+        lost[q].append((mine, kind, None))
+
+    def _continent_world(self, plate):
+        """The plate's continent in the world frame, as it stood at the start of this step (cached)."""
+        cache = getattr(self, '_continent_cache', None)
+        if cache is None or cache.get('time') != self.time_myr:
+            cache = self._continent_cache = {'time': self.time_myr}
+        if plate not in cache:
+            shapes = [c.shape for c in self.crust if c.plate == plate and c.kind == 'continent']
+            frame = self.frame(plate)
+            cache[plate] = sphere.rotate_geography(sphere.union(*shapes), frame) if shapes else sphere.EMPTY
+        return cache[plate]
 
     def _runs(self, rotations_per_myr, dt, reach) -> dict:
         """Per plate pair, the old boundary's runs of one type as zones carried by the pair's mean motion."""

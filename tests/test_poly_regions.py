@@ -217,6 +217,53 @@ class RegionStepTests(unittest.TestCase):
         self.assertEqual(arc[0].thickness_km, regions.ARC_THICK_KM)
         self.assertLess(abs(entry['tiling_error_km2']), TOLERANCE_KM2)
 
+    def test_an_island_reaching_a_trench_docks_onto_the_overriding_plate(self):
+        # A small island on the cap, just west of the trench at lon 40, is carried east into it.
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        island = sphere.polygon(disc((39., 0.), .4))
+        for piece in world.crust:
+            if piece.plate == 1:
+                piece.shape = sphere.difference(piece.shape, island)
+        world.crust.append(Crust(1, 'continent', island, 0., 20.))
+        area, volume = world.areas()['continent'], world._continent_km3()
+        events = []
+        for _ in range(8):
+            entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
+            assert_checks(self, entry)
+            events += entry['events']
+        self.assertTrue(any(e['kind'] == 'accreted' for e in events))
+        self.assertFalse(any(e['kind'] == 'collision' for e in events))
+        docked = [c for c in world.crust if c.kind == 'continent' and c.plate == 2]
+        self.assertTrue(docked)
+        self.assertAlmostEqual(sum(c.area_km2() for c in docked) / area, 1., delta=.01)  # all of it crossed
+        self.assertAlmostEqual(world.areas()['continent'] / area, 1., delta=.01)
+        self.assertAlmostEqual(world._continent_km3() / volume, 1., delta=1e-3)
+        self.assertEqual(sum(e['gained']['accreted'] for e in world.ledger), sum(e['lost']['accreted'] for e in world.ledger))
+        self.assertEqual(sum(e['lost']['continent_at_trench'] for e in world.ledger), 0.)
+
+    def test_an_island_landing_on_a_continent_thickens_it_where_it_lands(self):
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        island = sphere.polygon(disc((39., 0.), .4))
+        continent = sphere.polygon(disc((44., 0.), 4.))
+        for piece in world.crust:
+            if piece.plate == 1:
+                piece.shape = sphere.difference(piece.shape, island)
+            if piece.plate == 2:
+                piece.shape = sphere.difference(piece.shape, continent)
+        world.crust.append(Crust(1, 'continent', island, 0., 20.))
+        world.crust.append(Crust(2, 'continent', continent))
+        volume = world._continent_km3()
+        with mock.patch.object(regions, 'ARC_KM3_PER_KM_MYR', 0.):  # no magma, so the volume change is the island's
+            for _ in range(8):
+                entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
+                assert_checks(self, entry)
+        (piece,) = [c for c in world.crust if c.kind == 'continent' and getattr(c, 'mesh', None) is not None]
+        self.assertFalse([c for c in world.crust if c.kind == 'continent' and c.plate == 1])  # the island is gone
+        self.assertAlmostEqual(world._continent_km3() / volume, 1., delta=1e-3)  # into the continent
+        lon = sphere.to_lonlat(sphere.rotate(piece.mesh.nodes, world.frame(2)))[0]
+        west, east = lon < np.median(lon), lon >= np.median(lon)
+        self.assertGreater(piece.mesh.thickness[west].mean(), piece.mesh.thickness[east].mean())
+
     def test_eight_plates_keep_their_crust_accounted_for(self):
         network_world, omegas = voronoi_world(count=8, seed=3, speed_km_myr=30., continents=3)
         world = regions.from_network(network_world)
