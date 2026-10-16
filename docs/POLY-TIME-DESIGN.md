@@ -189,6 +189,26 @@ equals the area destroyed, term by term.
   30% on Earth), so most of its cuts are nearly all ocean and most of its rifts are oceanic; on an
   Earth-like world the continental weakness dominates.
 
+## Initial continental coverage
+
+`poly.build.voronoi_world(continent_fraction=...)` specifies the initial fraction of the sphere
+covered by **continental crust**, not the fraction above sea level. It accepts finite values from
+0 to 1 and reaches a positive request within an absolute fraction of `1e-8` (about 5 km2 on Earth).
+A request that cannot produce valid geometry or meet that tolerance raises an error instead of
+silently returning a lower coverage.
+
+Fraction mode places a continent inside every Voronoi plate. Its outline is the plate outline
+moved along great circles towards that plate's generating seed, then clipped to the plate. A
+common scale is solved for the requested total area. These irregular continents can support
+60-65% coverage while retaining ocean margins; they are an initial-condition construction, not a
+claim about realistic continent shapes or a prediction of emerged land. A fraction of 1 gives
+all continental crust and no ocean, with no claim that every subsequent process is appropriate
+for that end member. The seed fixes the geometry and initial rotations.
+
+The existing `continents=N` mode retains its circular continents. Do not combine a positive
+fraction with a continent count. A zero fraction leaves count mode in control; with its default
+count of zero the world is all ocean. Use `world.areas()` to inspect achieved crust areas.
+
 ## What carries over from Super-Light-Time
 
 - The force balance physics (slab pull, basal drag, ridge push, resistances), with inputs taken from

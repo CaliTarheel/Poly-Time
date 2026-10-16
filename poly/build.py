@@ -17,6 +17,8 @@ from poly.world import Crust, World
 
 TRANSFORM_RATIO = math.tan(math.radians(15.))  # slide more than ~3.7x the opening or closing: transform
 MINIMUM_RUN = 3                                 # segments; shorter runs take their neighbours' kind
+# Absolute fraction of the sphere (about 5 km2 on Earth), not a fraction of the requested area.
+CONTINENT_FRACTION_TOLERANCE = 1e-8
 
 
 def densify(points, spacing_km=100., closed=False):
@@ -112,8 +114,24 @@ def cap_world(centre_lonlat=(0., 0.), radius_deg=40., cap_omega=(0., 0., .01), r
 
 def voronoi_world(count=8, seed=1, spacing_km=100., speed_km_myr=30., continents=0, overriding=None,
                   continent_fraction=0.):
-    """`count` plates from a spherical Voronoi tessellation of random seeds, with random rotations."""
+    """`count` Voronoi plates with seeded geometry and random rotations.
+
+    `continents` places that many circular continents, as before. Alternatively, a positive
+    `continent_fraction` requests a total continental *crust* area fraction in [0, 1], within
+    CONTINENT_FRACTION_TOLERANCE of the sphere. It is not an emerged-land fraction. Fraction mode
+    shrinks plate-shaped continents towards their Voronoi seeds, leaving ocean margins; the
+    outlines need not be circular. Do not combine the count and fraction modes. Zero fraction
+    leaves the count mode in control (and gives an all-ocean world when `continents` is zero).
+    """
     from scipy.spatial import SphericalVoronoi
+    try:
+        continent_fraction = float(continent_fraction)
+    except (TypeError, ValueError) as error:
+        raise ValueError('continent_fraction must be a finite number in [0, 1].') from error
+    if not math.isfinite(continent_fraction) or not 0. <= continent_fraction <= 1.:
+        raise ValueError('continent_fraction must be a finite number in [0, 1].')
+    if continent_fraction > 0. and continents:
+        raise ValueError('Choose continents or continent_fraction, not both.')
     rng = np.random.default_rng(seed)
     seeds = sphere.unit(rng.normal(size=(count, 3)))
     voronoi = SphericalVoronoi(seeds, radius=1.)
@@ -145,25 +163,17 @@ def voronoi_world(count=8, seed=1, spacing_km=100., speed_km_myr=30., continents
     if continents:
         _add_continents(world, polygons, continents, rng)
     if continent_fraction:
-        _add_continents(world, polygons, len(polygons), rng, fill=.8, fraction=continent_fraction)
+        _add_continental_fraction(world, polygons, seeds, continent_fraction)
     return world, omegas
 
 
-def _add_continents(world, polygons, count, rng, fill=.45, fraction=None):
+def _add_continents(world, polygons, count, rng, fill=.45):
     """Put a circular continent inside `count` random plates (cut out of their ocean).
 
-    Each disc's radius is `fill` of the distance from the plate's centre to its edge. With
-    `fraction`, the largest plates are taken first and discs are added until that fraction of
-    the sphere is continent: an Earth-like world is about 0.3.
+    Each disc's radius is `fill` of the distance from the plate's centre to its edge.
     """
-    if fraction:
-        order = sorted(polygons, key=lambda p: -sphere.area_km2(polygons[p]))
-    else:
-        order = [int(p) for p in rng.choice(sorted(polygons), size=min(count, len(polygons)), replace=False)]
-    placed = 0.
+    order = [int(p) for p in rng.choice(sorted(polygons), size=min(count, len(polygons)), replace=False)]
     for plate in order:
-        if fraction and placed >= fraction * sphere.SPHERE_KM2:
-            break
         plate = int(plate)
         ring = sphere.polygons(polygons[plate])[0][0]
         centre = sphere.unit(ring.mean(axis=0))
@@ -176,4 +186,58 @@ def _add_continents(world, polygons, count, rng, fill=.45, fraction=None):
             if piece.plate == plate:
                 piece.shape = sphere.difference(piece.shape, continent)
         world.crust.append(Crust(plate, 'continent', continent))
-        placed += sphere.area_km2(continent)
+
+
+def _add_continental_fraction(world, polygons, seeds, fraction):
+    """Solve for seeded, plate-contained continents with the requested global crust area.
+
+    A common scale moves each plate's outline along great circles towards its generating seed.
+    This retains the irregular plate shapes at high coverage, where inscribed discs cannot fill
+    enough area. Clipping every candidate to its source plate prevents crust overlap. The two
+    endpoints are explicitly empty and the complete plate, avoiding degenerate rings.
+    """
+    if fraction == 1.:
+        world.crust = [Crust(p, 'continent', shape) for p, shape in polygons.items()]
+        return
+    outlines = {}
+    for plate, shape in polygons.items():
+        parts = sphere.polygons(shape)
+        if len(parts) != 1 or len(parts[0]) != 1:
+            raise ValueError('Continental fraction initialization requires simple Voronoi plates.')
+        ring, centre = parts[0][0], seeds[plate - 1]
+        cosine = np.clip(ring @ centre, -1., 1.)
+        radial = ring - cosine[:, None] * centre
+        sine = np.linalg.norm(radial, axis=1)
+        if np.any(sine < 1e-12):
+            raise ValueError('Continental fraction initialization has a degenerate radial outline; try another seed.')
+        outlines[plate] = (centre, np.arctan2(sine, cosine), radial / sine[:, None])
+    lower, upper = 0., 1.
+    for _ in range(50):
+        scale = .5 * (lower + upper)
+        continents = {}
+        try:
+            for plate, (centre, angle, tangent) in outlines.items():
+                points = (np.cos(scale * angle)[:, None] * centre
+                          + np.sin(scale * angle)[:, None] * tangent)
+                continents[plate] = sphere.intersection(polygons[plate], sphere.polygon(points))
+        except (ValueError, RuntimeError) as error:
+            raise ValueError('Continental fraction initialization could not build valid plate-contained '
+                             'outlines; try another seed.') from error
+        achieved = sum(sphere.area_km2(shape) for shape in continents.values()) / sphere.SPHERE_KM2
+        if abs(achieved - fraction) <= CONTINENT_FRACTION_TOLERANCE:
+            break
+        if achieved < fraction:
+            lower = scale
+        else:
+            upper = scale
+    else:
+        raise ValueError('Continental crust fraction %.9g could not be reached within %.1g; achieved %.9g.'
+                         % (fraction, CONTINENT_FRACTION_TOLERANCE, achieved))
+    crust = []
+    for plate, continent in continents.items():
+        ocean = sphere.difference(polygons[plate], continent)
+        if sphere.area_km2(ocean) > 0.:
+            crust.append(Crust(plate, 'ocean', ocean, born_myr=-50.))
+        if sphere.area_km2(continent) > 0.:
+            crust.append(Crust(plate, 'continent', continent))
+    world.crust = crust
