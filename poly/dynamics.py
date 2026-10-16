@@ -37,6 +37,10 @@ class Parameters:
     slab_reference_myr: float = 80.
     slab_pull_cap: float = 1.25
     ridge_push_n_per_m: float = 3e12
+    # Trench suction: the overriding plate is drawn toward its trench by this share of the slab's
+    # pull (Forsyth and Uyeda's secondary driver), so margins advance over their slabs as the
+    # Americas do and back-arcs open only where the slab outruns them.
+    trench_suction: float = .2
     # Set so the Earth-like world moves like Earth: with 1e15 the rms plate speed settled at 65-80
     # km/Myr and the fastest plate at 100-190 (Earth: about 40 and 100); speed goes as drag to the
     # -0.55, and 3e15 gives 41-49 rms and 83-106 for the fastest plate from 10 Myr on.
@@ -106,6 +110,8 @@ class Balance:
         matrix += big.transpose(0, 2, 1, 3).reshape(size, size)
         pull = np.zeros((count, 3))
         np.add.at(pull, seg.down[seg.trench], seg.slab_pull[seg.trench])
+        over = np.where(seg.down == seg.left, seg.right, seg.left)
+        np.add.at(pull, over[seg.trench], -p.trench_suction * seg.slab_pull[seg.trench])
         np.add.at(pull, seg.right[seg.ridge], seg.ridge_push[seg.ridge])
         np.add.at(pull, seg.left[seg.ridge], -seg.ridge_push[seg.ridge])
         torque += pull.ravel()
@@ -144,6 +150,8 @@ class Rifting:
     continent_strength_n_per_m: float = 3e12
     suture_strength_n_per_m: float = 3e11   # an old suture is the weakest lithosphere there is
     suture_reach_km: float = 150.           # a cut this close to a suture line follows it
+    lip_strength_n_per_m: float = 5e11      # lithosphere over a fresh plume head is nearly as weak
+    lip_reach_km: float = 800.
     minimum_plate_km2: float = 20e6   # only plates this large are tested
     minimum_part_km2: float = 3e6     # and only cuts leaving both parts this large
     azimuths: int = 12                # cut directions tried through each centre
@@ -241,6 +249,8 @@ def plate_torques(balance, world, rotations, plate):
     torque = np.where((seg.right[mine] == me)[:, None], -relative, relative)
     pulled = mine & seg.trench & (seg.down == me)
     torque[pulled[mine]] += seg.slab_pull[pulled]
+    sucked = mine & seg.trench & (seg.down != me)
+    torque[sucked[mine]] += -balance.parameters.trench_suction * seg.slab_pull[sucked]
     pushed = mine & seg.ridge
     sign = np.where(seg.right[pushed] == me, 1., -1.)
     torque[pushed[mine]] += sign[:, None] * seg.ridge_push[pushed]
@@ -286,6 +296,8 @@ def cuts(balance, world, rotations, plate, rifting=None):
         _, vectors = np.linalg.eigh(line.T @ line)
         along.append((sphere.unit(line.mean(axis=0)), sphere.unit(vectors[:, 0])))  # centre, pole of the fit
     suture_points = np.vstack(sutures) if sutures else np.zeros((0, 3))
+    lips = list(getattr(world, 'lip_points', lambda: [])())
+    lip_points = np.vstack(lips) if lips else np.zeros((0, 3))
     step = rifting.spacing_km / sphere.RADIUS_KM
     point_km2 = sphere.SPHERE_KM2 / len(balance.points)
     result = []
@@ -325,6 +337,9 @@ def cuts(balance, world, rotations, plate, rifting=None):
             if len(suture_points):
                 near = sphere.RADIUS_KM * np.arccos(np.clip(line @ suture_points.T, -1., 1.)).min(axis=1)
                 each = np.where(near <= rifting.suture_reach_km, rifting.suture_strength_n_per_m, each)
+            if len(lip_points):
+                near = sphere.RADIUS_KM * np.arccos(np.clip(line @ lip_points.T, -1., 1.)).min(axis=1)
+                each = np.where(near <= rifting.lip_reach_km, np.minimum(each, rifting.lip_strength_n_per_m), each)
             strength = float(each.mean())
             result.append(Cut(plate, centre, pole, length_m / 1e3, tension, strength, fraction))
     return result
