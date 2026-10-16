@@ -1,4 +1,21 @@
-# Super-Light-Time
+# Poly-Time
+
+The polygon/Euler-frame engine in `poly/` has a standalone launcher, versioned
+checkpoints, and a timestep/resolution comparison harness:
+
+```sh
+python -m pip install -r requirements.txt
+python -m poly.run start --output runs/poly-demo --steps 2
+python -m poly.run resume --output runs/poly-demo --steps 2
+python -m poly.run qualify --output runs/poly-check --duration 2
+```
+
+Read [Poly runs and restart](docs/POLY_RUNS.md) for controls, checkpoint guarantees,
+and interpretation of the diagnostics. The root `server.py`, `run_simulation.py`,
+and production guards below belong to the inherited Super-Light-Time engine;
+they do not launch the `poly/` engine.
+
+## Inherited Super-Light-Time source
 
 The guarded production source of an exploratory tectonic and terrain evolution simulator, derived from Asein Lite. Its model covers plate motion, ocean and continental material, collision stacks, subduction, arcs, and relief, with a local browser interface for inspecting history.
 
