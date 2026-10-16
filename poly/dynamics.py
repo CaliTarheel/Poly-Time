@@ -37,7 +37,10 @@ class Parameters:
     slab_reference_myr: float = 80.
     slab_pull_cap: float = 1.25
     ridge_push_n_per_m: float = 3e12
-    basal_drag_pa_s_per_m: float = 1e15
+    # Set so the Earth-like world moves like Earth: with 1e15 the rms plate speed settled at 65-80
+    # km/Myr and the fastest plate at 100-190 (Earth: about 40 and 100); speed goes as drag to the
+    # -0.55, and 3e15 gives 41-49 rms and 83-106 for the fastest plate from 10 Myr on.
+    basal_drag_pa_s_per_m: float = 3e15
     # Boundary resistance, N per m of boundary per m/s of relative motion (across, along). Across a
     # trench it stands for the slab's own resistance to sinking: a slab-pulled plate then moves at
     # about pull / resistance (3e13 / 1.2e22 m/s = 8 cm/yr) whatever its size, as on Earth.
