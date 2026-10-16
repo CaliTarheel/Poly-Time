@@ -741,6 +741,7 @@ def node_shared(rings, node_km=NODE_KM, groups=None):
 
 
 SIMPLIFY_NET = 1e-4  # simplifying may move a ring's enclosed area by this fraction of it, net
+DUST_KM2 = 1e-4      # a vertex cutting off less than this (100 m by 2 m) is dust: nothing can be inside its triangle
 
 
 def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2, rounds=8, groups=None, stats=None,
@@ -830,12 +831,16 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
                 inside &= side * turn >= -SHARED_KM / RADIUS_KM
             blocked = np.zeros(len(cand), bool)
             blocked[ks[inside]] = True
+            # Dust from nearly coincident edges of two plates interleaves at metres, so every dust
+            # triangle holds the other ring's dust: that cannot block, or no dust ever goes.
+            blocked &= worst[cand] >= DUST_KM2
             candidate[cand[blocked]] = False
             if stats is not None:
                 stats['rounds'][-1]['blocked_by_occupied_triangle'] = int(blocked.sum())
         # A vertex goes when its triangle is smaller than its neighbours' (ties by position), so no
-        # two neighbours go in one round and the smallest triangles go first.
-        key = worst + np.arange(clusters) * 1e-12
+        # two neighbours go in one round and the smallest triangles go first. Dust is all the same
+        # size to us: along a run of it every other vertex goes, not one in ten.
+        key = np.where(worst < DUST_KM2, (at[first] % 2) * 1e-9, worst) + np.arange(clusters) * 1e-12
         lo, hi = low[first], high[first]
         go = candidate & ((key < key[lo]) | ~candidate[lo]) & ((key < key[hi]) | ~candidate[hi])
         # Each ring's area moves by the triangles its vertices cut off, less where the ring turns
@@ -844,8 +849,9 @@ def simplify_shared(rings, area_km2=100., max_edge_km=150., alone_km2=DETAIL_KM2
         turn = np.sign(np.einsum('ij,ij->i', np.cross(a, v), b))  # a left turn: the triangle is on the left
         change = -triangle * turn  # of the area on the ring's left (the right loses the same)
         delta = np.zeros(len(rings))
+        counted = np.abs(change) >= DUST_KM2  # dust is below the budget's notice
         for _ in range(rounds + 1):
-            going = go[cluster]
+            going = go[cluster] & counted
             delta = np.bincount(ring_of, weights=np.where(going, change, 0.), minlength=len(rings))
             over = np.abs(net + delta) > budget
             if not over.any():
