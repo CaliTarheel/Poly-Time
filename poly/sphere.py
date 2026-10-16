@@ -108,7 +108,10 @@ def strip(points, half_width_km):
         if len(coarse) < 2:
             continue
         segment = unit(np.cross(coarse[:-1], coarse[1:]))
-        normal = unit(np.vstack((segment[:1], segment[:-1] + segment[1:], segment[-1:])))
+        joint = segment[:-1] + segment[1:]
+        back = np.linalg.norm(joint, axis=1) < 1e-9  # the polyline turns straight back: no bisector
+        joint[back] = segment[:-1][back]
+        normal = unit(np.vstack((segment[:1], joint, segment[-1:])))
         left = unit(coarse * np.cos(angle) + normal * np.sin(angle))
         right = unit(coarse * np.cos(angle) - normal * np.sin(angle))
         ring = np.vstack((right, left[::-1]))
@@ -302,10 +305,15 @@ def tidy_ring(ring, tolerance=1e-10, tooth_km2=0.):
             spike |= (cosine < TOOTH_COSINE) & (triangle < tooth_km2)
         if not spike.any():
             break
-        spike &= ~np.roll(spike, 1)  # one of two neighbouring spikes at a time
-        if len(points) - spike.sum() < 3:
+        single = spike & ~np.roll(spike, 1)  # one of two neighbouring spikes at a time
+        if not single.any():
+            # Every vertex turns back: a zigzag sliver. Thin it by halves (the neighbour rule
+            # alone would keep nothing and never end).
+            single = spike.copy()
+            single[1::2] = False
+        if len(points) - single.sum() < 3:
             break
-        points = points[~spike]
+        points = points[~single]
     return points
 
 
@@ -339,7 +347,6 @@ _EDGE = re.compile(r'(?:loop (\d+)\D*?)?edge (\d+)', re.IGNORECASE)
 
 
 def polygon_robust(ring, holes=(), attempts=24, minimum_km2=1e-6):
-    tooth = minimum_km2 if minimum_km2 >= DETAIL_KM2 else 0.
     """`polygon`, repaired when S2 rejects a ring (crossing or repeated edges).
 
     S2's own outputs are valid, but a ring read back and rotated can touch or cross itself: a strip
@@ -349,6 +356,7 @@ def polygon_robust(ring, holes=(), attempts=24, minimum_km2=1e-6):
     debris. Only when no crossing is named is the vertex at the offending edge dropped, which moves
     the outline by about the read-back error; callers check the area against S2's own.
     """
+    tooth = minimum_km2 if minimum_km2 >= DETAIL_KM2 else 0.
     loops = [tidy_ring(ring, tooth_km2=tooth)] + [tidy_ring(h, tooth_km2=tooth) for h in holes]
     loops = [loops[0]] + [h for h in loops[1:] if len(h) >= 3]
     if len(loops[0]) < 3:
