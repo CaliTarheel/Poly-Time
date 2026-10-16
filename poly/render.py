@@ -1,29 +1,26 @@
-"""Equirectangular maps of a world: crust by kind and ocean age, boundaries by kind."""
+"""Equirectangular surface maps: land and water from height, boundaries by kind."""
 from __future__ import annotations
 
 import numpy as np
 import spherely
 from PIL import Image, ImageDraw
 
-from poly import sphere
-from poly.mesh import ISOSTASY
-from poly.ocean import depth_km
+from poly import sphere, surface
 
 COLOURS = dict(ridge=(220, 40, 40), trench=(120, 40, 160), transform=(30, 150, 60),
                converging=(240, 140, 20), collision=(120, 70, 30), suture=(60, 30, 10))
 CONTINENT = (196, 170, 120)
 # Hypsometric tints for continent by isostatic elevation (km): lowland, upland, mountain, high peaks.
 RELIEF = [(0., (168, 190, 120)), (.5, (196, 170, 120)), (1.5, (140, 100, 60)), (3., (245, 245, 245))]
-CONTINENT_KM = 35.
-# Ocean tinted by depth: shallow (ridge crests, 2.6 km) to deep (old floor, 5.6 km).
-SHALLOW, DEEP = np.array([150, 215, 235]), np.array([20, 50, 110])
-SHALLOW_KM, DEEP_KM = 2.5, 5.7
+# Water over either continental or oceanic crust, tinted by depth below sea level.
+BATHYMETRY = [(0., (190, 230, 235)), (.2, (150, 215, 235)),
+              (2.5, (85, 155, 200)), (5.7, (20, 50, 110))]
 
 
-def _tint(elevation_km):
-    """Colours for elevations, interpolated along RELIEF."""
-    levels = np.array([e for e, _ in RELIEF])
-    colours = np.array([c for _, c in RELIEF], float)
+def _tint(elevation_km, palette=RELIEF):
+    """Colours for heights or depths, interpolated along the selected palette."""
+    levels = np.array([e for e, _ in palette])
+    colours = np.array([c for _, c in palette], float)
     out = np.zeros((len(elevation_km), 3))
     for k in range(3):
         out[:, k] = np.interp(elevation_km, levels, colours[:, k])
@@ -33,10 +30,12 @@ def _tint(elevation_km):
 MESH = (90, 70, 40)  # the continental mesh, when asked for
 
 
-def draw(world, path, width=720, boundaries=True, mesh=False):
+def draw(world, path, width=720, boundaries=True, mesh=False, sea_level_km=0.):
     """Write a PNG map of `world` to `path` and return the per-pixel plate array.
 
     With `mesh`, the triangles of every continental mesh are outlined, to show the level of detail.
+    Sea level is an output scenario relative to the existing height datum. Tiny
+    emerged islands receive visibility markers; use surface.sample for exact masks.
     """
     height = width // 2
     lon = np.linspace(-180., 180., width, endpoint=False) + 180. / width
@@ -44,32 +43,11 @@ def draw(world, path, width=720, boundaries=True, mesh=False):
     lon, lat = np.meshgrid(lon, lat)
     xyz = sphere.from_lonlat(lon.ravel(), lat.ravel())
     image = np.zeros((height * width, 3), np.uint8)
-    plate_of = np.zeros(height * width, int)
-    world_points = spherely.points(lon.ravel(), lat.ravel())
-    for plate, region in world.plate_polygons().items():
-        spherely.prepare(region)
-        inside = np.asarray(spherely.contains(region, world_points))
-        plate_of[inside] = plate
-        if not inside.any():
-            continue
-        local = sphere.rotate(xyz[inside], world.frame(plate).T)
-        llon, llat = sphere.to_lonlat(local)
-        points = spherely.points(llon, llat)
-        colour = np.tile(np.array(DEEP, np.uint8), (inside.sum(), 1))
-        for piece in (p for p in world.crust if p.plate == plate):
-            spherely.prepare(piece.shape)
-            hit = np.asarray(spherely.contains(piece.shape, points))
-            if not hit.any():
-                continue
-            if piece.kind == 'continent':
-                field = getattr(piece, 'mesh', None)
-                thick = field.sample(local[hit]) if field is not None else getattr(piece, 'thickness_km', CONTINENT_KM)
-                colour[hit] = _tint(ISOSTASY * (np.asarray(thick, float) - CONTINENT_KM) * np.ones(int(hit.sum())))
-            else:
-                age = 0. if piece.born_myr is None else max(world.time_myr - piece.born_myr, 0.)
-                f = float(np.clip((depth_km(age) - SHALLOW_KM) / (DEEP_KM - SHALLOW_KM), 0., 1.))
-                colour[hit] = np.round(SHALLOW * (1 - f) + DEEP * f).astype(np.uint8)
-        image[inside] = colour
+    sampled = surface.sample(world, xyz, sea_level_km)
+    plate_of = sampled.plate
+    relative_height = sampled.height_above_water_km
+    image[sampled.land] = _tint(relative_height[sampled.land])
+    image[sampled.water] = _tint(-relative_height[sampled.water], BATHYMETRY)
     picture = Image.fromarray(image.reshape(height, width, 3))
     pen = ImageDraw.Draw(picture)
     # Islands smaller than a few pixels would fall between pixel centres: a dot each, at the
@@ -81,10 +59,13 @@ def draw(world, path, width=720, boundaries=True, mesh=False):
         if piece.kind == 'continent' and getattr(piece, 'mesh', None) is None and area < 4. * pixel_km2:
             centre = spherely.centroid(piece.shape)
             local = sphere.from_lonlat(float(spherely.get_x(centre)), float(spherely.get_y(centre)))
-            plon, plat = sphere.to_lonlat(sphere.rotate(local, world.frame(piece.plate)))
+            elevation = float(surface.elevation_km(piece, local[None], world.time_myr)[0]) - sea_level_km
+            if elevation < 0.:
+                continue
+            plon, plat = sphere.to_lonlat(sphere.rotate(local, world.frames.get(piece.plate, np.eye(3))))
             x, y = (float(plon) + 180.) / 360. * width, (90. - float(plat)) / 180. * height
             r = max(.75, np.sqrt(area / np.pi) / pixel_km)
-            pen.ellipse([x - r, y - r, x + r, y + r], fill=tuple(int(v) for v in _tint(np.array([0.]))[0]))
+            pen.ellipse([x - r, y - r, x + r, y + r], fill=tuple(int(v) for v in _tint(np.array([elevation]))[0]))
     if boundaries:
         if hasattr(world, 'boundary_lines'):
             lines = list(world.boundary_lines())
@@ -107,7 +88,7 @@ def draw(world, path, width=720, boundaries=True, mesh=False):
                 continue
             tri = np.asarray(field.triangles)
             edges = np.unique(np.sort(np.vstack((tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]])), axis=1), axis=0)
-            plon, plat = sphere.to_lonlat(sphere.rotate(field.nodes, world.frame(piece.plate)))
+            plon, plat = sphere.to_lonlat(sphere.rotate(field.nodes, world.frames.get(piece.plate, np.eye(3))))
             x = (plon + 180.) / 360. * width
             y = (90. - plat) / 180. * height
             for i, j in edges:
