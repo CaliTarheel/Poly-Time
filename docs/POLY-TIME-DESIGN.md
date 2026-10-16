@@ -152,6 +152,11 @@ equals the area destroyed, term by term.
   30 to 50 Myr; the chunk, the share and the spacing are knobs set inside those ranges. Every chunk
   and strip is booked as an `arc` gain and loss, and what is built then moves, collides, welds and
   rifts like any continent. The ledger records the magma added every step.
+- **Erosion.** Crust above sea level is worn down at 0.2 of its elevation per Myr, as thickness
+  (isostasy lifts the crust as it is unloaded, so a km of rock removed lowers the land by 0.15 km);
+  never below sea level. The sediment settles on the piece's own lowlands (under 0.2 km) within about
+  500 km, so foreland basins fill as orogens decay; what finds no lowland goes to the sea, and the
+  ledger records both the volume eroded and the volume gone to the sea every step.
 - **Terranes.** A continent piece smaller than 1 Mkm2 that reaches a trench (an island, an arc, a
   microcontinent) is not shortened into itself: the whole piece docks onto the overriding plate as
   a body, with its volume and its thickness field, and the trench then runs round it. It replaces
@@ -223,5 +228,6 @@ matching, initiation and rifting (about 70 of the 182 modules a step uses touch 
    consumption under prescribed rotations, closed ledger, tests, map rendering.
 2. **Topology events**: initiation, collision and suture, rifting and splitting, triple junctions.
 3. **Dynamics**: the force balance on polygons and boundary lines.
-4. **Crust**: continental mesh (thickness: done) and its processes; isochron ocean properties.
+4. **Crust**: continental mesh with thickening, spreading, escape, arcs and erosion (done); ocean
+   depth from age (done); relief beyond isostasy, sediment as crust, to come.
 5. **Runs**: frames, viewer, GPlates export, comparison with Super-Light-Time runs.
