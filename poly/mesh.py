@@ -1,10 +1,10 @@
 """A continent's thickness as a field on a triangle mesh that moves with its plate.
 
 The mesh lives in the plate's frame like the crust polygon it covers: its nodes are the polygon's
-outline vertices plus interior points about SPACING_KM apart, triangulated in the gnomonic
-projection about the piece's centre (great circles are straight there, so a plane Delaunay is a
-spherical one). Each node carries a thickness; the piece's volume is the thickness integrated over
-the mesh, scaled by the little of the polygon the triangles do not cover.
+outline vertices plus interior points about SPACING_KM apart. Each connected polygon is
+triangulated in its own gnomonic plane, then triangles are clipped to its actual outline and holes.
+Great circles are straight in that plane. Each node carries a thickness; the piece's volume is
+the thickness integrated over the mesh, scaled to the polygon's area for numerical roundoff.
 
 When the polygon changes (shortening at a collision, a rift, debris let go), the mesh is rebuilt on
 the new polygon with the old field carried over, and the volume the new mesh is short of the
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 import spherely
-from scipy.spatial import Delaunay, cKDTree
+from scipy.spatial import Delaunay, QhullError, cKDTree
 
 from poly import sphere
 
@@ -53,37 +53,17 @@ class ContinentMesh:
         """
         if sphere.area_km2(shape) < MINIMUM_KM2:
             return None
-        rings = [r for poly in sphere.polygons(shape) for r in poly]
-        if not rings:
+        nodes, triangles = [], []
+        for rings in sphere.polygons(shape):
+            part = _triangulate(rings, spacing_km)
+            if part is None:
+                return None
+            xyz, faces = part
+            triangles.extend(faces + len(nodes))
+            nodes.extend(xyz)
+        if not triangles:
             return None
-        boundary = np.vstack(rings)
-        centre, e1, e2 = _frame(boundary)
-        if np.min(boundary @ centre) < .2:
-            return None  # wider than about 150 degrees: no single gnomonic plane
-        xy = _project(boundary, centre, e1, e2)
-        step = spacing_km / sphere.RADIUS_KM
-        xs = np.arange(xy[:, 0].min(), xy[:, 0].max() + step, step)
-        ys = np.arange(xy[:, 1].min(), xy[:, 1].max() + step * .866, step * .866)
-        gx, gy = np.meshgrid(xs, ys)
-        gx[1::2] += step / 2.  # hexagonal packing
-        grid = np.column_stack((gx.ravel(), gy.ravel()))
-        candidates = _unproject(grid, centre, e1, e2)
-        lon, lat = sphere.to_lonlat(candidates)
-        spherely.prepare(shape)
-        inside = np.asarray(spherely.contains(shape, spherely.points(lon, lat)))
-        near_edge = cKDTree(boundary).query(candidates, k=1)[0] < .5 * step
-        interior = candidates[inside & ~near_edge]
-        nodes = np.vstack((boundary, interior))
-        try:
-            triangles = Delaunay(_project(nodes, centre, e1, e2)).simplices
-        except Exception:
-            return None
-        centroids = sphere.unit(nodes[triangles].sum(axis=1))
-        lon, lat = sphere.to_lonlat(centroids)
-        keep = np.asarray(spherely.contains(shape, spherely.points(lon, lat)))
-        triangles = triangles[keep]
-        if len(triangles) < 1:
-            return None
+        nodes = np.asarray(nodes, float)
         thickness = np.full(len(nodes), float(thickness_km)) if field is None else np.asarray(field(nodes), float)
         mesh = cls(nodes, triangles, thickness)
         return mesh if mesh.area_km2() > 0. else None
@@ -119,13 +99,59 @@ class ContinentMesh:
         return ISOSTASY * (thickness - REFERENCE_KM)
 
     def sample(self, points):
-        """Thickness at `points` (plate frame): inverse-distance over the three nearest nodes."""
+        """Interpolate within a containing face, without blending across coastlines or holes.
+
+        New ground outside the old mesh (during recutting) takes the nearest boundary edge's
+        value. It does not mix nodes from opposite shores or disconnected components.
+        """
         points = np.asarray(points, float).reshape(-1, 3)
-        k = min(3, len(self.nodes))
-        d, idx = cKDTree(self.nodes).query(points, k=k)
-        d, idx = np.asarray(d).reshape(len(points), k), np.asarray(idx).reshape(len(points), k)
-        w = 1. / np.maximum(d, 1e-12)
-        return (w * self.thickness[idx]).sum(axis=1) / w.sum(axis=1)
+        result = np.full(len(points), np.nan)
+        if not len(points):
+            return result
+        inverse = np.linalg.inv(self.nodes[self.triangles])
+        centres = sphere.unit(self.nodes[self.triangles].sum(axis=1))
+        nearest = cKDTree(centres)
+        # The nearby faces normally suffice on a regular mesh. Fall back to an exhaustive
+        # containment search for long, thin boundary faces; nearest-centre is never the rule
+        # deciding which continent or side of an inlet supplies a value.
+        count = min(8, len(self.triangles))
+        for start in range(0, len(points), 4096):
+            batch = points[start:start + 4096]
+            candidates = np.asarray(nearest.query(batch, k=count)[1]).reshape(len(batch), count)
+            weights = np.einsum('pi,pkij->pkj', batch, inverse[candidates])
+            inside = np.all(weights >= -1e-10, axis=2) & (weights.sum(axis=2) > 0.)
+            rows = np.flatnonzero(inside.any(axis=1))
+            columns = np.argmax(inside[rows], axis=1)
+            w = np.maximum(weights[rows, columns], 0.)
+            tri = self.triangles[candidates[rows, columns]]
+            result[start + rows] = (w * self.thickness[tri]).sum(axis=1) / w.sum(axis=1)
+        for tri, transform in zip(self.triangles, inverse):
+            missing = np.flatnonzero(np.isnan(result))
+            if not len(missing):
+                break
+            # Positive cone coordinates locate a point in a minor spherical triangle. Their
+            # normalized values are barycentric coordinates in the face's gnomonic plane.
+            weights = points[missing] @ transform
+            hit = np.all(weights >= -1e-10, axis=1) & (weights.sum(axis=1) > 0.)
+            w = np.maximum(weights[hit], 0.)
+            result[missing[hit]] = (w @ self.thickness[tri]) / w.sum(axis=1)
+        missing = np.flatnonzero(np.isnan(result))
+        if len(missing):
+            edges = _edges(self.triangles)
+            unique, counts = np.unique(edges, axis=0, return_counts=True)
+            boundary = unique[counts == 1]
+            best = np.full(len(missing), np.inf)
+            for i, j in boundary:
+                a, b = self.nodes[i], self.nodes[j]
+                direction = b - a
+                fraction = np.clip((points[missing] - a) @ direction / (direction @ direction), 0., 1.)
+                nearest = sphere.unit(a + fraction[:, None] * direction)
+                distance = np.sum((points[missing] - nearest) ** 2, axis=1)
+                hit = distance < best
+                result[missing[hit]] = ((1. - fraction[hit]) * self.thickness[i]
+                                        + fraction[hit] * self.thickness[j])
+                best[hit] = distance[hit]
+        return result
 
     # ------------------------------------------------------------- changes
     def add_volume(self, volume_km3, polygon_km2, near=None, reach_km=REACH_KM):
@@ -221,6 +247,119 @@ class ContinentMesh:
 
     def rotated(self, matrix):
         return ContinentMesh(sphere.rotate(self.nodes, matrix), self.triangles, self.thickness)
+
+
+def _edges(triangles):
+    return np.sort(np.vstack((triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]])), axis=1)
+
+
+def _triangulate(rings, spacing_km):
+    """Cover one connected polygon, including its holes, with domain-clipped faces.
+
+    All outline vertices participate in the initial Delaunay triangulation, so an initial face
+    cannot contain an entire hole. Clipping may split a face, but leaves only simple polygons.
+    Triangulating those fragments retains the coastline without introducing a new dependency.
+    """
+    boundary = np.vstack(rings)
+    centre, e1, e2 = _frame(boundary)
+    if np.min(boundary @ centre) < .2:
+        return None  # one connected component is too wide for a single gnomonic plane
+    shape = sphere.polygon(rings[0], rings[1:])
+    xy = _project(boundary, centre, e1, e2)
+    step = spacing_km / sphere.RADIUS_KM
+    xs = np.arange(xy[:, 0].min(), xy[:, 0].max() + step, step)
+    ys = np.arange(xy[:, 1].min(), xy[:, 1].max() + step * .866, step * .866)
+    gx, gy = np.meshgrid(xs, ys)
+    gx[1::2] += step / 2.
+    candidates = _unproject(np.column_stack((gx.ravel(), gy.ravel())), centre, e1, e2)
+    lon, lat = sphere.to_lonlat(candidates)
+    spherely.prepare(shape)
+    inside = np.asarray(spherely.contains(shape, spherely.points(lon, lat)))
+    near_edge = cKDTree(boundary).query(candidates, k=1)[0] < .5 * step
+    nodes = np.vstack((boundary, candidates[inside & ~near_edge]))
+    try:
+        initial = Delaunay(_project(nodes, centre, e1, e2)).simplices
+    except (ValueError, QhullError):
+        return None
+    tree = cKDTree(nodes)
+    extra, faces = [], []
+
+    def index(point):
+        distance, ident = tree.query(point)
+        if distance < 1e-12:
+            return int(ident)
+        if extra:
+            distances = np.linalg.norm(np.asarray(extra) - point, axis=1)
+            nearest = int(np.argmin(distances))
+            if distances[nearest] < 1e-12:
+                return len(nodes) + nearest
+        extra.append(point)
+        return len(nodes) + len(extra) - 1
+
+    for tri in initial:
+        ring = nodes[tri]
+        # scipy orders the planar simplex counter-clockwise; keep the minor spherical face.
+        face = sphere.polygon(ring)
+        if sphere.area_km2(face) > .5 * sphere.SPHERE_KM2:
+            face = sphere.polygon(ring[::-1])
+        if spherely.covers(shape, face):
+            faces.append(tri)
+            continue
+        clipped = sphere.intersection(shape, face)
+        for part in sphere.polygons(clipped):
+            if len(part) != 1:
+                raise ValueError('A clipped mesh face contains a hole; cannot triangulate safely.')
+            fragment = part[0]
+            local = _ear_clip(_project(fragment, centre, e1, e2))
+            ids = np.array([index(point) for point in fragment], int)
+            faces.extend(ids[local])
+    if not faces:
+        return None
+    if extra:
+        nodes = np.vstack((nodes, extra))
+    faces = np.asarray(faces, int)
+    # Clipping can leave original outline/interior vertices unused. They must not remain as
+    # zero-area nodes participating in remapping or the explicit transport stability limit.
+    used, inverse = np.unique(faces, return_inverse=True)
+    return nodes[used], inverse.reshape(-1, 3)
+
+
+def _ear_clip(points):
+    """Triangulate a simple planar clipping fragment without crossing its outline."""
+    points = np.asarray(points, float)
+    if len(points) < 3:
+        return np.zeros((0, 3), int)
+    cross = lambda a, b: a[0] * b[1] - a[1] * b[0]
+    signed = sum(cross(a, b) for a, b in zip(points, np.roll(points, -1, axis=0)))
+    indices = list(range(len(points))) if signed >= 0. else list(reversed(range(len(points))))
+    tolerance = max(np.ptp(points, axis=0).max() ** 2 * 1e-13, 1e-24)
+    faces = []
+    while len(indices) > 3:
+        for k, b in enumerate(indices):
+            a, c = indices[k - 1], indices[(k + 1) % len(indices)]
+            pa, pb, pc = points[[a, b, c]]
+            turn = cross(pb - pa, pc - pb)
+            if abs(turn) <= tolerance:
+                # S2 can retain collinear vertices on a clipped edge.
+                indices.pop(k)
+                break
+            if turn < 0.:
+                continue
+            other = [i for i in indices if i not in (a, b, c)]
+            if any(cross(pb - pa, points[i] - pa) >= -tolerance
+                   and cross(pc - pb, points[i] - pb) >= -tolerance
+                   and cross(pa - pc, points[i] - pc) >= -tolerance for i in other):
+                continue
+            faces.append((a, b, c))
+            indices.pop(k)
+            break
+        else:
+            raise ValueError('Cannot triangulate a clipped mesh face without crossing its outline.')
+    if len(indices) == 3:
+        a, b, c = points[indices]
+        if abs(cross(b - a, c - a)) > tolerance:
+            faces.append(tuple(indices))
+    return np.asarray(faces, int).reshape(-1, 3)
 
 
 def _frame(points):
