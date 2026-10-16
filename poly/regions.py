@@ -947,7 +947,17 @@ class RegionWorld:
         if built < DETAIL_KM2:
             return 0., 0.
         thickness = min(ARC_THICK_KM, owed_km3 / built)
-        self.crust.append(Crust(plate, 'continent', sphere.union(*pieces), self.time_myr, thickness))
+        shape = sphere.union(*pieces)
+        # A strip beside an arc already built extends that arc rather than seeding another piece.
+        arcs = [c for c in self.crust if c.plate == plate and c.kind == 'continent'
+                and getattr(c, 'mesh', None) is None and spherely.distance(c.shape, shape) < 1e3]
+        if arcs:
+            arc = max(arcs, key=lambda c: c.area_km2())
+            volume = arc.volume_km3() + built * thickness
+            arc.shape = sphere.union(arc.shape, shape)
+            arc.thickness_km = volume / arc.area_km2()
+        else:
+            self.crust.append(Crust(plate, 'continent', shape, self.time_myr, thickness))
         entry['gained']['arc'] += built
         entry['lost']['arc'] += built
         entry['arc_km3'] += built * thickness
