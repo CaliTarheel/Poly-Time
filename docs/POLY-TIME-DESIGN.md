@@ -157,6 +157,13 @@ equals the area destroyed, term by term.
   never below sea level. The sediment settles on the piece's own lowlands (under 0.2 km) within about
   500 km, so foreland basins fill as orogens decay; what finds no lowland goes to the sea, and the
   ledger records both the volume eroded and the volume gone to the sea every step.
+- **Terranes.** A continent piece smaller than 1 Mkm2 that reaches a trench (an island, an arc, a
+  microcontinent) is not shortened into itself: the whole piece docks onto the overriding plate as
+  a body, with its volume and its thickness field, and the trench then runs round it. It replaces
+  the ocean under it (booked as an `accreted` gain and loss, and the ocean as `overridden`); where
+  it lands on continent, a terrane docked a step earlier included, that much stacks onto it as
+  thickness where it lands. Larger arrivals collide and suture as before. Continental area is no
+  longer lost at trenches, and no volume is handed to a distant heir.
 - **Ocean depth from age.** The floor subsides as it cools (Stein & Stein's GDH1: 2.6 km at the
   ridge, 0.365 km per root-Myr to 20 Myr, levelling towards 5.65 km); the maps tint ocean by it. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.
