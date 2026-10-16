@@ -76,9 +76,10 @@ ISLAND_SHARE = .05
 ISLAND_KM2 = 50.
 ISLAND_THICK_KM = 20.
 ISLAND_SPACING_KM = 70.
-# Nothing emerges until the arc has built its submarine ridge: a segment banks for islands only once
-# its root holds this much per km of trench (a ridge 60 km wide and 10 km thick; 20 Myr at the
-# reference convergence, 11 Myr at 90 km/Myr). Earth's arcs take 5-15 Myr to break the surface.
+# Nothing emerges until the arc has built its submarine ridge: a run of trench segments banks for
+# islands only once its root holds this much per km of trench (a ridge 60 km wide and 10 km thick;
+# 20 Myr at the reference convergence, 11 Myr at 90 km/Myr). Earth's arcs take 5-15 Myr to break
+# the surface. A third of the ribbon's threshold, so islands always come first.
 ARC_EMERGE_KM3_PER_KM = 600.
 
 
@@ -905,6 +906,15 @@ class RegionWorld:
         lengths = sphere.arc_km(b.points[:-1], b.points[1:])
         angle = ARC_KM / sphere.RADIUS_KM
         idents = np.asarray(b.idents) if getattr(b, 'idents', None) is not None else np.arange(len(b.kinds))
+        # A run of trench segments under one overriding plate matures together (the ribbon is
+        # judged on the run's root too): its segments bank for islands once the run holds a
+        # ridge's worth per km, however the root is spread among them.
+        emerged = np.zeros(len(b.kinds), bool)
+        for lo, hi in _runs_of(b.kinds, 'trench'):
+            for over in set(b.overriding[lo:hi]):
+                ks = [k for k in range(lo, hi) if b.overriding[k] == over]
+                if float(root[ks].sum()) >= ARC_EMERGE_KM3_PER_KM * float(lengths[ks].sum()):
+                    emerged[ks] = True
         arc_points, sites = {}, {}
         for k, kind in enumerate(b.kinds):
             over = b.overriding[k]
@@ -929,7 +939,7 @@ class RegionWorld:
                 piece.mesh.add_volume(magma, area, near=local[None])
                 piece.thickness_km += magma / area
                 entry['arc_km3'] += magma
-            elif root[k] >= ARC_EMERGE_KM3_PER_KM * float(lengths[k]):
+            elif emerged[k]:
                 # Over ocean, or an island already built (islands grow by chunks, not by thickening).
                 root[k] += (1. - ISLAND_SHARE) * magma
                 bank[k] += ISLAND_SHARE * magma
