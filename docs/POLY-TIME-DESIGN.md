@@ -132,7 +132,57 @@ equals the area destroyed, term by term.
   continent shortened at a collision (ESCAPE_FRACTION, 0.25) comes back as continent along the piece's
   coast within 1,500 km of the collision, over the plate's own ocean, booked as an `escape` gain and
   loss; the orogen thins by as much. It is owed per piece and delivered as a band 2 km wide once that
-  much is owed, since a sub-step's share would be a ribbon metres wide. Airy isostasy gives elevation from thickness (0.15 km per km of
+  much is owed, since a sub-step's share would be a ribbon metres wide.
+- **Arcs.** Magma rises into the overriding plate 150 km behind every trench, 30 km3 per km of trench
+  per Myr at 50 km/Myr of convergence (Earth's arcs add 20-40). Where that point is continent, the
+  mesh thickens there: an Andean arc. Where it is ocean, the magma is owed on the trench segments
+  (carried by their identity) and shows first as islands, then as a ribbon. Nothing emerges until
+  the segment's root holds a ridge's worth (600 km3 per km of trench: 20 Myr at the reference
+  convergence, 11 Myr at 90 km/Myr; Earth's arcs take 5-15 Myr to break the surface). From then a
+  share of the magma (5%) is banked for islands and spent in chunks of 50 km2, 20 km thick, each at a site fixed along a trench
+  segment by the segment's identity and never within 70 km of an island already there while a free
+  site remains; once no site is free a chunk goes beside the island nearest the magma and welds with
+  every island it touches, so islands grow and grow together. Islands take no magma themselves. The
+  rest is the submarine ridge and root, and once a run of segments is owed enough for a strip 60 km
+  wide and 30 km thick along it (60 Myr at the reference convergence) the strip is built as
+  continental crust over the plate's ocean: a mature arc ribbon. Earth's arcs show no
+  characteristic volcano spacing (de Bremond d'Ars, Jaupart and Sparks 1995: 16 arcs, 479 volcanic
+  systems, spacings distributed as random points along a ribbon), with means from about 27 km in
+  Central America to about 70 km in the Aleutians, and 0.5 to 10 km2 of land per km of arc after
+  30 to 50 Myr; the chunk, the share and the spacing are knobs set inside those ranges. Every chunk
+  and strip is booked as an `arc` gain and loss, and what is built then moves, collides, welds and
+  rifts like any continent. The ledger records the magma added every step.
+- **Terranes.** A continent piece smaller than 1 Mkm2 that reaches a trench (an island, an arc, a
+  microcontinent) is not shortened into itself: the whole piece docks onto the overriding plate as
+  a body, with its volume and its thickness field, and the trench then runs round it. It replaces
+  the ocean under it (booked as an `accreted` gain and loss, and the ocean as `overridden`); where
+  it lands on continent, a terrane docked a step earlier included, that much stacks onto it as
+  thickness where it lands. Larger arrivals collide and suture as before. Continental area is no
+  longer lost at trenches, and no volume is handed to a distant heir.
+- **Slab rollback.** A trench run of 1,000 km or more whose slab retreats faster than its
+  overriding plate advances (the hinge retreats at 30 km/Myr for an 80 Myr slab, as the square
+  root of age, capped at 1.5 times that) sheds a forearc plate: the overriding plate's crust from
+  the trench to 250 km behind it, arc included. The forearc is prescribed, not force-balanced: it
+  moves with its parent plus the slab's retreat where that outruns the parent's own advance, so
+  the gap behind it opens as back-arc ocean through the ridge rule, and an advancing overriding
+  plate (Andes) opens nothing. Forearcs are exempt from the small-plate absorption; a forearc that
+  loses its trench moves with its parent. The tie is imposed inside the force balance (the
+  forearc's column folds into its parent's), so the subducting plate still meets its trench's
+  resistance. A back-arc opens for 25 Myr, then the forearc welds back to its parent and the margin
+  can shed again, as the Lau basin followed the South Fiji basin. The overriding plate is drawn
+  toward its trench by a fifth of the slab's pull (trench suction), so margins advance over their
+  slabs as the Americas do.
+- **Hotspots and plume heads.** Switched on per world (`enable_hotspots(seed)`), twelve plumes
+  live at a time, fixed in the mantle frame, each for 50 to 150 Myr and born again elsewhere when
+  one dies, with strengths from 1e4 to 1.5e5 km3/Myr (Hawaii at the top); the first twelve are old
+  plumes whose heads have long arrived. A plume head arrives first: 5e6 km3 at once, a plateau 30 km thick over
+  ocean (which then rides, docks and resists subduction like any terrane) or flood basalt into a
+  continent, and rifting finds the lithosphere weak within 800 km for 30 Myr after. The tail then
+  builds islands over ocean in 500 km2 chunks 20 km thick, welding with the chunk before, so a
+  strong plume leaves a ridge and a weak one a string of islands as the plate carries them off,
+  and thickens a continent it sits under. All of it is booked (`hotspot` gain and loss, hotspot_km3).
+- **Ocean depth from age.** The floor subsides as it cools (Stein & Stein's GDH1: 2.6 km at the
+  ridge, 0.365 km per root-Myr to 20 Myr, levelling towards 5.65 km); the maps tint ocean by it. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.
 - **Suture.** A collision records how far it has closed; at 100 km the two plates weld. The smaller
   plate's crust passes into the larger's frame unchanged, the boundaries between them go, and its other

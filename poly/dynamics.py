@@ -37,7 +37,14 @@ class Parameters:
     slab_reference_myr: float = 80.
     slab_pull_cap: float = 1.25
     ridge_push_n_per_m: float = 3e12
-    basal_drag_pa_s_per_m: float = 1e15
+    # Trench suction: the overriding plate is drawn toward its trench by this share of the slab's
+    # pull (Forsyth and Uyeda's secondary driver), so margins advance over their slabs as the
+    # Americas do and back-arcs open only where the slab outruns them.
+    trench_suction: float = .2
+    # Set so the Earth-like world moves like Earth: with 1e15 the rms plate speed settled at 65-80
+    # km/Myr and the fastest plate at 100-190 (Earth: about 40 and 100); speed goes as drag to the
+    # -0.55, and 3e15 gives 41-49 rms and 83-106 for the fastest plate from 10 Myr on.
+    basal_drag_pa_s_per_m: float = 3e15
     # Boundary resistance, N per m of boundary per m/s of relative motion (across, along). Across a
     # trench it stands for the slab's own resistance to sinking: a slab-pulled plate then moves at
     # about pull / resistance (3e13 / 1.2e22 m/s = 8 cm/yr) whatever its size, as on Earth.
@@ -67,8 +74,14 @@ class Balance:
         lon, lat = sphere.to_lonlat(self.points)
         self.geographies = spherely.points(lon, lat)
 
-    def solve(self, world) -> dict:
-        """Rotation of every plate (rad/Myr) at which the torques balance; also stores the parts."""
+    def solve(self, world, constraints=None) -> dict:
+        """Rotation of every plate (rad/Myr) at which the torques balance; also stores the parts.
+
+        `constraints` ties plates to others: {plate: (parent, extra)} imposes rotation(plate) =
+        rotation(parent) + extra (rad/Myr), a forearc moving with its hinge. The tied plate's own
+        balance is dropped and what its neighbours feel from it is felt through the parent, so a
+        slab-pulled plate still meets its trench's resistance when a forearc sits between them.
+        """
         p = self.parameters
         plates = world.plates() if hasattr(world, 'segments') else world.network.plates()
         slot = {plate: k for k, plate in enumerate(plates)}
@@ -97,11 +110,28 @@ class Balance:
         matrix += big.transpose(0, 2, 1, 3).reshape(size, size)
         pull = np.zeros((count, 3))
         np.add.at(pull, seg.down[seg.trench], seg.slab_pull[seg.trench])
+        over = np.where(seg.down == seg.left, seg.right, seg.left)
+        np.add.at(pull, over[seg.trench], -p.trench_suction * seg.slab_pull[seg.trench])
         np.add.at(pull, seg.right[seg.ridge], seg.ridge_push[seg.ridge])
         np.add.at(pull, seg.left[seg.ridge], -seg.ridge_push[seg.ridge])
         torque += pull.ravel()
         pulled_km = np.bincount(seg.down[seg.trench], seg.length_m[seg.trench] / 1e3, minlength=count)
         pulled = {plate: float(pulled_km[k]) for plate, k in slot.items() if pulled_km[k] > 0.}
+        for plate, (parent, extra) in (constraints or {}).items():
+            if plate not in slot or parent not in slot or plate == parent:
+                continue
+            f, o = 3 * slot[plate], 3 * slot[parent]
+            e = np.asarray(extra, float) / SECONDS_PER_MYR  # rad/s
+            # Every row's dependence on the tied plate becomes dependence on the parent, plus a known part.
+            column = matrix[:, f:f + 3].copy()
+            matrix[:, o:o + 3] += column
+            torque -= column @ e
+            matrix[:, f:f + 3] = 0.
+            # The tied plate's own rows: rotation(plate) - rotation(parent) = extra.
+            matrix[f:f + 3, :] = 0.
+            matrix[f:f + 3, f:f + 3] = np.eye(3)
+            matrix[f:f + 3, o:o + 3] = -np.eye(3)
+            torque[f:f + 3] = e
         omega = np.linalg.solve(matrix, torque)  # rad/s
         rotations = {plate: omega[3 * slot[plate]:3 * slot[plate] + 3] * SECONDS_PER_MYR for plate in plates}
         self.last = dict(pulled_km=pulled, speed_km_myr={
@@ -120,6 +150,8 @@ class Rifting:
     continent_strength_n_per_m: float = 3e12
     suture_strength_n_per_m: float = 3e11   # an old suture is the weakest lithosphere there is
     suture_reach_km: float = 150.           # a cut this close to a suture line follows it
+    lip_strength_n_per_m: float = 5e11      # lithosphere over a fresh plume head is nearly as weak
+    lip_reach_km: float = 800.
     minimum_plate_km2: float = 20e6   # only plates this large are tested
     minimum_part_km2: float = 3e6     # and only cuts leaving both parts this large
     azimuths: int = 12                # cut directions tried through each centre
@@ -217,10 +249,15 @@ def plate_torques(balance, world, rotations, plate):
     torque = np.where((seg.right[mine] == me)[:, None], -relative, relative)
     pulled = mine & seg.trench & (seg.down == me)
     torque[pulled[mine]] += seg.slab_pull[pulled]
+    sucked = mine & seg.trench & (seg.down != me)
+    torque[sucked[mine]] += -balance.parameters.trench_suction * seg.slab_pull[sucked]
     pushed = mine & seg.ridge
     sign = np.where(seg.right[pushed] == me, 1., -1.)
     torque[pushed[mine]] += sign[:, None] * seg.ridge_push[pushed]
     return seg.mid[mine], torque
+
+
+CUT_CENTRE_KM2 = 1e5  # a continent piece this large seeds cuts through its centre; islands do not
 
 
 def cuts(balance, world, rotations, plate, rifting=None):
@@ -243,7 +280,11 @@ def cuts(balance, world, rotations, plate, rifting=None):
     drag = p.basal_drag_pa_s_per_m * R_M ** 2 * balance.point_area_m2
     frame = world.frame(plate)
     continents = [c for c in world.crust if c.plate == plate and c.kind == 'continent']
-    centres = [_centre(region)] + [sphere.rotate(_centre(c.shape), frame) for c in continents]
+    shapes = [sphere.rotate_geography(c.shape, frame) for c in continents]  # once, not once per cut
+    for shape in shapes:
+        spherely.prepare(shape)
+    centres = [_centre(region)] + [sphere.rotate(_centre(c.shape), frame) for c in continents
+                                   if c.area_km2() >= CUT_CENTRE_KM2]
     # Old sutures on the plate: a cut is tried along the great circle that fits each, and any cut
     # within reach of a suture is as weak as the suture there.
     sutures = [line for line, _ in getattr(world, 'suture_lines', lambda: [])()
@@ -255,6 +296,8 @@ def cuts(balance, world, rotations, plate, rifting=None):
         _, vectors = np.linalg.eigh(line.T @ line)
         along.append((sphere.unit(line.mean(axis=0)), sphere.unit(vectors[:, 0])))  # centre, pole of the fit
     suture_points = np.vstack(sutures) if sutures else np.zeros((0, 3))
+    lips = list(getattr(world, 'lip_points', lambda: [])())
+    lip_points = np.vstack(lips) if lips else np.zeros((0, 3))
     step = rifting.spacing_km / sphere.RADIUS_KM
     point_km2 = sphere.SPHERE_KM2 / len(balance.points)
     result = []
@@ -288,12 +331,15 @@ def cuts(balance, world, rotations, plate, rifting=None):
             arm = np.cross(line.sum(axis=0) * rifting.spacing_km * 1e3, pole)
             # The plus side holds the minus side with an even pull f along +pole: R f (S x pole) = -torque.
             tension = float(-torque @ arm / (R_M * (arm @ arm))) if arm @ arm > 0. else 0.
-            continental = _in_any(line, [sphere.rotate_geography(c.shape, frame) for c in continents])
+            continental = _in_any(line, shapes)
             fraction = float(continental.mean())
             each = np.where(continental, rifting.continent_strength_n_per_m, rifting.ocean_strength_n_per_m)
             if len(suture_points):
                 near = sphere.RADIUS_KM * np.arccos(np.clip(line @ suture_points.T, -1., 1.)).min(axis=1)
                 each = np.where(near <= rifting.suture_reach_km, rifting.suture_strength_n_per_m, each)
+            if len(lip_points):
+                near = sphere.RADIUS_KM * np.arccos(np.clip(line @ lip_points.T, -1., 1.)).min(axis=1)
+                each = np.where(near <= rifting.lip_reach_km, np.minimum(each, rifting.lip_strength_n_per_m), each)
             strength = float(each.mean())
             result.append(Cut(plate, centre, pole, length_m / 1e3, tension, strength, fraction))
     return result
@@ -327,6 +373,19 @@ def _segments(world):
             yield s.left, s.right, a, b, s.kind, s.overriding
 
 
+def _solve_with_forearcs(balance, world):
+    """The balance with any forearc plates tied to their hinges (see RegionWorld.hinge_extras)."""
+    rotations = balance.solve(world)
+    if not hasattr(world, 'hinge_extras'):
+        return rotations
+    for _ in range(2):  # the extra depends on the parent's own advance: two passes settle it
+        constraints = world.hinge_extras(rotations)
+        if not constraints:
+            return rotations
+        rotations = balance.solve(world, constraints)
+    return rotations
+
+
 def run(world, steps, parameters=None, dt=1., report=None, rifting=None):
     """Step `world` `steps` times with motions from the force balance; returns the balance.
 
@@ -347,8 +406,10 @@ def run(world, steps, parameters=None, dt=1., report=None, rifting=None):
             best = max(found, key=lambda c: c.ratio, default=None)
             if best is not None and best.ratio > 1.:
                 rifted.append(world.rift(best))
+        if hasattr(world, 'shed_forearcs'):
+            rifted += world.shed_forearcs(_solve_with_forearcs(balance, world))
         while remaining > 1e-9:
-            rotations = balance.solve(world)
+            rotations = _solve_with_forearcs(balance, world)
             fastest = max(balance.last['speed_km_myr'].values())
             sub = min(remaining, balance.parameters.step_limit_km / max(fastest, 1e-9))
             entry = world.step(rotations, sub)
