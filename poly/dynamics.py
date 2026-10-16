@@ -223,6 +223,9 @@ def plate_torques(balance, world, rotations, plate):
     return seg.mid[mine], torque
 
 
+CUT_CENTRE_KM2 = 1e5  # a continent piece this large seeds cuts through its centre; islands do not
+
+
 def cuts(balance, world, rotations, plate, rifting=None):
     """Straight cuts across `plate` through its centre and its continents, with the pull across each.
 
@@ -243,7 +246,11 @@ def cuts(balance, world, rotations, plate, rifting=None):
     drag = p.basal_drag_pa_s_per_m * R_M ** 2 * balance.point_area_m2
     frame = world.frame(plate)
     continents = [c for c in world.crust if c.plate == plate and c.kind == 'continent']
-    centres = [_centre(region)] + [sphere.rotate(_centre(c.shape), frame) for c in continents]
+    shapes = [sphere.rotate_geography(c.shape, frame) for c in continents]  # once, not once per cut
+    for shape in shapes:
+        spherely.prepare(shape)
+    centres = [_centre(region)] + [sphere.rotate(_centre(c.shape), frame) for c in continents
+                                   if c.area_km2() >= CUT_CENTRE_KM2]
     # Old sutures on the plate: a cut is tried along the great circle that fits each, and any cut
     # within reach of a suture is as weak as the suture there.
     sutures = [line for line, _ in getattr(world, 'suture_lines', lambda: [])()
@@ -288,7 +295,7 @@ def cuts(balance, world, rotations, plate, rifting=None):
             arm = np.cross(line.sum(axis=0) * rifting.spacing_km * 1e3, pole)
             # The plus side holds the minus side with an even pull f along +pole: R f (S x pole) = -torque.
             tension = float(-torque @ arm / (R_M * (arm @ arm))) if arm @ arm > 0. else 0.
-            continental = _in_any(line, [sphere.rotate_geography(c.shape, frame) for c in continents])
+            continental = _in_any(line, shapes)
             fraction = float(continental.mean())
             each = np.where(continental, rifting.continent_strength_n_per_m, rifting.ocean_strength_n_per_m)
             if len(suture_points):

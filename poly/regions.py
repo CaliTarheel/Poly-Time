@@ -63,7 +63,19 @@ ARC_KM = 150.
 ARC_KM3_PER_KM_MYR = 30.
 ARC_REFERENCE_KM_MYR = 50.
 ARC_WIDTH_KM = 60.
-ARC_THICK_KM = 20.
+ARC_THICK_KM = 30.  # ARC_WIDTH_KM x ARC_THICK_KM of root per km of trench: 60 Myr of reference convergence
+# Before the ribbon, the arc shows as islands. ISLAND_SHARE of the magma owed over ocean becomes
+# land straight away (Earth's arcs carry 0.5-10 km2 of land per km of arc; the rest is the
+# submarine ridge and root, carried on the segments as owed until the ribbon), in chunks of
+# ISLAND_KM2 at ISLAND_THICK_KM. A chunk goes to the free site with the most banked (one site per
+# trench segment, fixed along it by the segment's identity, free while no island lies within
+# ISLAND_SPACING_KM) or, with no site free, beside the island nearest the most banked site, where
+# it welds with every island it touches. Islands take no magma themselves: they grow by chunks, so
+# none thickens without limit.
+ISLAND_SHARE = .05
+ISLAND_KM2 = 50.
+ISLAND_THICK_KM = 20.
+ISLAND_SPACING_KM = 70.
 
 
 def _full():
@@ -84,11 +96,13 @@ class Boundary:
     overriding: list
     closed_km: np.ndarray
     idents: object = None   # one int per segment, kept as the segment is carried from step to step
-    arc_km3: object = None  # magma owed to an island arc behind each trench segment
+    arc_km3: object = None  # per segment: magma owed as arc root, and magma banked for islands
 
     def arcs(self):
         if self.arc_km3 is None:
-            self.arc_km3 = np.zeros(len(self.kinds))
+            self.arc_km3 = np.zeros((len(self.kinds), 2))
+        elif np.ndim(self.arc_km3) == 1:  # saved before islands were banked
+            self.arc_km3 = np.c_[np.asarray(self.arc_km3, float), np.zeros(len(self.arc_km3))]
         return self.arc_km3
 
     def mids(self):
@@ -376,6 +390,14 @@ class RegionWorld:
                 continue
             if abs(sphere.area_km2(shape) - area) <= count * SIMPLIFY_KM2 + 1.:
                 c.shape = shape
+                if c.kind == 'continent':
+                    # The outline moved a little; the crust keeps its volume on the new area.
+                    grown = c.area_km2()
+                    mesh = getattr(c, 'mesh', None)
+                    if mesh is not None and grown > 0.:
+                        mesh.thickness = mesh.thickness * (area / grown)
+                    if grown > 0.:
+                        c.thickness_km = float(c.thickness_km) * area / grown
         return removed
 
     def _complete(self, rotations_per_myr):
@@ -651,6 +673,12 @@ class RegionWorld:
                 if left_km2 >= TINY_KM2:
                     c.mesh = c.mesh.recut(c.shape, left_km2, whole_km3 - part_km3)
                     c.thickness_km = (whole_km3 - part_km3) / left_km2
+                elif part_km3 > 0.:
+                    # Nothing stays behind: the part takes the whole volume exactly (sampling the
+                    # field onto new nodes changes its integral a little, and the rest is dropped).
+                    if given.mesh is not None:
+                        given.mesh.thickness = given.mesh.thickness * (whole_km3 / part_km3)
+                    given.thickness_km = whole_km3 / part_km2
             moved.append(given)
         self.crust = [c for c in self.crust if sphere.area_km2(c.shape) >= TINY_KM2] + moved
         self.regions[plate] = sphere.difference(self.regions[plate], piece)
@@ -702,7 +730,7 @@ class RegionWorld:
                 mean = .5 * (np.asarray(rotations_per_myr[b.left], float) + np.asarray(rotations_per_myr[b.right], float)) * dt
                 mids = sphere.rotate(mids, sphere.rotation(mean))
             idents = b.idents if getattr(b, 'idents', None) is not None else self._fresh(len(b.kinds))
-            arcs = np.asarray(b.arc_km3, float) if getattr(b, 'arc_km3', None) is not None else np.zeros(len(b.kinds))
+            arcs = b.arcs()
             index.setdefault((b.left, b.right), []).append(
                 (mids, list(b.kinds), list(b.overriding), np.asarray(b.closed_km, float), np.asarray(idents), arcs))
         return index
@@ -764,7 +792,7 @@ class RegionWorld:
             if distances[c][k, j] <= INHERIT_KM:
                 choice[k], where[k] = c, j
         idents = np.zeros(n, int)
-        b.arc_km3 = np.zeros(n)
+        b.arc_km3 = np.zeros((n, 2))
         fresh = iter(self._fresh(int((choice < 0).sum())))
         for k in range(n):
             if choice[k] >= 0:
@@ -875,16 +903,19 @@ class RegionWorld:
         return events
 
     def _arcs(self, b, opening, dt, entry) -> list:
-        """Magma behind each trench segment of `b`: into the overriding continent, or owed for an island arc."""
+        """Magma behind each trench segment of `b`: into the overriding continent, or owed over its
+        ocean, where it shows as islands first and as a ribbon once the arc is mature."""
         events = []
         if len(b.points) < 2:
             return events
         owed = b.arcs()
+        root, bank = owed[:, 0], owed[:, 1]
         mids = b.mids()
         poles = sphere.unit(np.cross(b.points[:-1], b.points[1:]))
         lengths = sphere.arc_km(b.points[:-1], b.points[1:])
         angle = ARC_KM / sphere.RADIUS_KM
-        arc_points = {}
+        idents = np.asarray(b.idents) if getattr(b, 'idents', None) is not None else np.arange(len(b.kinds))
+        arc_points, sites = {}, {}
         for k, kind in enumerate(b.kinds):
             over = b.overriding[k]
             if kind != 'trench' or over not in (b.left, b.right) or over not in self.regions:
@@ -896,46 +927,146 @@ class RegionWorld:
             sign = 1. if over == b.left else -1.
             point = sphere.unit(mids[k] * np.cos(angle) + sign * poles[k] * np.sin(angle))
             arc_points[k] = point
-            piece = self._piece_at(over, point)
-            if piece is not None and piece.kind == 'continent':
-                # Into a continent, or an island arc already built (too small for a mesh: it
-                # thickens as one), near the arc.
+            # The segment's island site: along the segment by a fraction fixed by its identity.
+            f = (int(idents[k]) * 0.6180339887498949) % 1.
+            along = sphere.unit(b.points[k] * (1. - f) + b.points[k + 1] * f)
+            sites[k] = sphere.unit(along * np.cos(angle) + sign * poles[k] * np.sin(angle))
+            piece = self._meshed_at(over, point)
+            if piece is not None:
+                # Into a continent: the mesh thickens near the arc.
                 area = piece.area_km2()
-                if getattr(piece, 'mesh', None) is not None:
-                    local = sphere.rotate(point, self.frame(over).T)
-                    piece.mesh.add_volume(magma, area, near=local[None])
+                local = sphere.rotate(point, self.frame(over).T)
+                piece.mesh.add_volume(magma, area, near=local[None])
                 piece.thickness_km += magma / area
                 entry['arc_km3'] += magma
             else:
-                owed[k] += magma
-        # A run of trench segments under one overriding plate builds an island arc once it is owed
-        # enough for a strip along the run.
+                # Over ocean, or an island already built (islands grow by chunks, not by thickening).
+                root[k] += (1. - ISLAND_SHARE) * magma
+                bank[k] += ISLAND_SHARE * magma
+        # A run of trench segments under one overriding plate builds islands as their bank allows,
+        # and a ribbon along the run once the root owed is enough for a strip along it.
         for lo, hi in _runs_of(b.kinds, 'trench'):
-            for over in set(b.overriding[lo:hi]):
+            for over in sorted({o for o in b.overriding[lo:hi] if o in (b.left, b.right)}):
                 ks = [k for k in range(lo, hi) if b.overriding[k] == over and k in arc_points]
+                if not ks:
+                    continue
+                events += self._islands(b, ks, over, sites, bank, entry)
                 if len(ks) < 2:
                     continue
-                total = float(owed[ks].sum())
+                total = float(root[ks].sum())
                 length = float(lengths[ks].sum())
                 needed = length * ARC_WIDTH_KM * ARC_THICK_KM
                 if total < needed:
                     continue
                 strip = sphere.strip(np.array([arc_points[k] for k in ks]), ARC_WIDTH_KM / 2.)
-                built, used = self._island_arc(over, strip, entry, total)
+                built, used, _ = self._island_arc(over, strip, entry, total)
                 if built > 0.:
-                    owed[ks] = owed[ks] * (total - used) / total  # what the strip did not take stays owed
+                    root[ks] = root[ks] * (total - used) / total  # what the strip did not take stays owed
                     events.append(dict(kind='island_arc', plate=over, plates=(b.left, b.right), area_km2=built,
                                        magma_km3=used))
                 elif total > 2. * needed:
-                    owed[ks] = 0.  # nowhere to put it: lost to the mantle
+                    root[ks] = 0.  # nowhere to put it: lost to the mantle
         return events
 
-    def _island_arc(self, plate, strip, entry, owed_km3):
+    def _islands(self, b, ks, plate, sites, bank, entry) -> list:
+        """Chunks of ISLAND_KM2 paid from the island bank of the run `ks` (see ISLAND_SHARE)."""
+        events = []
+        chunk = ISLAND_KM2 * ISLAND_THICK_KM
+        if float(bank[ks].sum()) < chunk:
+            return events
+        back, forth = self.frame(plate).T, self.frame(plate)
+        radius = np.sqrt(ISLAND_KM2 / np.pi)
+        step = .8 * radius / sphere.RADIUS_KM  # a growth chunk overlaps its island by a fifth of its width
+        islands = {id(c): c for c in self.crust if c.plate == plate and c.kind == 'continent'
+                   and getattr(c, 'mesh', None) is None}
+        about = {i: _about(c) for i, c in islands.items()}  # centre and reach of each island
+        local = {k: sphere.rotate(sites[k], back) for k in ks}
+        # Only sites over the plate's own ocean can take a chunk; the rest are not tried at all.
+        ocean = [c.shape for c in self.crust if c.plate == plate and c.kind == 'ocean']
+        for shape in ocean:
+            spherely.prepare(shape)
+        wet = [k for k in ks if any(spherely.contains(shape, _point(local[k])) for shape in ocean)]
+        order = sorted(wet, key=lambda k: (-float(bank[k]), k))
+
+        def lower(point):
+            """A lower bound on the distance from `point` (plate frame) to each island, km, and their ids."""
+            ids = list(about)
+            if not ids:
+                return np.zeros(0), ids
+            centres = np.array([about[i][0] for i in ids])
+            reach = np.array([about[i][1] for i in ids])
+            return sphere.arc_km(centres, point) - reach, ids
+
+        for _ in range(50):
+            total = float(bank[ks].sum())
+            if total < chunk:
+                break
+            placed, last = None, False
+            for k in order:
+                bound, ids = lower(local[k])
+                here, free = None, True
+                for i in np.flatnonzero(bound < ISLAND_SPACING_KM):
+                    here = _point(local[k]) if here is None else here
+                    if spherely.distance(islands[ids[i]].shape, here) < ISLAND_SPACING_KM * 1e3:
+                        free = False
+                        break
+                if free:
+                    placed = self._chunk(plate, sites[k], entry)
+                    if placed[0] > 0.:
+                        break
+                    placed = None  # no ocean under this site
+            if placed is None and about and ks:
+                # No site free: the chunk extends the island nearest the most banked site, at the
+                # tip of it along the arc, on the side clearer of the other islands.
+                k = order[0] if order else max(ks, key=lambda k: (float(bank[k]), -k))
+                bound, ids = lower(local[k])
+                target = ids[int(np.argmin(bound))]
+                centre = about[target][0]
+                along = sphere.rotate(b.points[k + 1] - b.points[k], back)
+                along = along - centre * float(along @ centre)
+                if np.linalg.norm(along) < 1e-12:
+                    along = np.cross(centre, [0., 0., 1.])
+                along = sphere.unit(along)
+                verts = np.vstack([r for poly in sphere.polygons(islands[target].shape) for r in poly])
+                proj = (verts - centre) @ along
+                others = [i for i in ids if i != target]
+                choices = []
+                for side in (1., -1.):
+                    tip = verts[int(np.argmax(side * proj))]
+                    at = sphere.unit(tip * np.cos(step) + side * along * np.sin(step))
+                    clear = min((float(sphere.arc_km(about[i][0], at)) - about[i][1] for i in others), default=np.inf)
+                    choices.append((clear, side, at))
+                for _, _, at in sorted(choices, key=lambda s: -s[0]):
+                    placed = self._chunk(plate, sphere.rotate(at, forth), entry)
+                    if placed[0] > 0.:
+                        last = placed[0] < .5 * ISLAND_KM2  # hemmed in: take what there was and stop
+                        break
+                    placed = None
+            if placed is None:
+                break  # nowhere this step: the bank waits
+            built, used, piece = placed
+            bank[ks] = bank[ks] * (total - used) / total
+            events.append(dict(kind='island', plate=plate, plates=(b.left, b.right), area_km2=built, magma_km3=used))
+            alive = {id(c) for c in self.crust}
+            islands = {i: c for i, c in islands.items() if i in alive}
+            about = {i: a for i, a in about.items() if i in alive}
+            islands[id(piece)] = piece
+            about[id(piece)] = _about(piece)
+            if last:
+                break
+        return events
+
+    def _chunk(self, plate, centre, entry):
+        """A chunk of ISLAND_KM2 of island at the world-frame `centre`, over `plate`'s ocean."""
+        disc = sphere.polygon(sphere.disc(centre, np.sqrt(ISLAND_KM2 / np.pi)))
+        return self._island_arc(plate, disc, entry, ISLAND_KM2 * ISLAND_THICK_KM, ISLAND_THICK_KM)
+
+    def _island_arc(self, plate, strip, entry, owed_km3, thick_km=ARC_THICK_KM):
         """Make the part of `strip` (world frame) over `plate`'s ocean continental crust, as thick as
-        the magma owed allows up to ARC_THICK_KM; returns (km2 built, km3 of magma used)."""
+        the magma owed allows up to `thick_km`; returns (km2 built, km3 of magma used, the piece)."""
         back = self.frame(plate).T
         local = sphere.rotate_geography(strip, back)
-        ocean = [c for c in self.crust if c.plate == plate and c.kind == 'ocean']
+        ocean = [c for c in self.crust if c.plate == plate and c.kind == 'ocean' and spherely.intersects(c.shape, local)]
         pieces, built = [], 0.
         for c in ocean:
             part = sphere.intersection(c.shape, local)
@@ -946,30 +1077,33 @@ class RegionWorld:
             pieces.append(part)
             built += area
         if built < DETAIL_KM2:
-            return 0., 0.
-        thickness = min(ARC_THICK_KM, owed_km3 / built)
+            return 0., 0., None
+        thickness = min(thick_km, owed_km3 / built)
         shape = sphere.union(*pieces)
-        # A strip beside an arc already built extends that arc rather than seeding another piece.
+        # New arc crust beside arcs already built extends them, and welds every one it touches
+        # into one piece, rather than seeding another.
         arcs = [c for c in self.crust if c.plate == plate and c.kind == 'continent'
                 and getattr(c, 'mesh', None) is None and spherely.distance(c.shape, shape) < 1e3]
         if arcs:
             arc = max(arcs, key=lambda c: c.area_km2())
-            volume = arc.volume_km3() + built * thickness
-            arc.shape = sphere.union(arc.shape, shape)
+            volume = sum(c.volume_km3() for c in arcs) + built * thickness
+            arc.shape = sphere.union(arc.shape, shape, *[c.shape for c in arcs if c is not arc])
             arc.thickness_km = volume / arc.area_km2()
+            arc.born_myr = min(c.born_myr for c in arcs)
+            self.crust = [c for c in self.crust if c is arc or c not in arcs]
         else:
-            self.crust.append(Crust(plate, 'continent', shape, self.time_myr, thickness))
+            arc = Crust(plate, 'continent', shape, self.time_myr, thickness)
+            self.crust.append(arc)
         entry['gained']['arc'] += built
         entry['lost']['arc'] += built
         entry['arc_km3'] += built * thickness
-        return built, built * thickness
+        return built, built * thickness, arc
 
-    def _piece_at(self, plate, point):
-        """The crust piece of `plate` under a world-frame `point`, or None."""
-        local = sphere.rotate(point, self.frame(plate).T)
-        here = spherely.create_point(*map(float, sphere.to_lonlat(local)))
+    def _meshed_at(self, plate, point):
+        """The meshed continent piece of `plate` under a world-frame `point`, or None."""
+        here = _point(sphere.rotate(point, self.frame(plate).T))
         for c in self.crust:
-            if c.plate == plate and spherely.contains(c.shape, here):
+            if c.plate == plate and c.kind == 'continent' and getattr(c, 'mesh', None) is not None                     and spherely.contains(c.shape, here):
                 return c
         return None
 
@@ -1138,6 +1272,25 @@ def _loss_category(boundary_kind, crust_kind):
     if boundary_kind in ('converging', 'collision'):
         return 'collision' if crust_kind == 'continent' else 'compression'
     return 'sliver'
+
+
+def _point(xyz):
+    """A spherely point for a unit vector."""
+    return spherely.create_point(*map(float, sphere.to_lonlat(xyz)))
+
+
+def _centroid(shape):
+    """The centroid of a geography as a unit vector."""
+    p = spherely.centroid(shape)
+    return sphere.from_lonlat(float(spherely.get_x(p)), float(spherely.get_y(p)))
+
+
+def _about(piece):
+    """A piece's centre (unit vector, its plate's frame) and reach (km to its farthest vertex)."""
+    centre = _centroid(piece.shape)
+    verts = [r for poly in sphere.polygons(piece.shape) for r in poly]
+    reach = float(sphere.arc_km(np.vstack(verts), centre).max()) if verts else 0.
+    return centre, reach
 
 
 def _runs_of(kinds, kind):
