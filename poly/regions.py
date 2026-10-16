@@ -76,6 +76,10 @@ ISLAND_SHARE = .05
 ISLAND_KM2 = 50.
 ISLAND_THICK_KM = 20.
 ISLAND_SPACING_KM = 70.
+# Nothing emerges until the arc has built its submarine ridge: a segment banks for islands only once
+# its root holds this much per km of trench (a ridge 60 km wide and 10 km thick; 20 Myr at the
+# reference convergence, 11 Myr at 90 km/Myr). Earth's arcs take 5-15 Myr to break the surface.
+ARC_EMERGE_KM3_PER_KM = 600.
 
 
 def _full():
@@ -925,10 +929,12 @@ class RegionWorld:
                 piece.mesh.add_volume(magma, area, near=local[None])
                 piece.thickness_km += magma / area
                 entry['arc_km3'] += magma
-            else:
+            elif root[k] >= ARC_EMERGE_KM3_PER_KM * float(lengths[k]):
                 # Over ocean, or an island already built (islands grow by chunks, not by thickening).
                 root[k] += (1. - ISLAND_SHARE) * magma
                 bank[k] += ISLAND_SHARE * magma
+            else:
+                root[k] += magma  # the ridge first
         # A run of trench segments under one overriding plate builds islands as their bank allows,
         # and a ribbon along the run once the root owed is enough for a strip along it.
         for lo, hi in _runs_of(b.kinds, 'trench'):
