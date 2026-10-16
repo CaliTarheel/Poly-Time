@@ -281,6 +281,42 @@ class RegionStepTests(unittest.TestCase):
         self.assertAlmostEqual(world.areas()['continent'] + lost - made, continent, delta=1e-4 * continent + 1.)
 
 
+class RollbackTests(unittest.TestCase):
+    def test_a_retreating_trench_sheds_a_forearc_that_opens_a_back_arc(self):
+        # The cap goes down under the stationary world plate; its slab is old enough to retreat.
+        world = regions.from_network(cap_world(cap_omega=EAST)[0])
+        for c in world.crust:
+            if c.plate == 1 and c.kind == 'ocean':
+                c.born_myr = -100.  # old ocean on the cap: a heavy slab
+        rotations = {1: EAST, 2: np.zeros(3)}
+        world.step(rotations, 1.)
+        events = world.shed_forearcs(rotations)
+        self.assertEqual([e['kind'] for e in events], ['forearc'])
+        forearc = events[0]['new']
+        self.assertEqual(events[0]['plate'], 2)
+        self.assertGreater(events[0]['rollback_km_myr'], events[0]['advance_km_myr'])
+        self.assertIn(forearc, world.plates())
+        self.assertGreaterEqual(events[0]['area_km2'], regions.FOREARC_MIN_KM2)
+        # The forearc keeps the trench (overriding it now) and moves toward the cap.
+        trench = [(b.left, b.right) for b in world.boundaries for k, kind in enumerate(b.kinds) if kind == 'trench' and b.overriding[k] == forearc]
+        self.assertTrue(trench)
+        prescribed = world.prescribe({1: EAST, 2: np.zeros(3), forearc: np.zeros(3)})
+        self.assertGreater(np.linalg.norm(prescribed[forearc]) * sphere.RADIUS_KM, 10.)
+        area_before = sphere.area_km2(world.regions[forearc])
+        ridge = 0.
+        for _ in range(6):
+            entry = world.step(prescribed, .5)
+            assert_checks(self, entry)
+            ridge += entry['gained']['ridge']
+            prescribed = world.prescribe({1: EAST, 2: np.zeros(3), forearc: np.zeros(3)})
+        # The back-arc opened behind it (new ocean), the forearc is still a plate, and the books close.
+        self.assertGreater(ridge, 0.)
+        self.assertIn(forearc, world.plates())
+        self.assertAlmostEqual(sphere.area_km2(world.regions[forearc]) / area_before, 1., delta=.25)
+        self.assertTrue(any(b.left == forearc or b.right == forearc for b in world.boundaries
+                            if (b.left, b.right) in ((2, forearc), (forearc, 2))))
+
+
 class RegionDynamicsTests(unittest.TestCase):
     def test_the_force_balance_pulls_a_cap_towards_its_trench_and_the_books_close(self):
         world = regions.from_network(cap_world(cap_omega=EAST)[0])
@@ -319,7 +355,8 @@ class RiftTests(unittest.TestCase):
         rifts = [e for entry in entries for e in entry['events'] if e['kind'] == 'rift']
         self.assertGreaterEqual(len(rifts), 1)
         self.assertGreater(rifts[0]['tension_n_per_m'], rifts[0]['strength_n_per_m'])
-        self.assertEqual(len(world.plates()), 6 + len(rifts))
+        forearcs = [e for entry in entries for e in entry['events'] if e['kind'] == 'forearc']
+        self.assertEqual(len(world.plates()), 6 + len(rifts) + len(forearcs))
         for entry in entries:
             assert_checks(self, entry)
         self.assertAlmostEqual(sum(c.area_km2() for c in world.crust) / crust, 1., delta=1e-6)

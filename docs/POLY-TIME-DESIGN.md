@@ -159,6 +159,14 @@ equals the area destroyed, term by term.
   it lands on continent, a terrane docked a step earlier included, that much stacks onto it as
   thickness where it lands. Larger arrivals collide and suture as before. Continental area is no
   longer lost at trenches, and no volume is handed to a distant heir.
+- **Slab rollback.** A trench run of 1,000 km or more whose slab retreats faster than its
+  overriding plate advances (the hinge retreats at 30 km/Myr for an 80 Myr slab, as the square
+  root of age, capped at 1.5 times that) sheds a forearc plate: the overriding plate's crust from
+  the trench to 250 km behind it, arc included. The forearc is prescribed, not force-balanced: it
+  moves with its parent plus the slab's retreat where that outruns the parent's own advance, so
+  the gap behind it opens as back-arc ocean through the ridge rule, and an advancing overriding
+  plate (Andes) opens nothing. Forearcs are exempt from the small-plate absorption; a forearc that
+  loses its trench moves with its parent.
 - **Ocean depth from age.** The floor subsides as it cools (Stein & Stein's GDH1: 2.6 km at the
   ridge, 0.365 km per root-Myr to 20 Myr, levelling towards 5.65 km); the maps tint ocean by it. Airy isostasy gives elevation from thickness (0.15 km per km of
   crust beyond 35 km), which the maps tint. Erosion and arcs are processes on this mesh, to come.

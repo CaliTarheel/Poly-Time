@@ -70,8 +70,14 @@ class Balance:
         lon, lat = sphere.to_lonlat(self.points)
         self.geographies = spherely.points(lon, lat)
 
-    def solve(self, world) -> dict:
-        """Rotation of every plate (rad/Myr) at which the torques balance; also stores the parts."""
+    def solve(self, world, constraints=None) -> dict:
+        """Rotation of every plate (rad/Myr) at which the torques balance; also stores the parts.
+
+        `constraints` ties plates to others: {plate: (parent, extra)} imposes rotation(plate) =
+        rotation(parent) + extra (rad/Myr), a forearc moving with its hinge. The tied plate's own
+        balance is dropped and what its neighbours feel from it is felt through the parent, so a
+        slab-pulled plate still meets its trench's resistance when a forearc sits between them.
+        """
         p = self.parameters
         plates = world.plates() if hasattr(world, 'segments') else world.network.plates()
         slot = {plate: k for k, plate in enumerate(plates)}
@@ -105,6 +111,21 @@ class Balance:
         torque += pull.ravel()
         pulled_km = np.bincount(seg.down[seg.trench], seg.length_m[seg.trench] / 1e3, minlength=count)
         pulled = {plate: float(pulled_km[k]) for plate, k in slot.items() if pulled_km[k] > 0.}
+        for plate, (parent, extra) in (constraints or {}).items():
+            if plate not in slot or parent not in slot or plate == parent:
+                continue
+            f, o = 3 * slot[plate], 3 * slot[parent]
+            e = np.asarray(extra, float) / SECONDS_PER_MYR  # rad/s
+            # Every row's dependence on the tied plate becomes dependence on the parent, plus a known part.
+            column = matrix[:, f:f + 3].copy()
+            matrix[:, o:o + 3] += column
+            torque -= column @ e
+            matrix[:, f:f + 3] = 0.
+            # The tied plate's own rows: rotation(plate) - rotation(parent) = extra.
+            matrix[f:f + 3, :] = 0.
+            matrix[f:f + 3, f:f + 3] = np.eye(3)
+            matrix[f:f + 3, o:o + 3] = -np.eye(3)
+            torque[f:f + 3] = e
         omega = np.linalg.solve(matrix, torque)  # rad/s
         rotations = {plate: omega[3 * slot[plate]:3 * slot[plate] + 3] * SECONDS_PER_MYR for plate in plates}
         self.last = dict(pulled_km=pulled, speed_km_myr={
@@ -337,6 +358,19 @@ def _segments(world):
             yield s.left, s.right, a, b, s.kind, s.overriding
 
 
+def _solve_with_forearcs(balance, world):
+    """The balance with any forearc plates tied to their hinges (see RegionWorld.hinge_extras)."""
+    rotations = balance.solve(world)
+    if not hasattr(world, 'hinge_extras'):
+        return rotations
+    for _ in range(2):  # the extra depends on the parent's own advance: two passes settle it
+        constraints = world.hinge_extras(rotations)
+        if not constraints:
+            return rotations
+        rotations = balance.solve(world, constraints)
+    return rotations
+
+
 def run(world, steps, parameters=None, dt=1., report=None, rifting=None):
     """Step `world` `steps` times with motions from the force balance; returns the balance.
 
@@ -357,8 +391,10 @@ def run(world, steps, parameters=None, dt=1., report=None, rifting=None):
             best = max(found, key=lambda c: c.ratio, default=None)
             if best is not None and best.ratio > 1.:
                 rifted.append(world.rift(best))
+        if hasattr(world, 'shed_forearcs'):
+            rifted += world.shed_forearcs(_solve_with_forearcs(balance, world))
         while remaining > 1e-9:
-            rotations = balance.solve(world)
+            rotations = _solve_with_forearcs(balance, world)
             fastest = max(balance.last['speed_km_myr'].values())
             sub = min(remaining, balance.parameters.step_limit_km / max(fastest, 1e-9))
             entry = world.step(rotations, sub)

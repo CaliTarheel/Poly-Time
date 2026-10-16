@@ -7,6 +7,20 @@ from poly import dynamics, sphere
 from poly.build import cap_world, voronoi_world
 
 
+class ConstraintTests(unittest.TestCase):
+    def test_a_tied_plate_follows_its_parent_plus_the_extra(self):
+        from poly import regions
+        from poly.build import cap_world
+        world = regions.from_network(cap_world(cap_omega=(0., 0., .005))[0])
+        balance = dynamics.Balance()
+        free = balance.solve(world)
+        extra = np.array([0., 0., 1e-3])
+        tied = balance.solve(world, {1: (2, extra)})
+        np.testing.assert_allclose(tied[1], tied[2] + extra, atol=1e-12)
+        # The world plate now carries what the cap used to balance on its own: it moves differently.
+        self.assertGreater(np.linalg.norm(tied[2] - free[2]), 0.)
+
+
 class BalanceTests(unittest.TestCase):
     def test_a_cap_going_down_a_trench_is_pulled_towards_it(self):
         # The cap's eastern edge is a trench under the world plate; its western edge a ridge.
