@@ -13,7 +13,53 @@ import numpy as np
 import spherely
 
 from poly import sphere
-from poly.mesh import MINIMUM_KM2, REACH_KM
+from poly.mesh import MINIMUM_KM2, REACH_KM, SPACING_KM
+
+MINIMUM_FIELD_KM2 = SPACING_KM ** 2 / 4.
+
+
+def lump_field(field, polygon_km2):
+    """Tie microscopic clipped cells to resolved patches without clipping height.
+
+    Mesh edges constrain the grouping, so nearby coasts separated by water
+    cannot exchange material. Real node areas supply every group's volume.
+    An unchanged mesh gives the same groups on the next call; this is a
+    projection onto regional degrees of freedom, not another timed diffusion.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components, dijkstra
+    areas = field.node_areas_km2() * polygon_km2 / field.area_km2()
+    if np.all(areas >= MINIMUM_FIELD_KM2):
+        return 0., float(areas.min())
+    edges = np.vstack((field.triangles[:, [0, 1]], field.triangles[:, [1, 2]],
+                       field.triangles[:, [2, 0]]))
+    edges = np.unique(np.sort(edges, axis=1), axis=0)
+    lengths = sphere.arc_km(field.nodes[edges[:, 0]], field.nodes[edges[:, 1]])
+    graph = coo_matrix((np.r_[lengths, lengths],
+                        (np.r_[edges[:, 0], edges[:, 1]], np.r_[edges[:, 1], edges[:, 0]])),
+                       shape=(len(areas), len(areas))).tocsr()
+    count, components = connected_components(graph, directed=False)
+    anchors = list(np.flatnonzero(areas >= MINIMUM_FIELD_KM2))
+    resolved = set(components[anchors])
+    for component in range(count):
+        if component not in resolved:
+            members = np.flatnonzero(components == component)
+            anchors.append(int(members[np.argmax(areas[members])]))
+    _, _, source = dijkstra(graph, directed=False, indices=anchors, min_only=True,
+                            return_predecessors=True)
+    if np.any(source < 0):
+        raise ValueError('A continental field cell has no connected material patch.')
+    _, group = np.unique(source, return_inverse=True)
+    support = np.bincount(group, weights=areas)
+    volume = np.bincount(group, weights=areas * field.thickness)
+    new = (volume / support)[group]
+    # Close roundoff on a whole patch, retaining its tied degrees of freedom.
+    residual = float(areas @ field.thickness - areas @ new)
+    largest = int(np.argmax(support))
+    new[group == largest] += residual / support[largest]
+    moved = float(.5 * (areas @ np.abs(new - field.thickness)))
+    field.thickness = new
+    return moved, float(support.min())
 
 
 def inventory(world):
@@ -146,12 +192,20 @@ def consolidate(world, entry=None):
                 receiver_province=None if body.geology is None else body.geology['province_id'],
                 distance_km=distance, volume_km3=volume))
     world.geology['unresolved_material'] = kept
+    moved, support = 0., np.inf
+    for body in bodies:
+        if body.mesh is not None:
+            exchange, minimum = lump_field(body.mesh, body.area_km2())
+            moved += exchange
+            support = min(support, minimum)
     if entry is not None:
         entry['coarsened_bodies'] = entry.get('coarsened_bodies', 0) + count
         entry['coarsened_continent_km2'] = entry.get('coarsened_continent_km2', 0.) + area
         entry['coarsened_continent_km3'] = entry.get('coarsened_continent_km3', 0.) + material
         entry['coarsening_deposited_km3'] = entry.get('coarsening_deposited_km3', 0.) + transferred
         entry['unresolved_continent_km3'] = volume_km3(world)
+        entry['field_coarsening_km3'] = entry.get('field_coarsening_km3', 0.) + moved
+        entry['minimum_field_patch_km2'] = None if not np.isfinite(support) else support
 
 
 def validate(world):

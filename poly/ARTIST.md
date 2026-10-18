@@ -83,6 +83,15 @@ are recorded in the ledger. The artist profile uses the existing 20,000 km2 cont
 threshold (a disc about 160 km across) as the minimum independent continental body. This is
 an artist-model resolution choice, separate from the unchanged 250,000 km2 minimum plate area.
 It does not remove meaningful microplates.
+Clipped mesh vertices can also have microscopic control areas inside a large continent. The
+artist profile ties those cells to regional field patches with at least 10,000 km2 support
+(one quarter of the ordinary 200 km spacing squared). Nearest resolved nodes are selected by
+mesh-edge distance, so disconnected coasts cannot exchange rock. A component with no resolved
+node keeps one volume-weighted value. Each patch retains the sum of its real node-area volumes;
+no artificial nodal mass or thickness ceiling is introduced. Grouping is deterministic and
+idempotent on unchanged geometry, and the internal redistribution and smallest resulting patch
+are recorded. This prevents a newly clipped 1.9 km2 cell from supporting its own mountain spike
+just before a snapshot, after the timed spreading solve has already run.
 
 Resolved relief comes from the continental thickness mesh and oceanic age-depth relation.
 Domain-warped procedural detail amplifies that relief in material coordinates. It is an output
@@ -216,3 +225,6 @@ gap continental. A mixed-thickness coast tests local breakup, and a homogeneous 
 field tests that routing does not manufacture noise. Controlled prescribed-opening runs
 compare the previous and new rules with identical initial rock and motions; these are process
 calibrations, separate from a force-driven planetary qualification.
+A captured coastal field tests regional support, volume conservation and repeated projection.
+Separate component volumes stay separate, and a uniform 250 km thickness remains 250 km,
+demonstrating that the projection is a resolution choice rather than a hidden relief ceiling.
