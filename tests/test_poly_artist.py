@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from poly import artist, geology, sphere
+from poly import artist, geology, scenario, sphere
 from poly.checkpoint import load_checkpoint, save_checkpoint
 from tests.test_poly_geology import world_with_continent
 
@@ -36,6 +36,28 @@ class ArtistScenarioTests(unittest.TestCase):
         measured = artist.metrics(world)
         self.assertAlmostEqual(measured['water_depth_km'], water, places=12)
         self.assertGreater(world.geology['sea_level_km'], old_level)
+
+    def test_starting_trenches_have_ocean_on_the_downgoing_side(self):
+        trenches = collisions = 0
+        for boundary in self.world.boundaries:
+            for k, kind in enumerate(boundary.kinds):
+                left, right = self.world._sides(boundary, k)
+                if kind == 'trench':
+                    trenches += 1
+                    down = right if boundary.overriding[k] == boundary.left else left
+                    self.assertEqual(down, 'ocean')
+                elif kind == 'collision':
+                    collisions += 1
+                    self.assertEqual((left, right), ('continent', 'continent'))
+        self.assertGreater(trenches, 0)
+        self.assertGreater(collisions, 0)
+
+    def test_contact_initialization_cannot_rewrite_evolved_history(self):
+        import copy
+        world = copy.deepcopy(self.world)
+        world.time_myr = 1.
+        with self.assertRaisesRegex(ValueError, 'evolved boundary history'):
+            scenario.initialize_contacts(world, self.rotations)
 
     def test_water_quadrature_reports_a_tiny_slit_without_hiding_the_surface_gap(self):
         import copy
@@ -99,6 +121,8 @@ class ArtistScenarioTests(unittest.TestCase):
         def accepted(current, phase):
             measured = artist.metrics(current)
             self.assertAlmostEqual(measured['water_depth_km'], current.geology['water_depth_km'], places=12)
+            self.assertAlmostEqual(current.ledger[-1]['land_fraction'], measured['land_fraction'], places=12)
+            self.assertAlmostEqual(current.ledger[-1]['water_residual_km'], 0., places=12)
         advance(world, config, phase, 2, accepted)
         self.assertAlmostEqual(world.time_myr, 1.)
         self.assertTrue(world.ledger)
@@ -109,6 +133,35 @@ class ArtistScenarioTests(unittest.TestCase):
             restored, _ = load_checkpoint(path)
         self.assertEqual(restored.time_myr, world.time_myr)
         self.assertEqual(len(restored.geology['features']), len(world.geology['features']))
+
+    def test_interrupt_reports_the_saved_world_instead_of_a_partially_attempted_step(self):
+        import contextlib
+        import copy
+        import io
+        import json
+        from dataclasses import asdict
+        from unittest.mock import patch
+        from poly import artist_run, dynamics
+        world = copy.deepcopy(self.world)
+        metadata = dict(artist=dict(width=256, snapshot_myr=.5),
+                        config=dict(dt_myr=.5, motion='forces',
+                                    parameters=asdict(dynamics.Parameters(sample_points=5000)),
+                                    rifting=asdict(dynamics.Rifting()), rotations_per_myr=self.rotations),
+                        progress=dict(completed_intervals=0, remaining_myr=0.), provenance={})
+        def interrupted(current, *args):
+            current.time_myr = 999.
+            raise KeyboardInterrupt()
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            with patch('poly.artist_run.advance', side_effect=interrupted), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(KeyboardInterrupt):
+                    artist_run._execute(output, world, metadata, .5)
+            manifest = json.loads((output / 'manifest.json').read_text())
+            self.assertEqual(manifest['status'], 'interrupted')
+            self.assertEqual(manifest['time_myr'], 0.)
+            restored, _ = load_checkpoint(output / 'checkpoint.json')
+            self.assertEqual(restored.time_myr, 0.)
+            self.assertEqual(json.loads((output / 'history.json').read_text())[-1]['time_myr'], 0.)
 
 
 if __name__ == '__main__':

@@ -10,7 +10,7 @@ import numpy as np
 import spherely
 from scipy.spatial import cKDTree
 
-from poly import geology, sphere, surface
+from poly import geology, scenario, sphere, surface
 from poly.build import densify, voronoi_world
 from poly.mesh import ContinentMesh
 from poly.regions import from_network
@@ -67,7 +67,7 @@ def mountain_detail(points, seed):
     return result
 
 
-def _land_shape(seed, fraction):
+def _land_shape(seed, fraction, layout='varied'):
     """A few lobed continental masses independent of the plate tessellation."""
     if not 0.05 <= fraction <= .85:
         raise ValueError('Scenario continental coverage must be between 5% and 85%.')
@@ -76,7 +76,10 @@ def _land_shape(seed, fraction):
                                  [22., -33., 41., -27., 39., -44.])
     rotation = sphere.rotation(sphere.unit(rng.normal(size=3)) * rng.uniform(0., np.pi))
     centres = sphere.rotate(centres, rotation)
-    angles = np.linspace(0., 2. * np.pi, 192, endpoint=False)
+    if layout not in ('simple', 'varied'):
+        raise ValueError('Unknown starting layout: %s' % layout)
+    warp = scenario.SphericalWarp(seed + 1069) if layout == 'varied' else None
+    angles = np.linspace(0., 2. * np.pi, 384 if warp else 192, endpoint=False)
     outlines = []
     for centre in centres:
         east = sphere.unit(np.cross(centre, [0., 0., 1.]))
@@ -88,9 +91,11 @@ def _land_shape(seed, fraction):
         outlines.append((centre, direction, radius * rng.uniform(.85, 1.15)))
 
     def build(scale):
-        return sphere.union(*[sphere.polygon(np.cos(scale * r)[:, None] * c
-                                             + np.sin(scale * r)[:, None] * d)
-                              for c, d, r in outlines])
+        shapes = []
+        for c, d, r in outlines:
+            ring = np.cos(scale * r)[:, None] * c + np.sin(scale * r)[:, None] * d
+            shapes.append(sphere.polygon(warp(ring) if warp else ring))
+        return sphere.union(*shapes)
     lower, upper = .05, 1.3
     for _ in range(40):
         middle = .5 * (lower + upper)
@@ -105,7 +110,8 @@ def _land_shape(seed, fraction):
     raise ValueError('Could not initialize the requested continental area.')
 
 
-def make_world(seed=1, plates=10, land_fraction=.55, continent_fraction=.65, spacing_km=150.):
+def make_world(seed=1, plates=10, land_fraction=.55, continent_fraction=.65, spacing_km=150.,
+               layout='varied'):
     """Dispersed continents with inherited relief, shelves and an explicit water inventory.
 
     The inherited structures are chosen starting conditions, not simulated ancient history.
@@ -113,9 +119,13 @@ def make_world(seed=1, plates=10, land_fraction=.55, continent_fraction=.65, spa
     """
     if not 0. < land_fraction < continent_fraction:
         raise ValueError('Initial land must be positive and smaller than continental coverage.')
+    if layout not in ('simple', 'varied'):
+        raise ValueError('Unknown starting layout: %s' % layout)
     network, rotations = voronoi_world(count=plates, seed=seed, spacing_km=spacing_km)
+    if layout == 'varied':
+        scenario.curve_network(network, seed, spacing_km)
     world = from_network(network)
-    land = _land_shape(seed, continent_fraction)
+    land = _land_shape(seed, continent_fraction, layout)
     world.crust = []
     for plate, region in world.regions.items():
         continent = sphere.intersection(region, land)
@@ -126,6 +136,7 @@ def make_world(seed=1, plates=10, land_fraction=.55, continent_fraction=.65, spa
             world.crust.append(Crust(plate, 'continent', continent))
     geology.activate(world, seed)
     geology.separate_bodies(world)
+    scenario.initialize_contacts(world, rotations)
     coasts = np.vstack([densify(r, 30., closed=True) for rings in sphere.polygons(land) for r in rings])
     coast_tree = cKDTree(coasts)
     rng = np.random.default_rng(seed + 2749)
@@ -241,6 +252,11 @@ def update_water(world, count=32768, diagnostics=None):
         else:
             upper = level
     world.geology['sea_level_km'] = .5 * (lower + upper)
+    if diagnostics is not None:
+        level = world.geology['sea_level_km']
+        diagnostics['land_fraction'] = float(np.mean(bed >= level))
+        diagnostics['sea_level_km'] = level
+        diagnostics['water_residual_km'] = float(np.maximum(level - bed, 0.).mean() - water)
     return world.geology['sea_level_km']
 
 

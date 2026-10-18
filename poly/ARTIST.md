@@ -28,7 +28,8 @@ Open `runs/artist-01/replay.html` locally. It embeds the actual saved maps, with
 globe, flat projection, time slider, playback, boundary overlay and inherited belt overlay.
 The maps and timeline do not require a server or external JavaScript libraries. A target of
 1,000 Myr is an instruction to the runner; inspect `manifest.json` for the duration actually
-accepted. A failed integration preserves its checkpoint and records the error.
+accepted. A failed or interrupted integration preserves its last accepted checkpoint and
+records the error. A partially attempted step is never presented as an accepted snapshot.
 Every displayed epoch also keeps a native checkpoint under `states/`, so its mechanical
 fields can be inspected or rendered again at a higher resolution. Rendering does not advance
 the simulation or increase its physical resolution.
@@ -51,12 +52,20 @@ evidence of timestep convergence.
 
 ## What the implementation does
 
-Continents are lobed spherical polygons independent of the starting Voronoi plates. A chosen
-starting state supplies shelves and inherited mountain belts as a thickness field. Those belts
+The default `--layout varied` applies invertible spherical twists to the initial continent
+outlines and shared plate network. Both sides of each plate boundary use the same curved
+line, and actual native polygon areas calibrate continental coverage. `--layout simple`
+retains the earlier unwarped geometry for comparisons. The twists choose a starting situation;
+they never reshape evolved material or manufacture simulated history.
+Continents are spherical polygons independent of the starting plates. Initial contacts are
+classified again after placing the actual crust: converging continental sides start as
+collisions, while a continent/ocean trench starts with the continental side overriding.
+A chosen starting state supplies shelves and inherited mountain belts as a thickness field. Those belts
 are initial conditions, not fabricated simulated prehistory. The default continent coverage is
 65% of the sphere. An equal-area quadrature calibrates water to 55% emerged land, and the
 equivalent global water depth is then fixed. Sea level is solved after each accepted mechanical
-step; erosion uses the previous accepted water level. Output does not update the model.
+step; erosion uses the previous accepted water level. Every accepted ledger entry records
+the sampled land fraction, sea level and water residual. Output does not update the model.
 If an equal-area water quadrature point falls on a tiny numerical slit, the actual native
 geometry is audited against the existing coverage budget before seeking nearby valid
 surface samples. The displaced point count and maximum offset are recorded. The underlying
@@ -130,5 +139,7 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m unittest discover \
 Tests distinguish continental coverage from emergence, conserve water after uplift, compare
 material-attached terrain before and after actual plate transfer, verify exact restart surfaces,
 exercise a force-driven scenario, check submerged erosion, and cover captured degenerate
-geometries and wide connected continental meshes. Historical worlds without artist state
+geometries and wide connected continental meshes. Starting-state checks exercise invertible
+twists, gap-free curved shared boundaries, local crust at every initial trench and collision,
+and preservation of the last accepted checkpoint during interruption. Historical worlds without artist state
 retain their existing checkpoint fields and whole-plate fusion policy.

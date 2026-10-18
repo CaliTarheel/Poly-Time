@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: poly-artist-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   OPENBLAS_NUM_THREADS: '1'
@@ -127,13 +127,6 @@ jobs:
               print(json.dumps(data, indent=2))
           PY
           exit "$result"
-      - name: Render the last accepted state at 8192 pixels
-        if: ${{ always() && hashFiles('runs/artist/checkpoint.json') != '' }}
-        timeout-minutes: 20
-        continue-on-error: true
-        run: |
-          python -m poly.artist_run render --checkpoint runs/artist/checkpoint.json \
-            --output runs/records/last-accepted-8192.png --width 8192
       - name: Summarize the actual duration
         if: always()
         run: |
@@ -155,7 +148,7 @@ jobs:
               else:
                   out.write('Initialization failed; inspect the retained logs.\n')
           PY
-      - name: Keep the replay, native states, maps and acceptance records
+      - name: Preserve the native history before the high-resolution export
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -165,4 +158,18 @@ jobs:
             runs/records/
           if-no-files-found: warn
           compression-level: 6
+          retention-days: 1
+      - name: Render the last accepted state at 8192 pixels
+        if: ${{ always() && hashFiles('runs/artist/checkpoint.json') != '' }}
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          python -m poly.artist_run render --checkpoint runs/artist/checkpoint.json \
+            --output runs/records/last-accepted-8192.png --width 8192
+      - name: Keep the high-resolution export separately
+        if: ${{ always() && hashFiles('runs/records/last-accepted-8192.png') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: poly-artist-final-map
+          path: runs/records/last-accepted-8192.png
           retention-days: 1

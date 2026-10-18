@@ -94,18 +94,21 @@ def _execute(output, world, metadata, duration):
             remaining -= steps
             _snapshot(world, output, history, settings['width'])
             commit(world, phase)
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
+        manifest.update(status='interrupted' if isinstance(exc, KeyboardInterrupt) else 'failed',
+                        error=f'{type(exc).__name__}: {exc}')
+        atomic_json(output / 'manifest.json', manifest)
         # A rift decision may precede a rejected step. Read the accepted checkpoint instead
         # of depicting the partially attempted world as an accepted state.
         if (output / 'checkpoint.json').exists():
             accepted, _ = load_checkpoint(output / 'checkpoint.json')
+            manifest['time_myr'] = accepted.time_myr
+            atomic_json(output / 'manifest.json', manifest)
             if not history or accepted.time_myr > history[-1]['time_myr'] + 1e-9:
                 try:
                     _snapshot(accepted, output, history, settings['width'])
                 except Exception as snapshot_error:
                     manifest['snapshot_error'] = f'{type(snapshot_error).__name__}: {snapshot_error}'
-            manifest['time_myr'] = accepted.time_myr
-        manifest.update(status='failed', error=f'{type(exc).__name__}: {exc}')
         atomic_json(output / 'manifest.json', manifest)
         raise
     manifest.update(status='complete', time_myr=world.time_myr)
@@ -120,6 +123,7 @@ def main():
     start.add_argument('--plates', type=int, default=8)
     start.add_argument('--land', type=float, default=.55)
     start.add_argument('--continents', type=float, default=.65)
+    start.add_argument('--layout', choices=('simple', 'varied'), default='varied')
     start.add_argument('--spacing', type=float, default=150.)
     start.add_argument('--samples', type=int, default=20000)
     start.add_argument('--dt', type=float, default=.5)
@@ -148,10 +152,12 @@ def main():
         if args.output.exists() and any(args.output.iterdir()):
             parser.error('Output is not empty; use resume or a new directory.')
         args.output.mkdir(parents=True, exist_ok=True)
-        world, rotations = artist.make_world(args.seed, args.plates, args.land, args.continents, args.spacing)
+        world, rotations = artist.make_world(args.seed, args.plates, args.land, args.continents, args.spacing,
+                                             layout=args.layout)
         settings = dict(seed=args.seed, plates=args.plates, land_fraction=args.land,
                         continental_fraction=args.continents, spacing_km=args.spacing,
-                        snapshot_myr=args.snapshot, width=args.width)
+                        snapshot_myr=args.snapshot, width=args.width, layout=args.layout,
+                        initial_contacts='local_crust')
         config = dict(dt_myr=args.dt, motion='forces', parameters=asdict(dynamics.Parameters(sample_points=args.samples)),
                       rifting=asdict(dynamics.Rifting()), rotations_per_myr=rotations)
         metadata = dict(artist=settings, config=config,
