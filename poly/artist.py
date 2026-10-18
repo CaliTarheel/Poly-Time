@@ -12,7 +12,7 @@ from scipy.spatial import cKDTree
 
 from poly import geology, scenario, sphere, surface
 from poly.build import densify, voronoi_world
-from poly.mesh import ContinentMesh
+from poly.mesh import ContinentMesh, ISOSTASY, REFERENCE_KM
 from poly.regions import from_network
 from poly.world import Crust
 
@@ -265,11 +265,14 @@ def metrics(world, count=32768):
     sampled = sample(world, points)
     valid = np.isfinite(sampled.elevation_km)
     height = sampled.height_above_water_km
+    peak_thickness = geology.maximum_thickness(world)
     measured = dict(time_myr=world.time_myr, land_fraction=float(sampled.land.mean()),
                 continental_fraction=float(sampled.continental_crust.mean()),
                 sea_level_km=sampled.sea_level_km,
                 maximum_height_km=float(height[valid].max()),
                 minimum_height_km=float(height[valid].min()),
+                maximum_continental_thickness_km=peak_thickness,
+                maximum_resolved_height_km=ISOSTASY * (peak_thickness - REFERENCE_KM) - sampled.sea_level_km,
                 unresolved_fraction=float((~valid).mean()), plate_count=len(world.plates()),
                 collision_belts=sum(f['kind'] == 'collision' for f in world.geology['features']),
                 rift_belts=sum(f['kind'] == 'rift' for f in world.geology['features']))

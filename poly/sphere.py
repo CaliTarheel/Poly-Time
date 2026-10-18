@@ -494,7 +494,11 @@ def part(rings, minimum_km2=1e-6, whole_km2=None):
         cut = [abs(loop_area_km2(loop)) for hole in rings[1:] for loop in simple_loops(hole)]
         if all(abs(a) < .45 * SPHERE_KM2 for a in shell) and sum(shell) > 0.:
             expected = sum(shell) - sum(cut)
-            if abs(area_km2(whole) - expected) > max(1., 1e-4 * expected):
+            # A duplicate vertex repair can remove the wrong side of a narrow fold.
+            # Its finite area must not be excused by the size of the whole plate.
+            # Rebuild the already separated loops instead; the caller still applies
+            # its ordinary native-geometry acceptance budget to the final result.
+            if abs(area_km2(whole) - expected) > max(1e-5, 1e-10 * abs(expected)):
                 whole = None
     if whole is not None:
         area = area_km2(whole)

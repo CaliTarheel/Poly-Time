@@ -44,6 +44,14 @@ LOST_KM = 1.        # a node this far outside the piece's new outline was on the
 MINIMUM_COMPONENT_KM2 = 1e-6
 
 
+def erosion_cut_km(thickness, dt_myr, sea_level_km=0.):
+    """The same erosion law for resolved fields and uniform small bodies."""
+    thickness = np.asarray(thickness, float)
+    elevation = ISOSTASY * (thickness - REFERENCE_KM) - sea_level_km
+    exposed = np.maximum(thickness - REFERENCE_KM - sea_level_km / ISOSTASY, 0.)
+    return np.minimum(ERODE_PER_MYR * np.maximum(elevation, 0.) * max(dt_myr, 0.), exposed)
+
+
 class ContinentMesh:
     def __init__(self, nodes, triangles, thickness):
         self.nodes = np.asarray(nodes, float)
@@ -331,8 +339,7 @@ class ContinentMesh:
         if not high.any() or dt_myr <= 0.:
             return 0., 0., 0.
         areas = self.node_areas_km2() * polygon_km2 / max(self.area_km2(), 1e-300)
-        cut = np.where(high, ERODE_PER_MYR * elevation * dt_myr, 0.)
-        cut = np.minimum(cut, np.maximum(self.thickness - REFERENCE_KM - sea_level_km / ISOSTASY, 0.))
+        cut = erosion_cut_km(self.thickness, dt_myr, sea_level_km)
         removed = float((cut * areas).sum())
         self.thickness = self.thickness - cut
         if removed <= 0.:

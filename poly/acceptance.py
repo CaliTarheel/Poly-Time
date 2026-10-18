@@ -50,6 +50,8 @@ def _nonnegative(value, name):
 
 def geometry(world, full, entry):
     """Measure real coverage, not just sums that let gaps cancel overlaps."""
+    from poly.geology import maximum_thickness
+    entry['maximum_continental_thickness_km'] = maximum_thickness(world)
     covered = sphere.union(*world.regions.values())
     union_area = sphere.area_km2(covered)
     entry['plate_gap_km2'] = sphere.area_km2(sphere.difference(full, covered))

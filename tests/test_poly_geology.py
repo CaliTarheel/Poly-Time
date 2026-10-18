@@ -21,6 +21,56 @@ def world_with_continent():
 
 
 class GeologicalHistoryTests(unittest.TestCase):
+    def test_extrema_include_small_scalar_bodies_between_preview_samples(self):
+        world = world_with_continent()
+        tiny = Crust(1, 'continent', sphere.polygon(sphere.disc(sphere.from_lonlat(5., 0.), 1.)),
+                     thickness_km=500.)
+        world.crust.append(tiny)
+        self.assertEqual(geology.maximum_thickness(world), 500.)
+
+    def test_small_unmeshed_body_erodes_and_books_the_same_sink_as_a_resolved_body(self):
+        from poly.mesh import ContinentMesh
+        world = world_with_continent()
+        piece = next(c for c in world.crust if c.kind == 'continent')
+        piece.shape = sphere.polygon(sphere.disc(sphere.from_lonlat(0., 0.), 10.))
+        piece.thickness_km = 80.
+        self.assertIsNone(ContinentMesh.build(piece.shape, piece.thickness_km))
+        before = piece.volume_km3()
+        entry = dict(eroded_km3=0., sediment_to_sea_km3=0.)
+        world._erode(2., entry)
+        self.assertLess(piece.thickness_km, 80.)
+        self.assertAlmostEqual(before - piece.volume_km3(), entry['sediment_to_sea_km3'], places=8)
+        self.assertEqual(entry['eroded_km3'], entry['sediment_to_sea_km3'])
+        reference_shape = sphere.polygon(sphere.disc(sphere.from_lonlat(0., 0.), 500.))
+        reference = ContinentMesh.build(reference_shape, 80.)
+        reference_area = sphere.area_km2(reference_shape)
+        removed, _, _ = reference.erode(2., reference_area, bounded_deposition=True)
+        self.assertAlmostEqual(entry['eroded_km3'] / piece.area_km2(), removed / reference_area, places=10)
+        submerged = piece.thickness_km
+        world.geology['sea_level_km'] = 20.
+        world._erode(2., entry)
+        self.assertEqual(piece.thickness_km, submerged)
+
+    def test_small_unmeshed_collision_body_can_escape_over_its_own_ocean(self):
+        world = world_with_continent()
+        piece = next(c for c in world.crust if c.kind == 'continent')
+        # Rebuild the owning ocean around the small body rather than leaving
+        # the old 500 km hole from the helper's initial continent.
+        piece.shape = sphere.polygon(sphere.disc(sphere.from_lonlat(0., 0.), 20.))
+        for ocean in world.crust:
+            if ocean.plate == piece.plate and ocean.kind == 'ocean':
+                ocean.shape = sphere.difference(world.regions[piece.plate], piece.shape)
+        piece.thickness_km = 80.
+        area, volume = piece.area_km2(), piece.volume_km3()
+        lost = sphere.disc(sphere.from_lonlat(.1, 0.), 10.)
+        entry = dict(gained=dict(escape=0.), lost=dict(escape=0.))
+        world._escape(piece, 10000., [c for c in world.crust if c.plate == piece.plate], entry,
+                      lost_points=lost)
+        self.assertGreater(piece.area_km2(), area)
+        self.assertLess(piece.thickness_km, 80.)
+        self.assertAlmostEqual(piece.volume_km3() / volume, 1., places=12)
+        self.assertAlmostEqual(entry['gained']['escape'], entry['lost']['escape'], places=10)
+
     def test_rift_opening_stretches_existing_rock_and_preserves_the_interior(self):
         from poly.mesh import ContinentMesh
         world = world_with_continent()

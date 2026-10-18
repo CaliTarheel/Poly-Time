@@ -518,7 +518,10 @@ class RegionWorld:
                     else:
                         self._bequeath(piece, before_km3, mine)
                     entry['thickened_km3'] += continental * before_km3 / max(before_km2, TINY_KM2)
-                    self._escape(piece, continental, mine, entry)
+                    small_lost = None
+                    if self.geology is not None and piece.mesh is None:
+                        small_lost = np.vstack([r for poly in sphere.polygons(whole) for r in poly])
+                    self._escape(piece, continental, mine, entry, lost_points=small_lost)
         for shape, category in gains:
             area = sphere.area_km2(shape)
             if area < TINY_KM2:
@@ -630,7 +633,7 @@ class RegionWorld:
             heir.thickness_km += volume / heir.area_km2()
         return volume
 
-    def _escape(self, piece, shortened_km2, mine, entry):
+    def _escape(self, piece, shortened_km2, mine, entry, lost_points=None):
         """Push the piece's coast out over its plate's ocean within reach of the collision, by
         ESCAPE_FRACTION of the area shortened; the crust there spreads out (same volume).
 
@@ -641,8 +644,8 @@ class RegionWorld:
             return
         piece.escape_km2 = getattr(piece, 'escape_km2', 0.) + ESCAPE_FRACTION * shortened_km2
         mesh = getattr(piece, 'mesh', None)
-        lost = getattr(mesh, 'lost_nodes', None)
-        if mesh is None or lost is None or not len(lost):
+        lost = getattr(mesh, 'lost_nodes', None) if lost_points is None else lost_points
+        if lost is None or not len(lost) or (mesh is None and self.geology is None):
             return
         ocean = [c for c in mine if c.kind == 'ocean' and c is not piece]
         if not ocean:
@@ -694,7 +697,8 @@ class RegionWorld:
                 c.shape = sphere.difference(c.shape, band)
         piece.shape = sphere.union(piece.shape, band)
         grown = piece.area_km2()
-        piece.mesh = mesh.recut(piece.shape, grown, volume)
+        piece.mesh = (mesh.recut(piece.shape, grown, volume) if mesh is not None
+                      else ContinentMesh.build(piece.shape, volume / grown))
         piece.thickness_km = volume / grown
         piece.escape_km2 = max(piece.escape_km2 - area, 0.)
         entry['gained']['escape'] += area
@@ -708,15 +712,27 @@ class RegionWorld:
     def _erode(self, dt, entry):
         """Wear the highlands down; sediment settles on the piece's lowlands or goes to the sea."""
         for c in self.crust:
-            if c.kind != 'continent' or getattr(c, 'mesh', None) is None:
+            if c.kind != 'continent':
                 continue
             area = c.area_km2()
             sea_level = self.geology['sea_level_km'] if self.geology is not None else 0.
-            removed, settled, to_sea = c.mesh.erode(dt, area, sea_level, bounded_deposition=self.geology is not None)
+            if c.mesh is None:
+                if self.geology is None:
+                    continue
+                # A uniform small island has no internal lowland receiver. Its
+                # eroded rock enters the explicit sea-export ledger, just as a
+                # resolved body whose entire surface stands above the lowlands.
+                from poly.mesh import erosion_cut_km
+                cut = float(erosion_cut_km(c.thickness_km, dt, sea_level))
+                removed = to_sea = cut * area
+                c.thickness_km -= cut
+            else:
+                removed, settled, to_sea = c.mesh.erode(dt, area, sea_level, bounded_deposition=self.geology is not None)
             if removed > 0.:
                 entry['eroded_km3'] += removed
                 entry['sediment_to_sea_km3'] += to_sea
-                c.thickness_km = c.mesh.volume_km3(area) / area
+                if c.mesh is not None:
+                    c.thickness_km = c.mesh.volume_km3(area) / area
 
     def _mesh_continents(self):
         """Give every continental piece without a mesh one (a world built or loaded without them)."""

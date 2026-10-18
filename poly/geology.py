@@ -58,6 +58,16 @@ def reference_points(piece, local_points):
     return np.asarray(local_points) @ np.asarray(transform).T
 
 
+def maximum_thickness(world):
+    """An upper bound over every continental field, including unmeshed islands.
+
+    A sparse set of map or equal-area samples can miss a narrow high remnant.
+    Linear face interpolation is bounded by its nodal values.
+    """
+    return max((float(c.mesh.thickness.max()) if c.mesh is not None else float(c.thickness_km)
+                for c in world.crust if c.kind == 'continent'), default=0.)
+
+
 def separate_bodies(world, entry=None):
     """Disconnected continents are separate material bodies, including for terrane rules.
 

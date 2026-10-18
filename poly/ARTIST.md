@@ -106,6 +106,17 @@ the current water level, within 500 km of an erosion source. Submarine transport
 sea-export ledger. This prevents a tiny surviving receiver from becoming an arbitrarily high
 sediment spike. Offshore export is accounted material, but an evolving offshore sediment
 surface is still absent.
+Uniform continental bodies below the mesh size receive the same erosion law and book their
+exported sediment. When a shortening body loses its mesh, the actual removed outline still
+locates its lateral escape over its own ocean; losing the mesh does not disable those processes.
+This closes a path that trapped rock in very small remnants, but does not establish that all
+collision relief is calibrated.
+
+The diagnostics and every accepted ledger entry include the maximum continental thickness
+over all mesh nodes and uniform bodies. Snapshot metrics also report the corresponding maximum
+resolved height. The older `maximum_height_km` remains a maximum of equal-area samples of the
+amplified surface; those samples can miss a narrow high island. Inspect the native-field maximum
+when qualifying relief. No thickness or height is clipped to make a map pass.
 
 ## What remains before accepting a billion-year world
 
@@ -143,3 +154,7 @@ geometries and wide connected continental meshes. Starting-state checks exercise
 twists, gap-free curved shared boundaries, local crust at every initial trench and collision,
 and preservation of the last accepted checkpoint during interruption. Historical worlds without artist state
 retain their existing checkpoint fields and whole-plate fusion policy.
+The captured 95.176 Myr rotation failure is a regression fixture: reconstruction of a duplicate
+vertex must preserve the signed area of the separated loops, rather than accepting the removal
+of a finite fold under a plate-sized relative allowance. The original spatial and cumulative
+acceptance budgets remain unchanged.
