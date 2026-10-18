@@ -140,6 +140,7 @@ class RegionWorld:
     # or emplaced by an invented geological rule; this is a cumulative inventory, in km3.
     retired_arc_km3: object = field(default_factory=lambda: np.zeros(2))
     plate_policy: PlatePolicy = field(default_factory=PlatePolicy)
+    geology: object = None  # optional artist evolution state; absent in historical worlds
 
     # ------------------------------------------------------------------ views
     def plates(self) -> list:
@@ -216,6 +217,9 @@ class RegionWorld:
         for s in getattr(self, 'sutures', []):
             if s['plate'] in self.regions:
                 yield sphere.rotate(s['points'], self.frame(s['plate'])), s['time_myr']
+        if self.geology is not None:
+            from poly.geology import weak_lines
+            yield from weak_lines(self)
 
     def areas(self) -> dict:
         result = {}
@@ -506,9 +510,7 @@ class RegionWorld:
                     left = piece.area_km2()
                     if left >= TINY_KM2:
                         if piece.mesh is not None:
-                            recut = piece.mesh.recut(piece.shape, left, before_km3)
-                            if recut is not None:
-                                piece.mesh = recut
+                            piece.mesh = piece.mesh.recut(piece.shape, left, before_km3)
                         piece.thickness_km = before_km3 / left
                     else:
                         self._bequeath(piece, before_km3, mine)
@@ -547,6 +549,9 @@ class RegionWorld:
         if area < DETAIL_KM2:
             return False
         carry = self.frame(to).T @ self.frame(plate)
+        from poly.geology import transfer_features
+        transfer_features(self, plate, to, sphere.rotate_geography(piece.shape, self.frame(plate)),
+                          self.frame(plate), self.frame(to))
         shape = sphere.rotate_geography(piece.shape, carry)
         theirs = [c for c in others if c.plate == to]
         for c in [c for c in theirs if c.kind == 'continent']:
@@ -575,12 +580,13 @@ class RegionWorld:
             if a >= TINY_KM2:
                 c.shape = sphere.difference(c.shape, part)
                 overridden += a
+        from poly.geology import carry as carry_geology
+        piece.geology = carry_geology(piece.geology, carry)
         piece.plate, piece.shape = to, shape
         piece.thickness_km = docked_km3 / left
         if getattr(piece, 'mesh', None) is not None:
             rotated = piece.mesh.rotated(carry)
-            recut = rotated.recut(shape, left, docked_km3) if left < .999 * area else None
-            piece.mesh = recut if recut is not None else rotated
+            piece.mesh = rotated.recut(shape, left, docked_km3) if left < .999 * area else rotated
         # Books: the terrane leaves one plate and joins the other (a loss and a gain of the same
         # continent), and the ocean it covers on the plate it joins is gone.
         entry['gained']['accreted'] += left
@@ -676,9 +682,7 @@ class RegionWorld:
                 c.shape = sphere.difference(c.shape, band)
         piece.shape = sphere.union(piece.shape, band)
         grown = piece.area_km2()
-        recut = mesh.recut(piece.shape, grown, volume)
-        if recut is not None:
-            piece.mesh = recut
+        piece.mesh = mesh.recut(piece.shape, grown, volume)
         piece.thickness_km = volume / grown
         piece.escape_km2 = max(piece.escape_km2 - area, 0.)
         entry['gained']['escape'] += area
@@ -695,7 +699,8 @@ class RegionWorld:
             if c.kind != 'continent' or getattr(c, 'mesh', None) is None:
                 continue
             area = c.area_km2()
-            removed, settled, to_sea = c.mesh.erode(dt, area)
+            sea_level = self.geology['sea_level_km'] if self.geology is not None else 0.
+            removed, settled, to_sea = c.mesh.erode(dt, area, sea_level)
             if removed > 0.:
                 entry['eroded_km3'] += removed
                 entry['sediment_to_sea_km3'] += to_sea
@@ -772,6 +777,9 @@ class RegionWorld:
         self.sutures = transfer_sutures(getattr(self, 'sutures', []), plate, to, piece,
                                         self.frame(plate), self.frame(to),
                                         whole=sphere.area_km2(remaining) < TINY_KM2)
+        from poly.geology import transfer_features, carry as carry_geology
+        transfer_features(self, plate, to, piece, self.frame(plate), self.frame(to),
+                          whole=sphere.area_km2(remaining) < TINY_KM2)
         if boundary_index is not None:
             self._transfer_index(boundary_index, plate, to, piece, remaining)
         doubled = sphere.intersection(piece, self.regions.get(to, sphere.EMPTY))
@@ -798,6 +806,7 @@ class RegionWorld:
             c.shape = sphere.difference(c.shape, local)
             shape = part if np.allclose(carry, np.eye(3)) else sphere.rotate_geography(part, carry)
             given = Crust(to, c.kind, shape, c.born_myr, c.thickness_km)
+            given.geology = carry_geology(c.geology, carry)
             owed = getattr(c, 'escape_km2', 0.)
             if owed and whole_km3 > 0.:
                 share = owed * part_km2 / (part_km2 + max(c.area_km2(), 0.))
@@ -1118,6 +1127,9 @@ class RegionWorld:
             opening, sliding = segment_motion(b.points, rotations_per_myr[b.left], rotations_per_myr[b.right])
             ratio = np.abs(opening) / np.maximum(sliding, 1e-12)
             for k, kind in enumerate(b.kinds):
+                if kind == 'collision' and self.geology is not None and opening[k] > 0.:
+                    b.kinds[k], b.overriding[k], b.closed_km[k] = 'ridge', None, 0.
+                    continue
                 if kind in ('trench', 'collision'):
                     continue
                 threshold = TRANSFORM_RATIO * (1. + MARGIN if kind == 'transform' else 1. - MARGIN)
@@ -1136,7 +1148,12 @@ class RegionWorld:
             events += self._arcs(b, opening, dt, entry)
         for point, area, plate in entry['continent_arrived']:
             events += self._collide(point, area, plate)
-        events += self._sutures(rotations_per_myr)
+        if self.geology is None:
+            events += self._sutures(rotations_per_myr)
+        else:
+            from poly import geology
+            geology.advance(self, rotations_per_myr, dt)
+            geology.validate(self)
         return events
 
     def _arcs(self, b, opening, dt, entry) -> list:
@@ -1341,6 +1358,8 @@ class RegionWorld:
             self.crust = [c for c in self.crust if c is arc or c not in arcs]
         else:
             arc = Crust(plate, 'continent', shape, self.time_myr, thickness)
+            from poly.geology import initialize_piece
+            initialize_piece(self, arc)
             self.crust.append(arc)
         entry['gained']['arc'] += built
         entry['lost']['arc'] += built

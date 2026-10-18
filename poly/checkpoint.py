@@ -29,7 +29,7 @@ VERSION = 1
 GEOMETRY_CODEC = {"name": "spherely-native-s2-v1", "spherely_version": importlib.metadata.version("spherely")}
 WORLD_FIELDS = {"crust", "frames", "regions", "boundaries", "names", "parents", "time_myr",
                 "ledger", "next_ident", "sutures"}
-WORLD_EXTRAS = {"simplified_myr", "simplified_count", "plate_policy", "retired_arc_km3"}
+WORLD_EXTRAS = {"simplified_myr", "simplified_count", "plate_policy", "retired_arc_km3", "geology"}
 CRUST_FIELDS = {"plate", "kind", "shape", "born_myr", "thickness_km", "mesh"}
 BOUNDARY_FIELDS = {"left", "right", "points", "kinds", "overriding", "closed_km", "idents", "arc_km3"}
 
@@ -207,10 +207,12 @@ def world_to_data(world):
     _known(world, WORLD_FIELDS | WORLD_EXTRAS | {"_continent_cache"}, "world")
     crust = []
     for c in world.crust:
-        _known(c, CRUST_FIELDS | {"escape_km2"}, "crust")
+        _known(c, CRUST_FIELDS | {"escape_km2", "geology"}, "crust")
         crust.append({"plate": int(c.plate), "kind": c.kind, "shape": _shape(c.shape),
                       "born_myr": c.born_myr, "thickness_km": c.thickness_km, "mesh": _mesh(c.mesh),
                       "escape_km2": getattr(c, "escape_km2", None)})
+        if c.geology is not None:
+            crust[-1]['geology'] = _data(c.geology)
     boundaries = []
     for b in world.boundaries:
         _known(b, BOUNDARY_FIELDS, "boundary")
@@ -219,7 +221,8 @@ def world_to_data(world):
                            "closed_km": b.closed_km.tolist(),
                            "idents": None if b.idents is None else np.asarray(b.idents).tolist(),
                            "arc_km3": None if b.arc_km3 is None else np.asarray(b.arc_km3).tolist()})
-    extras = {k: getattr(world, k) for k in WORLD_EXTRAS if hasattr(world, k)}
+    extras = {k: getattr(world, k) for k in WORLD_EXTRAS if hasattr(world, k)
+              and (k != 'geology' or world.geology is not None)}
     if "plate_policy" in extras:
         policy = extras["plate_policy"]
         _known(policy, {"minimum_plate_km2", "numerical_crumb_km2"}, "plate_policy")
@@ -257,7 +260,7 @@ def world_from_data(value):
             raise CheckpointError("frame: expected a proper rotation")
     crust = []
     for item in value["crust"]:
-        _keys(item, CRUST_FIELDS | {"escape_km2"}, "crust")
+        _keys(item, CRUST_FIELDS | {"escape_km2"} | ({'geology'} if 'geology' in item else set()), "crust")
         plate = _integer(item["plate"], "crust.plate")
         if plate not in regions or item["kind"] not in ("continent", "ocean"):
             raise CheckpointError("crust: invalid plate or kind")
@@ -266,6 +269,8 @@ def world_from_data(value):
                   _number(item["thickness_km"], "thickness_km", 0.), _unmesh(item["mesh"]))
         if item["escape_km2"] is not None:
             c.escape_km2 = _number(item["escape_km2"], "escape_km2", 0.)
+        if 'geology' in item:
+            c.geology = _undata(item['geology'])
         crust.append(c)
     next_ident = _integer(value["next_ident"], "next_ident")
     boundaries = []
@@ -328,7 +333,7 @@ def world_from_data(value):
             raise CheckpointError("suture: future formation time")
     if not isinstance(extras, dict) or not set(extras) <= WORLD_EXTRAS:
         raise CheckpointError("world: unsupported extra state")
-    required = {f.name for f in fields(RegionWorld)} & WORLD_EXTRAS
+    required = ({f.name for f in fields(RegionWorld)} & WORLD_EXTRAS) - {'geology'}
     if not required <= set(extras):
         raise CheckpointError(f"world: runtime requires explicit {sorted(required - set(extras))}")
     if "plate_policy" in extras:
@@ -347,6 +352,11 @@ def world_from_data(value):
                         time, ledger, next_ident, sutures)
     for key, entry in extras.items():
         setattr(world, key, entry)
+    from poly import geology
+    try:
+        geology.validate(world)
+    except (TypeError, ValueError) as exc:
+        raise CheckpointError('geology: %s' % exc) from exc
     return world
 
 

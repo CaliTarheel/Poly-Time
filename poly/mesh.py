@@ -16,6 +16,9 @@ from __future__ import annotations
 import numpy as np
 import spherely
 from scipy.spatial import Delaunay, QhullError, cKDTree
+from scipy.sparse import coo_matrix, diags
+from scipy.sparse.csgraph import connected_components
+from scipy.sparse.linalg import spsolve
 
 from poly import sphere
 
@@ -35,6 +38,9 @@ DEPOSIT_REACH_KM = 500.
 REACH_KM = 300.     # shortening thickens the crust within about this of where it happened
 MINIMUM_KM2 = 2e4   # a piece smaller than this (a 140 km disc) keeps one thickness, no mesh
 LOST_KM = 1.        # a node this far outside the piece's new outline was on the ground lost
+# S2 clipping can retain disconnected fragments below a square metre. Their native geometry
+# remains in the crust polygon and its volume; they cannot support a useful continental mesh.
+MINIMUM_COMPONENT_KM2 = 1e-6
 
 
 class ContinentMesh:
@@ -51,21 +57,42 @@ class ContinentMesh:
         `field(points)` gives the thickness at points (an older mesh's `sample`). Returns None
         when the shape is too small or too thin to mesh.
         """
-        if sphere.area_km2(shape) < MINIMUM_KM2:
+        polygon_area = sphere.area_km2(shape)
+        if polygon_area < MINIMUM_KM2:
             return None
         nodes, triangles = [], []
         for rings in sphere.polygons(shape):
+            # Test a bounding spherical cap, rather than a cancellation-prone signed loop area.
+            # A small shell could also bound the complement of a cap; that is impossible when
+            # the complete geography occupies less than a hemisphere. Keep unsupported large
+            # geometries on the ordinary path rather than guessing their orientation.
+            if polygon_area < sphere.SPHERE_KM2 / 2 and _microscopic(rings[0]):
+                continue
+            rings = [sphere.tidy_ring(r, tolerance=1e-13) for r in rings]
+            if len(rings[0]) < 3 and polygon_area < sphere.SPHERE_KM2 / 2:
+                continue  # a native zero-width component collapsed in the degree conversion
+            boundary = np.vstack(rings)
+            centre = sphere.unit(boundary.mean(axis=0))
+            if (polygon_area < sphere.SPHERE_KM2 / 2 and np.isfinite(centre).all()
+                    and np.min(boundary @ centre) > .2
+                    and abs(sum(sphere.loop_area_km2(r) for r in rings)) < MINIMUM_COMPONENT_KM2):
+                continue  # projected minor loops: an elongated roundoff fold, not a cap
             part = _triangulate(rings, spacing_km)
-            if part is None:
-                return None
-            xyz, faces = part
-            triangles.extend(faces + len(nodes))
-            nodes.extend(xyz)
+            parts = [part] if part is not None else _chart_meshes(rings, spacing_km)
+            for part in parts:
+                if part is None:
+                    continue  # unresolved zero-width support; bounded by full native-area check
+                xyz, faces = part
+                triangles.extend(faces + len(nodes))
+                nodes.extend(xyz)
         if not triangles:
             return None
-        nodes = np.asarray(nodes, float)
+        nodes, triangles = _weld_nodes(np.asarray(nodes, float), np.asarray(triangles, int))
         thickness = np.full(len(nodes), float(thickness_km)) if field is None else np.asarray(field(nodes), float)
         mesh = cls(nodes, triangles, thickness)
+        error = abs(mesh.area_km2() - polygon_area)
+        if error > max(1e-5, polygon_area * 1e-9):
+            raise ValueError('Continental mesh coverage differs from its native polygon by %.6g km2.' % error)
         return mesh if mesh.area_km2() > 0. else None
 
     # ------------------------------------------------------------ measures
@@ -108,13 +135,16 @@ class ContinentMesh:
         result = np.full(len(points), np.nan)
         if not len(points):
             return result
-        inverse = np.linalg.inv(self.nodes[self.triangles])
-        centres = sphere.unit(self.nodes[self.triangles].sum(axis=1))
+        triangles = _usable_triangles(self.nodes, self.triangles)
+        if not len(triangles):
+            raise ValueError('Continental mesh has no numerically resolved sampling faces.')
+        inverse = np.linalg.inv(self.nodes[triangles])
+        centres = sphere.unit(self.nodes[triangles].sum(axis=1))
         nearest = cKDTree(centres)
         # The nearby faces normally suffice on a regular mesh. Fall back to an exhaustive
         # containment search for long, thin boundary faces; nearest-centre is never the rule
         # deciding which continent or side of an inlet supplies a value.
-        count = min(8, len(self.triangles))
+        count = min(8, len(triangles))
         for start in range(0, len(points), 4096):
             batch = points[start:start + 4096]
             candidates = np.asarray(nearest.query(batch, k=count)[1]).reshape(len(batch), count)
@@ -123,9 +153,9 @@ class ContinentMesh:
             rows = np.flatnonzero(inside.any(axis=1))
             columns = np.argmax(inside[rows], axis=1)
             w = np.maximum(weights[rows, columns], 0.)
-            tri = self.triangles[candidates[rows, columns]]
+            tri = triangles[candidates[rows, columns]]
             result[start + rows] = (w * self.thickness[tri]).sum(axis=1) / w.sum(axis=1)
-        for tri, transform in zip(self.triangles, inverse):
+        for tri, transform in zip(triangles, inverse):
             missing = np.flatnonzero(np.isnan(result))
             if not len(missing):
                 break
@@ -137,7 +167,7 @@ class ContinentMesh:
             result[missing[hit]] = (w @ self.thickness[tri]) / w.sum(axis=1)
         missing = np.flatnonzero(np.isnan(result))
         if len(missing):
-            edges = _edges(self.triangles)
+            edges = _edges(triangles)
             unique, counts = np.unique(edges, axis=0, return_counts=True)
             boundary = unique[counts == 1]
             best = np.full(len(missing), np.inf)
@@ -196,41 +226,50 @@ class ContinentMesh:
     def spread(self, dt_myr, diffusivity=SPREADING_KM2_PER_MYR):
         """Let the thickness flow down its gradient for `dt_myr`: crust is conserved exactly.
 
-        Finite volumes on the mesh edges: the crust moving along an edge per Myr is the
-        diffusivity times the thickness difference (an edge's width and length cancel to first
-        order), sub-cycled to keep the explicit scheme stable.
+        Backward-Euler finite volumes on mesh edges. Actual node areas supply the mass matrix;
+        microscopic clipped cells therefore neither impose millions of explicit substeps nor
+        acquire the artificial one-square-kilometre mass of the former stability floor.
+        Every disconnected component conserves its own volume.
         """
         if len(self.triangles) == 0 or dt_myr <= 0.:
             return
         edges = np.vstack((self.triangles[:, [0, 1]], self.triangles[:, [1, 2]], self.triangles[:, [2, 0]]))
         edges = np.unique(np.sort(edges, axis=1), axis=0)
         i, j = edges[:, 0], edges[:, 1]
-        areas = np.maximum(self.node_areas_km2(), 1.)
-        degree = np.bincount(np.concatenate((i, j)), minlength=len(self.nodes))
-        limit = .25 * areas / np.maximum(degree, 1) / diffusivity  # stable sub-step, per node
-        cycles = int(np.ceil(dt_myr / max(float(limit.min()), 1e-9)))
-        step = dt_myr / cycles
-        t = self.thickness.copy()
-        for _ in range(cycles):
-            flow = diffusivity * step * (t[j] - t[i])  # km3 along each edge, from j to i
-            change = np.zeros(len(t))
-            np.add.at(change, i, flow)
-            np.add.at(change, j, -flow)
-            t += change / areas
-        self.thickness = t
+        areas = self.node_areas_km2()
+        if not np.isfinite(diffusivity) or diffusivity < 0. or np.any(areas <= 0.):
+            raise ValueError('Diffusion requires positive finite node areas and nonnegative diffusivity.')
+        if diffusivity == 0.:
+            return
+        n = len(areas)
+        graph = coo_matrix((np.ones(2 * len(i)), (np.r_[i, j], np.r_[j, i])), shape=(n, n)).tocsr()
+        count, labels = connected_components(graph, directed=False)
+        component_area = np.bincount(labels, weights=areas, minlength=count)
+        component_volume = np.bincount(labels, weights=areas * self.thickness, minlength=count)
+        mean = (component_volume / component_area)[labels]
+        degree = np.asarray(graph.sum(axis=1)).ravel()
+        operator = diags(areas) + dt_myr * diffusivity * (diags(degree) - graph)
+        # Subtract each component's mean so a constant field remains exact even when a very
+        # small mass diagonal is added to much larger diffusion coefficients.
+        result = mean + spsolve(operator.tocsc(), areas * (self.thickness - mean))
+        correction = np.bincount(labels, weights=areas * (self.thickness - result), minlength=count)
+        result += (correction / component_area)[labels]
+        if not np.isfinite(result).all():
+            raise ValueError('Nonfinite continental diffusion result.')
+        self.thickness = result
 
-    def erode(self, dt_myr, polygon_km2):
+    def erode(self, dt_myr, polygon_km2, sea_level_km=0.):
         """Wear the highlands down for `dt_myr`, settling the sediment on nearby lowlands.
 
         Returns (km3 eroded, km3 settled on this piece, km3 gone to the sea).
         """
-        elevation = self.elevation_km()
+        elevation = self.elevation_km() - sea_level_km
         high = elevation > 0.
         if not high.any() or dt_myr <= 0.:
             return 0., 0., 0.
-        areas = np.maximum(self.node_areas_km2() * polygon_km2 / max(self.area_km2(), 1e-300), 1.)
+        areas = self.node_areas_km2() * polygon_km2 / max(self.area_km2(), 1e-300)
         cut = np.where(high, ERODE_PER_MYR * elevation * dt_myr, 0.)
-        cut = np.minimum(cut, np.maximum(self.thickness - REFERENCE_KM, 0.))  # never below sea level
+        cut = np.minimum(cut, np.maximum(self.thickness - REFERENCE_KM - sea_level_km / ISOSTASY, 0.))
         removed = float((cut * areas).sum())
         self.thickness = self.thickness - cut
         if removed <= 0.:
@@ -253,6 +292,79 @@ def _edges(triangles):
     return np.sort(np.vstack((triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]])), axis=1)
 
 
+def _usable_triangles(nodes, triangles):
+    """Faces whose spherical interpolation can be resolved in binary64.
+
+    Clipping at a coincident edge can create zero-width faces. They retain no useful field
+    support. New meshes check the omitted area against the native domain; old checkpoint
+    sampling ignores these faces while the full saved volume remains the remapping target.
+    """
+    triangles = np.asarray(triangles, int).reshape(-1, 3)
+    if not len(triangles):
+        return triangles
+    condition = np.linalg.cond(np.asarray(nodes)[triangles])
+    return triangles[np.isfinite(condition) & (condition < 1e12)]
+
+
+def _microscopic(ring):
+    if not len(ring):
+        return True
+    angle = np.max(sphere.arc_km(ring[0], ring)) / sphere.RADIUS_KM
+    cap_area = 4. * np.pi * sphere.RADIUS_KM ** 2 * np.sin(angle / 2.) ** 2
+    return cap_area < MINIMUM_COMPONENT_KM2
+
+
+def _weld_nodes(nodes, triangles):
+    """Shared chart seams are ordinary interior mesh edges, not separate continents."""
+    parent = np.arange(len(nodes))
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i, j in sorted(cKDTree(nodes).query_pairs(1e-12)):
+        a, b = root(i), root(j)
+        parent[max(a, b)] = min(a, b)
+    roots = np.array([root(i) for i in range(len(nodes))])
+    unique, inverse = np.unique(roots, return_inverse=True)
+    faces = _usable_triangles(nodes[unique], inverse[triangles])
+    used, remap = np.unique(faces, return_inverse=True)
+    return nodes[unique][used], remap.reshape(-1, 3)
+
+
+def _mesh_geography(rings):
+    """Repair each loop independently so the output geometry cleaner cannot erase slit holes.
+
+    The simulation has its own explicit, ledgered detail policy. Meshing retains even
+    sub-detail holes until that policy acts on the authoritative polygon itself.
+    """
+    shape = sphere.polygon_robust(rings[0])
+    for hole in rings[1:]:
+        shape = sphere.difference(shape, sphere.polygon_robust(hole[::-1]))
+    return shape
+
+
+def _chart_meshes(rings, spacing_km):
+    """Cover wide domains with eight gnomonic charts, each a spherical octant.
+
+    The native-domain coverage check still applies after stitching. This removes the old
+    silent collapse to one mean thickness when a continent outgrows one tangent plane.
+    """
+    shape = _mesh_geography(rings)
+    parts = []
+    axes = np.eye(3)
+    for x in (-1., 1.):
+        for y in (-1., 1.):
+            for z in (-1., 1.):
+                ring = axes * np.array([x, y, z])[:, None]
+                if sphere.loop_area_km2(ring) < 0.:
+                    ring = ring[::-1]
+                chart = sphere.intersection(shape, sphere.polygon(ring))
+                for domain in sphere.polygons(chart):
+                    parts.append(_triangulate(domain, spacing_km))
+    return parts
+
+
 def _triangulate(rings, spacing_km):
     """Cover one connected polygon, including its holes, with domain-clipped faces.
 
@@ -260,11 +372,20 @@ def _triangulate(rings, spacing_km):
     cannot contain an entire hole. Clipping may split a face, but leaves only simple polygons.
     Triangulating those fragments retains the coastline without introducing a new dependency.
     """
+    # Native S2 vertices that differ by an ulp can coincide after WKB's degree conversion.
+    # Remove only sub-micrometre repeats/spikes before rebuilding the meshing domain. The
+    # authoritative native polygon remains untouched; build checks total mesh coverage.
+    rings = [sphere.tidy_ring(r, tolerance=1e-13) for r in rings]
+    if len(rings[0]) < 3:
+        return None
+    rings = [rings[0]] + [r for r in rings[1:] if len(r) >= 3]
     boundary = np.vstack(rings)
     centre, e1, e2 = _frame(boundary)
-    if np.min(boundary @ centre) < .2:
+    if not np.isfinite(centre).all() or np.min(boundary @ centre) < .2:
         return None  # one connected component is too wide for a single gnomonic plane
-    shape = sphere.polygon(rings[0], rings[1:])
+    # A valid native S2 component may touch itself at vertices after degree conversion.
+    # Reuse the spherical loop repair; the full mesh/native-area comparison remains mandatory.
+    shape = _mesh_geography(rings)
     xy = _project(boundary, centre, e1, e2)
     step = spacing_km / sphere.RADIUS_KM
     xs = np.arange(xy[:, 0].min(), xy[:, 0].max() + step, step)
@@ -317,6 +438,9 @@ def _triangulate(rings, spacing_km):
         return None
     if extra:
         nodes = np.vstack((nodes, extra))
+    faces = _usable_triangles(nodes, faces)
+    if not len(faces):
+        return None
     faces = np.asarray(faces, int)
     # Clipping can leave original outline/interior vertices unused. They must not remain as
     # zero-area nodes participating in remapping or the explicit transport stability limit.

@@ -59,6 +59,7 @@ class Crust:
     # A continent's thickness as a field on a mesh in the plate's frame (poly.mesh); None keeps the
     # one number. `thickness_km` is always the mesh's mean, so volume is area times thickness.
     mesh: object = None
+    geology: object = None  # optional persistent province and material reference (poly.geology)
 
     def area_km2(self) -> float:
         return sphere.area_km2(self.shape)

@@ -315,12 +315,16 @@ def tidy_ring(ring, tolerance=1e-10, tooth_km2=0.):
     ring back. `tolerance` is in radians (1e-10 is about 0.6 mm).
     """
     points = np.asarray(ring, float)
-    while len(points) > 3:
+    while len(points):
         # A vertex (almost) the same as the one before it goes; a run of them keeps its first.
         repeat = np.linalg.norm(points - np.roll(points, 1, axis=0), axis=1) <= tolerance
         if repeat.any():
             points = points[~repeat] if not repeat.all() else points[:1]
+            if len(points) < 3:
+                break
             continue
+        if len(points) <= 3:
+            break
         u = points - np.roll(points, 1, axis=0)
         w = np.roll(points, -1, axis=0) - points
         cosine = np.einsum('ij,ij->i', u, w) / (np.linalg.norm(u, axis=1) * np.linalg.norm(w, axis=1))

@@ -1,10 +1,13 @@
 """The continental field must follow its material domain, including narrow seas and holes."""
 import unittest
+import json
+from pathlib import Path
 
 import numpy as np
 
 from poly import sphere
 from poly.mesh import ContinentMesh
+from poly.checkpoint import _unshape
 
 
 def polygon(lon, lat):
@@ -16,6 +19,47 @@ def slit():
 
 
 class MeshDomainTests(unittest.TestCase):
+    def test_clipped_microscopic_component_keeps_the_resolved_field_and_full_volume(self):
+        for name in ['poly_remesh_microscopic.json', 'poly_remesh_duplicate.json',
+                     'poly_remesh_collapsed_triangle.json', 'poly_remesh_fallback.json',
+                     'poly_remesh_touching.json', 'poly_remesh_wide.json']:
+            with self.subTest(fixture=name):
+                fixture = Path(__file__).parent / 'fixtures' / name
+                shape = _unshape(json.loads(fixture.read_text())['geography'])
+                area = sphere.area_km2(shape)
+                original = shape.__getstate__()
+                mesh = ContinentMesh.build(shape, 41.)
+                self.assertIsNotNone(mesh)
+                self.assertGreater(len(mesh.triangles), 10)
+                self.assertAlmostEqual(mesh.volume_km3(area) / area, 41., places=10)
+                self.assertEqual(shape.__getstate__(), original)
+                self.assertAlmostEqual(mesh.area_km2() / area, 1., places=9)
+
+    def test_tidy_ring_removes_repeats_even_in_a_three_vertex_component(self):
+        point = sphere.from_lonlat(10., 30.)
+        other = sphere.from_lonlat(12., 32.)
+        ring = np.array([point, point.copy(), other])
+        self.assertEqual(len(sphere.tidy_ring(ring, tolerance=1e-13)), 2)
+        proper = sphere.from_lonlat([0., 2., 0.], [0., 0., 2.])
+        np.testing.assert_array_equal(sphere.tidy_ring(proper), proper)
+
+    def test_wide_continent_has_connected_charts_and_preserves_its_field(self):
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        shape = sphere.polygon(sphere.disc(sphere.from_lonlat(23., 14.),
+                                           sphere.RADIUS_KM * np.radians(85.), count=48))
+        mesh = ContinentMesh.build(shape, 40., spacing_km=800.)
+        self.assertIsNotNone(mesh)
+        self.assertAlmostEqual(mesh.area_km2() / sphere.area_km2(shape), 1., places=9)
+        edges = np.vstack((mesh.triangles[:, [0, 1]], mesh.triangles[:, [1, 2]], mesh.triangles[:, [2, 0]]))
+        graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(len(mesh.nodes), len(mesh.nodes)))
+        self.assertEqual(connected_components(graph, directed=False)[0], 1)
+        self.assertTrue(np.all(mesh.node_areas_km2() > 0.))
+        mesh.thickness += 5. * mesh.nodes[:, 0]
+        before = mesh.volume_km3(sphere.area_km2(shape))
+        mesh.spread(50.)
+        self.assertAlmostEqual(mesh.volume_km3(sphere.area_km2(shape)) / before, 1., places=12)
+
     def assert_domain(self, shape, mesh):
         self.assertIsNotNone(mesh)
         faces = []
@@ -73,6 +117,12 @@ class MeshDomainTests(unittest.TestCase):
         np.testing.assert_allclose(mesh.rotated(rotation).sample(sphere.rotate(points, rotation)),
                                    mesh.sample(points), atol=1e-7)
 
+    def test_old_zero_width_face_cannot_make_the_resolved_field_singular(self):
+        nodes = np.array([[1., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
+        mesh = ContinentMesh(nodes, [[0, 1, 2], [0, 2, 3]], [40., 900., 50., 60.])
+        point = sphere.unit([1., 1., 1.])[None]
+        np.testing.assert_allclose(mesh.sample(point), [50.], atol=1e-12)
+
     def test_clipped_mesh_diffusion_preserves_volume(self):
         shape = slit()
         mesh = ContinentMesh.build(shape, 35.)
@@ -80,6 +130,50 @@ class MeshDomainTests(unittest.TestCase):
         volume = mesh.volume_km3(sphere.area_km2(shape))
         mesh.spread(2.)
         self.assertAlmostEqual(mesh.volume_km3(sphere.area_km2(shape)) / volume, 1., places=12)
+
+    def test_diffusion_with_a_microscopic_cell_preserves_real_volume_and_bounds(self):
+        # A tiny boundary face shares an edge with a resolved face. The former 1-km2 mass floor
+        # moved material using an area different from the actual volume integral.
+        nodes = sphere.from_lonlat([0., 1., 0., 0.], [0., 0., 1., -1e-9])
+        mesh = ContinentMesh(nodes, [[0, 1, 2], [1, 0, 3]], [35., 35., 70., 90.])
+        area = mesh.area_km2()
+        before = mesh.volume_km3(area)
+        mesh.spread(50.)
+        self.assertAlmostEqual(mesh.volume_km3(area) / before, 1., places=12)
+        self.assertGreaterEqual(float(mesh.thickness.min()), 35. - 1e-9)
+        self.assertLessEqual(float(mesh.thickness.max()), 90. + 1e-9)
+
+    def test_erosion_books_the_real_volume_of_microscopic_cells(self):
+        nodes = sphere.from_lonlat([0., 1., 0., 0.], [0., 0., 1., -1e-9])
+        mesh = ContinentMesh(nodes, [[0, 1, 2], [1, 0, 3]], [35., 35., 70., 90.])
+        area = mesh.area_km2()
+        before = mesh.volume_km3(area)
+        removed, settled, exported = mesh.erode(1., area)
+        after = mesh.volume_km3(area)
+        self.assertAlmostEqual((before - after) / before, exported / before, places=12)
+        self.assertAlmostEqual((removed - settled) / before, exported / before, places=12)
+
+    def test_erosion_does_not_remove_submerged_continental_rock(self):
+        nodes = sphere.from_lonlat([0., 1., 0.], [0., 0., 1.])
+        mesh = ContinentMesh(nodes, [[0, 1, 2]], [36., 36., 36.])
+        before = mesh.thickness.copy()
+        self.assertEqual(mesh.erode(10., mesh.area_km2(), sea_level_km=.5), (0., 0., 0.))
+        np.testing.assert_array_equal(mesh.thickness, before)
+
+    def test_large_diffusion_step_does_not_transfer_volume_between_components(self):
+        shape = sphere.union(polygon([0, 5, 5, 0], [0, 0, 5, 5]),
+                             polygon([30, 35, 35, 30], [0, 0, 5, 5]))
+        mesh = ContinentMesh.build(shape, 35.)
+        lon, _ = sphere.to_lonlat(mesh.nodes)
+        left = lon < 15.
+        mesh.thickness = np.where(left, np.linspace(35., 65., len(lon)),
+                                  np.linspace(70., 100., len(lon)))
+        weights = mesh.node_areas_km2()
+        volumes = [float((weights[mask] * mesh.thickness[mask]).sum()) for mask in (left, ~left)]
+        mesh.spread(100.)
+        for mask, volume in zip((left, ~left), volumes):
+            self.assertAlmostEqual(float((weights[mask] * mesh.thickness[mask]).sum()) / volume,
+                                   1., places=12)
 
     def test_recut_preserves_target_volume_and_new_domain(self):
         shape = slit()
