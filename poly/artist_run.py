@@ -51,9 +51,9 @@ def replay(output, history):
         entry = dict(entry)
         entry['image'] = 'data:image/png;base64,' + base64.b64encode((output / entry['image']).read_bytes()).decode()
         frames.append(entry)
-    template = Path(__file__).with_name('replay.html').read_text()
+    template = Path(__file__).with_name('replay.html').read_text(encoding='utf-8')
     data = json.dumps(frames, separators=(',', ':'), allow_nan=False).replace('<', '\\u003c')
-    (output / 'replay.html').write_text(template.replace('/*__HISTORY__*/[]', data))
+    (output / 'replay.html').write_text(template.replace('/*__HISTORY__*/[]', data), encoding='utf-8')
 
 
 def _execute(output, world, metadata, duration):
@@ -62,7 +62,7 @@ def _execute(output, world, metadata, duration):
     if not math.isclose(count, round(count), abs_tol=1e-8) or duration < 0.:
         raise ValueError('Duration must be a nonnegative whole number of timesteps.')
     history_path = output / 'history.json'
-    history = json.loads(history_path.read_text()) if history_path.exists() else []
+    history = json.loads(history_path.read_text(encoding='utf-8')) if history_path.exists() else []
     manifest = dict(format='poly-artist-run', version=1, source=metadata['provenance'],
                     settings=settings, status='running', time_myr=world.time_myr,
                     target_myr=(phase['completed_intervals'] + round(count)) * config['dt_myr'],
