@@ -130,6 +130,13 @@ calibrated after initial coarsening, so the starting emerged fraction remains 55
 This rule prevents rock from being squeezed into shrinking numerical specks. It deliberately
 omits small islands as mechanical bodies; it does not establish that resolved collision relief
 or the 300 km homogenization reach is calibrated.
+Whole-terrane accretion also waits until every original owner has resolved its border losses.
+A terrane arriving at a trench can simultaneously overlap a third plate. Transferring its
+uncut outline early carried that third overlap into the receiver. The artist profile now
+cuts those original overlaps first, retaining the rock volume, then transfers the surviving
+terrane. A captured 18.59 Myr contact tests the original coverage and volume budgets. Its
+fixture retains native geometry and frames with simplified mean thickness fields; it is
+a single-step regression, not a continued qualification history.
 
 The diagnostics and every accepted ledger entry include the maximum continental thickness
 over all resolved mesh nodes and any historical uniform bodies. Passive unresolved material

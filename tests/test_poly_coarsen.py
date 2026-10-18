@@ -1,5 +1,6 @@
 """Sub-resolution rock is conserved without independent fragment mechanics."""
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ import numpy as np
 
 from poly import acceptance, coarsen, geology, regions, sphere
 from poly.build import cap_world
-from poly.checkpoint import CheckpointError, load_checkpoint, save_checkpoint
+from poly.checkpoint import CheckpointError, load_checkpoint, save_checkpoint, world_from_data
 from poly.mesh import ContinentMesh, MINIMUM_KM2
 from poly.world import Crust
 
@@ -34,6 +35,18 @@ def entry():
 
 
 class PlanetaryCoarseningTests(unittest.TestCase):
+    def test_terrane_accretes_only_after_its_third_plate_overlap_is_resolved(self):
+        payload = json.loads((Path(__file__).parent / 'fixtures/poly_terrane_third_contact.json').read_text())
+        world = world_from_data(payload['world'])
+        rotations = {int(p): np.asarray(v) for p, v in payload['rotations'].items()}
+        before = world._continent_km3()
+        record = world.step(rotations, payload['dt_myr'])
+        self.assertTrue(any(e['kind'] == 'accreted' and e['plates'] == (3, 2) for e in record['events']))
+        self.assertLess(record['plate_overlap_km2'], acceptance.GEOMETRY_KM2)
+        self.assertLess(record['plate_gap_km2'], acceptance.GEOMETRY_KM2)
+        self.assertAlmostEqual((world._continent_km3() + record['sediment_to_sea_km3']
+                               - record['arc_km3']) / before, 1., delta=acceptance.VOLUME_RELATIVE)
+
     def test_nearby_remnant_joins_resolved_crust_without_a_gap_or_rock_loss(self):
         world = fixture()
         before = world._continent_km3()

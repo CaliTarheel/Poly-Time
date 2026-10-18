@@ -328,8 +328,19 @@ class RegionWorld:
             for piece in pieces:
                 nearest = min(plates, key=lambda p: spherely.distance(piece, moved[p]))
                 gained[nearest].append((piece, 'junction'))
+        docks = [] if self.geology is not None else None
         for p in plates:
-            self._update_crust(p, lost[p], gained[p], entry, dt)
+            self._update_crust(p, lost[p], gained[p], entry, dt, docks=docks)
+        if docks is not None:
+            # A terrane can touch a third plate as well as its receiving trench.
+            # Resolve every original owner's loss mask before changing ownership;
+            # otherwise whole-body docking carries its unresolved third overlap
+            # into the receiver, or a later receiver cuts it with an obsolete mask.
+            for piece, owner, to in docks:
+                if (piece.plate == owner and piece.area_km2() >= DETAIL_KM2
+                        and any(c is piece for c in self.crust)):
+                    self._dock(piece, owner, to, [c for c in self.crust if c.plate != owner], entry)
+            self.crust = [c for c in self.crust if c.area_km2() >= TINY_KM2]
         if self.geology is not None:
             from poly.coarsen import consolidate
             consolidate(self, entry)
@@ -463,7 +474,7 @@ class RegionWorld:
             rotations_per_myr.setdefault(plate, rotations_per_myr.get(ancestor, np.zeros(3)))
         return rotations_per_myr
 
-    def _update_crust(self, plate, losses, gains, entry, dt):
+    def _update_crust(self, plate, losses, gains, entry, dt, docks=None):
         back = self.frame(plate).T
         mine = [c for c in self.crust if c.plate == plate]
         others = [c for c in self.crust if c.plate != plate]
@@ -477,6 +488,7 @@ class RegionWorld:
         if local_by_kind:
             all_local = sphere.union(*local_by_kind.values())
             for piece in mine:
+                docking_to = None
                 whole = sphere.intersection(piece.shape, all_local)
                 if sphere.area_km2(whole) < TINY_KM2:
                     continue
@@ -485,8 +497,13 @@ class RegionWorld:
                     to = next((over for (kind, over), local in local_by_kind.items()
                                if kind == 'trench' and over in self.regions
                                and sphere.area_km2(sphere.intersection(whole, local)) >= DETAIL_KM2), None)
-                    if to is not None and self._dock(piece, plate, to, others, entry):
-                        continue
+                    if to is not None:
+                        if docks is None:
+                            if self._dock(piece, plate, to, others, entry):
+                                continue
+                        else:
+                            docking_to = to
+                            docks.append((piece, plate, to))
                 continental = 0.
                 before_km2 = piece.area_km2()
                 before_km3 = piece.volume_km3() if piece.kind == 'continent' else 0.
@@ -499,7 +516,7 @@ class RegionWorld:
                     entry['lost'][category] += area
                     if piece.kind == 'continent':
                         continental += area
-                    if category == 'continent_at_trench':
+                    if category == 'continent_at_trench' and docking_to is None:
                         # Where the continent went down, arrival by arrival, not the middle of them all.
                         for shape in by_kind[(kind, over)]:
                             part = sphere.intersection(whole, sphere.rotate_geography(shape, back))
