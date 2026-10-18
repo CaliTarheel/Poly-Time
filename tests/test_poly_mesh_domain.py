@@ -23,7 +23,7 @@ class MeshDomainTests(unittest.TestCase):
         for name in ['poly_remesh_microscopic.json', 'poly_remesh_duplicate.json',
                      'poly_remesh_collapsed_triangle.json', 'poly_remesh_fallback.json',
                      'poly_remesh_touching.json', 'poly_remesh_wide.json', 'poly_remesh_ear_clip.json',
-                     'poly_remesh_small_hole.json']:
+                     'poly_remesh_small_hole.json', 'poly_remesh_chart_frame.json']:
             with self.subTest(fixture=name):
                 fixture = Path(__file__).parent / 'fixtures' / name
                 shape = _unshape(json.loads(fixture.read_text())['geography'])
@@ -43,6 +43,25 @@ class MeshDomainTests(unittest.TestCase):
         self.assertEqual(len(sphere.tidy_ring(ring, tolerance=1e-13)), 2)
         proper = sphere.from_lonlat([0., 2., 0.], [0., 0., 2.])
         np.testing.assert_array_equal(sphere.tidy_ring(proper), proper)
+
+    def test_mesh_ring_cleaning_is_stable_before_selecting_a_chart(self):
+        from poly.mesh import _mesh_ring
+        # B is near A and C is near A, but B and C are farther apart.
+        # A single adjacency pass would retain C until its second application.
+        point = sphere.from_lonlat(0., 0.)
+        ring = np.vstack((point, sphere.unit(point + [0., 8e-14, 0.]),
+                          sphere.unit(point - [0., 8e-14, 0.]),
+                          sphere.from_lonlat([1., 0.], [0., 1.])))
+        cleaned = _mesh_ring(ring)
+        self.assertEqual(len(cleaned), 3)
+        np.testing.assert_array_equal(_mesh_ring(cleaned), cleaned)
+
+    def test_full_sphere_uses_charts_despite_its_degenerate_native_outline(self):
+        from poly.regions import FULL
+        mesh = ContinentMesh.build(FULL, 40., spacing_km=2000.)
+        self.assertIsNotNone(mesh)
+        self.assertAlmostEqual(mesh.area_km2() / sphere.SPHERE_KM2, 1., places=10)
+        self.assertAlmostEqual(mesh.volume_km3(sphere.SPHERE_KM2) / sphere.SPHERE_KM2, 40., places=10)
 
     def test_wide_continent_has_connected_charts_and_preserves_its_field(self):
         from scipy.sparse import coo_matrix

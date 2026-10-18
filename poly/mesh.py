@@ -432,10 +432,14 @@ def _mesh_ring(ring, tolerance=1e-13):
     points = np.asarray(ring, float)
     if not len(points):
         return points
-    keep = np.r_[True, np.linalg.norm(np.diff(points, axis=0), axis=1) > tolerance]
-    points = points[keep]
-    if len(points) > 1 and np.linalg.norm(points[0] - points[-1]) <= tolerance:
-        points = points[:-1]
+    while len(points) > 1:
+        keep = np.r_[True, np.linalg.norm(np.diff(points, axis=0), axis=1) > tolerance]
+        clean = points[keep]
+        if len(clean) > 1 and np.linalg.norm(clean[0] - clean[-1]) <= tolerance:
+            clean = clean[:-1]
+        if len(clean) == len(points):
+            break
+        points = clean
     return points
 
 
@@ -445,8 +449,11 @@ def _domain_rings(shape):
     No rebuilt longitude/latitude polygon supplies the clipping authority. Chart seams
     are stitched after triangulation, and full native coverage remains mandatory.
     """
-    domains = sphere.polygons(shape)
-    wide = False
+    # Choose charts from the same stable rings used for triangulation. Duplicate
+    # vertices can bias a mean enough to make the raw ring pass the chart limit
+    # while its cleaned ring fails it, silently skipping an entire continent.
+    domains = [[_mesh_ring(r) for r in rings] for rings in sphere.polygons(shape)]
+    wide = sphere.area_km2(shape) >= .5 * sphere.SPHERE_KM2
     for rings in domains:
         boundary = np.vstack(rings)
         mean = boundary.mean(axis=0)

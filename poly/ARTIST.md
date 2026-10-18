@@ -97,6 +97,10 @@ nodes stitched back into one field. Degenerate roundoff fragments cannot destroy
 field or acquire invented area. Backward Euler transport conserves true node-area volume
 within each disconnected continent, and erosion uses that same area measure. Captured
 failed-run geometries exercise these cases.
+Chart selection uses the same stable duplicate-cleaned rings as triangulation. Using a raw
+ring's point-weighted centre before removing duplicates could select a chart that its cleaned
+ring could not use, dropping the main component. A captured 27.8 million km2 continent tests
+full coverage across this transition; the full-sphere case also uses native octant charts.
 The artist profile uses a yielding approximation for spreading: conductance is proportional
 to `0.001 + (max(mean_edge_thickness - 35 km, 0) / 10 km)^3`. Thick belts relax quickly, while
 ordinary cratons and thin margins move slowly. Volume is retained and relief is not clamped
