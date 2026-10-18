@@ -9,6 +9,7 @@ import argparse
 import base64
 import json
 import math
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
@@ -21,6 +22,12 @@ def _snapshot(world, output, history, width):
     name = 'map-%010.3f.png' % world.time_myr
     metrics = artist.draw(world, output / name, width=width)
     metrics['image'] = name
+    if (output / 'checkpoint.json').exists():
+        states = output / 'states'
+        states.mkdir(exist_ok=True)
+        state_name = 'states/state-%010.3f.json' % world.time_myr
+        shutil.copyfile(output / 'checkpoint.json', output / state_name)
+        metrics['checkpoint'] = state_name
     metrics['boundaries'] = [dict(kind=kind, points=points.tolist())
                              for points, kind in world.boundary_lines()]
     metrics['features'] = [dict(kind=f['kind'], time_myr=f['time_myr'],
@@ -74,9 +81,9 @@ def _execute(output, world, metadata, duration):
 
     atomic_json(output / 'manifest.json', manifest)
     try:
+        commit(world, phase)
         if not history:
             _snapshot(world, output, history, settings['width'])
-        commit(world, phase)
         remaining = round(count)
         while remaining:
             # Output cadence does not alter the force or rift decision cadence.
@@ -120,7 +127,18 @@ def main():
     for command in (start, commands.add_parser('resume')):
         command.add_argument('--output', type=Path, required=True)
         command.add_argument('--duration', type=float, default=1000.)
+    render = commands.add_parser('render')
+    render.add_argument('--checkpoint', type=Path, required=True)
+    render.add_argument('--output', type=Path, required=True)
+    render.add_argument('--width', type=int, default=4096)
+    render.add_argument('--boundaries', action='store_true')
     args = parser.parse_args()
+    if args.command == 'render':
+        world, _ = load_checkpoint(args.checkpoint)
+        if args.width < 256:
+            parser.error('Map width must be at least 256.')
+        print(json.dumps(artist.draw(world, args.output, args.width, args.boundaries)), flush=True)
+        return
     if args.command == 'start':
         if args.dt <= 0. or args.snapshot <= 0. or args.width < 256:
             parser.error('Positive dt/snapshot and map width >= 256 are required.')

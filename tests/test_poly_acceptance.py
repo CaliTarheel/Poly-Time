@@ -58,6 +58,18 @@ class CoverageTests(unittest.TestCase):
 
 
 class ConservationTests(unittest.TestCase):
+    def test_only_per_step_area_errors_are_eligible_for_refinement(self):
+        world = continent_world()
+        record = entry(world)
+        record['gained']['ridge'] = 2. * acceptance.GEOMETRY_KM2
+        with self.assertRaises(acceptance.GeometryBudgetError):
+            acceptance.budgets(world, record)
+        world.ledger.append(dict(cumulative_rebuild_drift_km2=acceptance.CUMULATIVE_DRIFT_KM2))
+        with self.assertRaises(ValueError) as caught:
+            acceptance.budgets(world, entry(world, rebuild_drift_km2=1.))
+        self.assertNotIsInstance(caught.exception, acceptance.GeometryBudgetError)
+        self.assertIn('cumulative_rebuild_drift', str(caught.exception))
+
     def test_realized_magma_and_exported_sediment_close_the_volume_budget(self):
         world = continent_world()
         before = world._continent_km3()

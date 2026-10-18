@@ -125,6 +125,7 @@ def make_world(seed=1, plates=10, land_fraction=.55, continent_fraction=.65, spa
         if sphere.area_km2(continent) > 1.:
             world.crust.append(Crust(plate, 'continent', continent))
     geology.activate(world, seed)
+    geology.separate_bodies(world)
     coasts = np.vstack([densify(r, 30., closed=True) for rings in sphere.polygons(land) for r in rings])
     coast_tree = cKDTree(coasts)
     rng = np.random.default_rng(seed + 2749)
@@ -188,14 +189,50 @@ def initialize_water(world, land_fraction, count=32768):
     return level
 
 
-def update_water(world, count=32768):
+def _water_bed(world, points, bed, diagnostics=None):
+    """Move quadrature points off tolerated numerical slits; never alter crust geometry.
+
+    A single quadrature point represents ~15,500 km2, far more than the full accepted
+    geometry-defect budget. Treating a point on a metre-scale slit as an empty entire
+    quadrature cell is inappropriate. Audit the actual geometry first, then sample a
+    nearby valid surface, recording the displacement. Surface masks retain their gaps.
+    """
+    bed = np.asarray(bed).copy()
+    missing = np.flatnonzero(~np.isfinite(bed))
+    if not len(missing):
+        return bed
+    from poly import acceptance
+    from poly.regions import FULL
+    acceptance.geometry(world, FULL, {})  # raises on invalid coverage; no budget is changed
+    original_count, maximum_shift = len(missing), 0.
+    for distance in (.001, .01, .1, 1., 10., 50.):
+        if not len(missing):
+            break
+        probes = np.array([sphere.disc(points[i], distance, count=8) for i in missing])
+        heights = sample(world, probes.reshape(-1, 3), sea_level_km=0.).elevation_km.reshape(-1, 8)
+        valid = np.isfinite(heights)
+        hit = valid.any(axis=1)
+        if hit.any():
+            rows = np.flatnonzero(hit)
+            bed[missing[hit]] = heights[rows, np.argmax(valid[hit], axis=1)]
+            maximum_shift = distance
+        missing = missing[~hit]
+    if len(missing):
+        raise ValueError('Surface gaps prevent a resolved water quadrature.')
+    if diagnostics is not None:
+        diagnostics['water_quadrature_shifted_points'] = original_count
+        diagnostics['water_quadrature_max_shift_km'] = maximum_shift
+    return bed
+
+
+def update_water(world, count=32768, diagnostics=None):
     """Solve sea level from the saved water volume as topography and basins change."""
     water = world.geology['water_depth_km']
     if water is None:
         raise ValueError('Water inventory has not been initialized.')
-    bed = sample(world, equal_area_points(count), sea_level_km=0.).elevation_km
-    if not np.isfinite(bed).all():
-        raise ValueError('Surface gaps prevent a water balance.')
+    points = equal_area_points(count)
+    bed = sample(world, points, sea_level_km=0.).elevation_km
+    bed = _water_bed(world, points, bed, diagnostics)
     lower, upper = float(bed.min()), float(bed.max() + water + 1.)
     for _ in range(60):
         level = .5 * (lower + upper)
@@ -208,18 +245,21 @@ def update_water(world, count=32768):
 
 
 def metrics(world, count=32768):
-    sampled = sample(world, equal_area_points(count))
+    points = equal_area_points(count)
+    sampled = sample(world, points)
     valid = np.isfinite(sampled.elevation_km)
     height = sampled.height_above_water_km
-    return dict(time_myr=world.time_myr, land_fraction=float(sampled.land.mean()),
+    measured = dict(time_myr=world.time_myr, land_fraction=float(sampled.land.mean()),
                 continental_fraction=float(sampled.continental_crust.mean()),
                 sea_level_km=sampled.sea_level_km,
-                water_depth_km=float(np.maximum(-height[valid], 0.).mean()),
                 maximum_height_km=float(height[valid].max()),
                 minimum_height_km=float(height[valid].min()),
                 unresolved_fraction=float((~valid).mean()), plate_count=len(world.plates()),
                 collision_belts=sum(f['kind'] == 'collision' for f in world.geology['features']),
                 rift_belts=sum(f['kind'] == 'rift' for f in world.geology['features']))
+    bed = _water_bed(world, points, sampled.elevation_km, measured)
+    measured['water_depth_km'] = float(np.maximum(sampled.sea_level_km - bed, 0.).mean())
+    return measured
 
 
 def draw(world, path, width=1600, boundaries=False):
@@ -232,19 +272,22 @@ def draw(world, path, width=1600, boundaries=False):
     points = sphere.from_lonlat(lon.ravel(), lat.ravel())
     sampled = sample(world, points)
     z = sampled.height_above_water_km.reshape(height, width)
-    land = z >= 0.
-    colours = np.empty((height, width, 3), float)
+    valid = np.isfinite(z)
+    land = (z >= 0.) & valid
+    water = (z < 0.) & valid
+    colours = np.full((height, width, 3), (225., 40., 160.))
     land_palette = [(0., (169, 183, 133)), (.4, (172, 172, 115)), (1.2, (167, 146, 103)),
                     (2.5, (139, 121, 98)), (4., (182, 178, 166)), (6., (240, 240, 233))]
     ocean_palette = [(0., (115, 182, 190)), (.25, (68, 142, 160)), (1., (35, 101, 128)),
                      (3., (20, 65, 94)), (6., (12, 37, 63))]
     colours[land] = _tint(z[land], land_palette)
-    colours[~land] = _tint(-z[~land], ocean_palette)
+    colours[water] = _tint(-z[water], ocean_palette)
     # Physical horizontal distances account for longitude convergence at high latitudes.
     dx = 2. * np.pi * sphere.RADIUS_KM / width * np.maximum(np.cos(np.radians(lat)), .08)
     dy = np.pi * sphere.RADIUS_KM / height
-    east = (np.roll(z, -1, axis=1) - np.roll(z, 1, axis=1)) / (2. * dx)
-    north = -np.gradient(z, axis=0) / dy
+    shading_height = np.where(valid, z, 0.)
+    east = (np.roll(shading_height, -1, axis=1) - np.roll(shading_height, 1, axis=1)) / (2. * dx)
+    north = -np.gradient(shading_height, axis=0) / dy
     shade = np.clip(1. + 8. * (-.65 * east + .65 * north), .55, 1.3)
     colours *= shade[..., None]
     colours[~np.isfinite(z)] = (225, 40, 160)
@@ -258,4 +301,6 @@ def draw(world, path, width=1600, boundaries=False):
                 if abs(x[k + 1] - x[k]) < width / 2:
                     pen.line([(x[k], y[k]), (x[k + 1], y[k + 1])], fill=COLOURS[kind], width=1)
     picture.save(path)
-    return metrics(world)
+    measured = metrics(world)
+    measured['unresolved_map_pixels'] = int((~valid).sum())
+    return measured

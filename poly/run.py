@@ -16,8 +16,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+import shapely
 
 from poly import dynamics, sphere
+from poly.acceptance import GeometryBudgetError
 from poly.build import cap_world, voronoi_world
 from poly.checkpoint import CheckpointError, atomic_json, load_checkpoint, save_checkpoint
 from poly.regions import from_network
@@ -26,7 +28,8 @@ from poly.regions import from_network
 def provenance():
     root = Path(__file__).resolve().parent
     return {"python": platform.python_version(), "platform": platform.platform(),
-            "packages": {name: importlib.metadata.version(name) for name in ("numpy", "scipy", "spherely")},
+            "packages": {name: importlib.metadata.version(name) for name in ("numpy", "scipy", "spherely", "shapely")},
+            "geos": shapely.geos_version_string,
             "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.glob("*.py"))}}
 
 
@@ -106,7 +109,21 @@ resume inside a force-driven interval without repeating its rift decision.
         speeds = {p: float(np.linalg.norm(w)) * sphere.RADIUS_KM for p, w in rotations.items()}
         fastest = max(speeds.values(), default=0.)
         sub = min(remaining, config["parameters"]["step_limit_km"] / max(fastest, 1e-9))
-        entry = world.step(rotations, sub)
+        rejected = []
+        while True:
+            try:
+                entry = world.step(rotations, sub)
+                break
+            except GeometryBudgetError as exc:
+                # RegionWorld.step is atomic. Refine finite spatial defects without changing
+                # any budget, repeating the rift decision, or retrying volume/cumulative errors.
+                if getattr(world, 'geology', None) is None or len(rejected) >= 6:
+                    raise
+                rejected.append(dict(substep_myr=sub, metric=exc.metric,
+                                     defect_km2=exc.value, budget_km2=exc.limit))
+                sub *= .5
+        if rejected:
+            entry['geometry_rejections'] = rejected
         entry["events"] = events + entry["events"]
         entry["speed_km_myr"] = speeds
         entry["substep_myr"] = sub

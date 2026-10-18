@@ -56,6 +56,78 @@ def reference_points(piece, local_points):
     return np.asarray(local_points) @ np.asarray(transform).T
 
 
+def separate_bodies(world, entry=None):
+    """Disconnected continents are separate material bodies, including for terrane rules.
+
+    A plate can own pieces of several continents. Treating their union as one body made
+    the small-terrane test see a continent-sized object and put shortening into tiny remote
+    remnants. Preserve the existing local field and total volume while separating ownership.
+    """
+    import spherely
+    from poly.mesh import ContinentMesh, MINIMUM_KM2
+    from poly.world import Crust
+    if not enabled(world):
+        return
+    result = []
+    for piece in world.crust:
+        rings = sphere.polygons(piece.shape) if piece.kind == 'continent' else []
+        resolved = sum(abs(sphere.loop_area_km2(r[0])) >= sphere.DETAIL_KM2 for r in rings)
+        if resolved <= 1:
+            result.append(piece)
+            continue
+        parts, _ = sphere.parts(piece.shape, minimum_km2=sphere.DETAIL_KM2)
+        if len(parts) <= 1:
+            result.append(piece)
+            continue
+        area, volume = piece.area_km2(), piece.volume_km3()
+        mesh = piece.mesh
+        if mesh is not None:
+            centres = sphere.unit(mesh.nodes[mesh.triangles].sum(axis=1))
+            lon, lat = sphere.to_lonlat(centres)
+            probes = spherely.points(lon, lat)
+            used = np.zeros(len(centres), bool)
+        children = []
+        for shape in parts:
+            child = Crust(piece.plate, 'continent', shape, piece.born_myr, piece.thickness_km,
+                          geology=deepcopy(piece.geology))
+            if mesh is not None:
+                spherely.prepare(shape)
+                hit = np.asarray(spherely.contains(shape, probes)) & ~used
+                used |= hit
+                faces = mesh.triangles[hit]
+                if len(faces):
+                    nodes, remap = np.unique(faces, return_inverse=True)
+                    field = ContinentMesh(mesh.nodes[nodes].copy(), remap.reshape(-1, 3),
+                                          mesh.thickness[nodes].copy())
+                    child.thickness_km = field.volume_km3(child.area_km2()) / child.area_km2()
+                    if (child.area_km2() >= MINIMUM_KM2
+                            and abs(field.area_km2() - child.area_km2()) > max(1e-5, child.area_km2() * 1e-9)):
+                        field = field.recut(shape, child.area_km2(), child.volume_km3())
+                    child.mesh = field if child.area_km2() >= MINIMUM_KM2 else None
+            children.append(child)
+        remapped = sum(c.volume_km3() for c in children)
+        factor = volume / remapped if remapped > 0. else 1.
+        total_area = sum(c.area_km2() for c in children)
+        for child in children:
+            child.thickness_km *= factor
+            if child.mesh is not None:
+                child.mesh.thickness *= factor
+            if getattr(piece, 'escape_km2', 0.):
+                child.escape_km2 = piece.escape_km2 * child.area_km2() / total_area
+        if entry is not None:
+            change = total_area - area
+            if change >= 0.:
+                entry['numerical_area_added_km2'] += change
+                entry['gained']['junction'] += change
+            else:
+                entry['numerical_area_removed_km2'] -= change
+                entry['lost']['sliver'] -= change
+            entry['partitioned_continental_bodies'] = entry.get('partitioned_continental_bodies', 0) + len(children) - 1
+            entry['partition_field_remap_km3'] = entry.get('partition_field_remap_km3', 0.) + remapped - volume
+        result.extend(children)
+    world.crust = result
+
+
 def transfer_features(world, plate, to, domain, source_frame, target_frame, whole=False):
     if enabled(world):
         world.geology['features'] = transfer_sutures(world.geology['features'], plate, to, domain,
@@ -109,7 +181,7 @@ def _record(world, boundary, lo, hi, kind, plate, strain_km, dt):
                               + .3 * feature['cumulative_strain_km'])
 
 
-def advance(world, rotations, dt):
+def advance(world, rotations, dt, entry=None):
     """Keep each side of collision and continental-opening belts in its own moving frame."""
     for boundary in world.boundaries:
         opening, _ = segment_motion(boundary.points, rotations[boundary.left], rotations[boundary.right])
@@ -137,7 +209,7 @@ def advance(world, rotations, dt):
     if world.geology['water_depth_km'] is not None:
         # Water is model state: output cadence must never alter the next erosion step.
         from poly.artist import update_water
-        update_water(world)
+        update_water(world, diagnostics=entry)
 
 
 def validate_piece(properties):

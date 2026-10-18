@@ -37,6 +37,32 @@ class ArtistScenarioTests(unittest.TestCase):
         self.assertAlmostEqual(measured['water_depth_km'], water, places=12)
         self.assertGreater(world.geology['sea_level_km'], old_level)
 
+    def test_water_quadrature_reports_a_tiny_slit_without_hiding_the_surface_gap(self):
+        import copy
+        world = copy.deepcopy(self.world)
+        point = artist.equal_area_points(32768)[0]
+        hole = sphere.polygon(sphere.disc(point, .1))
+        for piece in world.crust:
+            piece.shape = sphere.difference(piece.shape, hole)
+        diagnostics = {}
+        artist.update_water(world, diagnostics=diagnostics)
+        self.assertEqual(diagnostics['water_quadrature_shifted_points'], 1)
+        self.assertLessEqual(diagnostics['water_quadrature_max_shift_km'], 1.)
+        self.assertTrue(np.isnan(artist.sample(world, point[None]).elevation_km[0]))
+        measured = artist.metrics(world)
+        self.assertGreater(measured['unresolved_fraction'], 0.)
+        self.assertAlmostEqual(measured['water_depth_km'], world.geology['water_depth_km'], places=12)
+
+    def test_water_quadrature_cannot_hide_a_large_geometry_defect(self):
+        import copy
+        world = copy.deepcopy(self.world)
+        point = artist.equal_area_points(32768)[0]
+        hole = sphere.polygon(sphere.disc(point, 1000.))
+        for piece in world.crust:
+            piece.shape = sphere.difference(piece.shape, hole)
+        with self.assertRaisesRegex(ValueError, 'crust_gap'):
+            artist.update_water(world)
+
     def test_detail_follows_the_rock_during_an_actual_ownership_transfer(self):
         world = world_with_continent()
         point = sphere.from_lonlat(1., 1.)[None]

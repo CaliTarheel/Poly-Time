@@ -87,6 +87,51 @@ class GeologicalHistoryTests(unittest.TestCase):
             with self.assertRaises(CheckpointError):
                 save_checkpoint(world, Path(folder) / 'bad.json')
 
+    def test_lateral_escape_is_invariant_to_the_absolute_plate_frame(self):
+        from poly.mesh import ContinentMesh
+        world = world_with_continent()
+        piece = next(c for c in world.crust if c.kind == 'continent')
+        piece.mesh = ContinentMesh.build(piece.shape, piece.thickness_km)
+        piece.mesh.lost_nodes = piece.mesh.nodes[:2].copy()
+        piece.escape_km2 = 50000.
+        rotated = copy.deepcopy(world)
+        rotated.frames[1] = sphere.rotation(np.array([0., 0., np.pi / 2.]))
+        initial_volume = piece.volume_km3()
+        results = []
+        for current in (world, rotated):
+            piece = next(c for c in current.crust if c.kind == 'continent')
+            mine = [c for c in current.crust if c.plate == 1]
+            entry = dict(gained=dict(escape=0.), lost=dict(escape=0.))
+            current._escape(piece, 1000., mine, entry)
+            self.assertGreater(entry['gained']['escape'], 0.)
+            self.assertAlmostEqual(piece.volume_km3() / initial_volume, 1., places=12)
+            results.append((piece.shape.__getstate__(), entry))
+        self.assertEqual(results[0], results[1])
+
+    def test_disconnected_continents_become_separate_bodies_with_their_own_fields(self):
+        from poly.mesh import ContinentMesh
+        world = world_with_continent()
+        piece = next(c for c in world.crust if c.kind == 'continent')
+        second = sphere.polygon(sphere.disc(sphere.from_lonlat(15., 0.), 200.))
+        for ocean in world.crust:
+            if ocean.plate == 1 and ocean.kind == 'ocean':
+                ocean.shape = sphere.difference(ocean.shape, second)
+        piece.shape = sphere.union(piece.shape, second)
+        piece.mesh = ContinentMesh.build(piece.shape, 40.)
+        lon, _ = sphere.to_lonlat(piece.mesh.nodes)
+        piece.mesh.thickness = np.where(lon > 10., 60., 40.)
+        piece.thickness_km = piece.mesh.volume_km3(piece.area_km2()) / piece.area_km2()
+        piece.escape_km2 = 1000.
+        volume = piece.volume_km3()
+        province = piece.geology['province_id']
+        geology.separate_bodies(world)
+        bodies = [c for c in world.crust if c.kind == 'continent']
+        self.assertEqual(len(bodies), 2)
+        self.assertAlmostEqual(sum(c.volume_km3() for c in bodies) / volume, 1., places=12)
+        np.testing.assert_allclose(sorted(c.thickness_km for c in bodies), [40., 60.], atol=1e-8)
+        self.assertEqual({c.geology['province_id'] for c in bodies}, {province})
+        self.assertAlmostEqual(sum(c.escape_km2 for c in bodies), 1000., places=8)
+
 
 if __name__ == '__main__':
     unittest.main()

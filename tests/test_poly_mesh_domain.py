@@ -22,7 +22,8 @@ class MeshDomainTests(unittest.TestCase):
     def test_clipped_microscopic_component_keeps_the_resolved_field_and_full_volume(self):
         for name in ['poly_remesh_microscopic.json', 'poly_remesh_duplicate.json',
                      'poly_remesh_collapsed_triangle.json', 'poly_remesh_fallback.json',
-                     'poly_remesh_touching.json', 'poly_remesh_wide.json']:
+                     'poly_remesh_touching.json', 'poly_remesh_wide.json', 'poly_remesh_ear_clip.json',
+                     'poly_remesh_small_hole.json']:
             with self.subTest(fixture=name):
                 fixture = Path(__file__).parent / 'fixtures' / name
                 shape = _unshape(json.loads(fixture.read_text())['geography'])
@@ -159,6 +160,41 @@ class MeshDomainTests(unittest.TestCase):
         before = mesh.thickness.copy()
         self.assertEqual(mesh.erode(10., mesh.area_km2(), sea_level_km=.5), (0., 0., 0.))
         np.testing.assert_array_equal(mesh.thickness, before)
+
+    def test_sediment_cannot_make_a_mountain_in_a_microscopic_lowland_cell(self):
+        nodes = sphere.from_lonlat([0., 1., 0., 0.], [0., 0., 1., -1e-8])
+        mesh = ContinentMesh(nodes, [[0, 1, 2], [1, 0, 3]], [70., 70., 70., 35.])
+        area = mesh.area_km2()
+        before = mesh.volume_km3(area)
+        removed, settled, exported = mesh.erode(1., area, bounded_deposition=True)
+        self.assertGreater(exported, .99 * removed)
+        self.assertLessEqual(mesh.thickness[3], 35. + .2 / .15 + 1e-10)
+        self.assertLess(mesh.thickness.max(), 70.)
+        self.assertAlmostEqual((mesh.volume_km3(area) + exported) / before, 1., places=12)
+        self.assertAlmostEqual((settled + exported) / removed, 1., places=12)
+
+    def test_thicker_crust_spreads_faster_without_a_height_clamp_or_volume_loss(self):
+        import copy
+        nodes = sphere.from_lonlat([0., 4., 4., 0.], [0., 0., 4., 4.])
+        constant = ContinentMesh(nodes, [[0, 1, 2], [0, 2, 3]], [35., 35., 120., 35.])
+        gravity = copy.deepcopy(constant)
+        area = gravity.area_km2()
+        volume = gravity.volume_km3(area)
+        constant.spread(2.)
+        gravity.spread(2., gravity_exponent=3.)
+        self.assertLess(gravity.thickness.max(), constant.thickness.max())
+        self.assertGreaterEqual(gravity.thickness.min(), 35. - 1e-10)
+        self.assertAlmostEqual(gravity.volume_km3(area) / volume, 1., places=12)
+
+    def test_thin_margins_relax_more_slowly_than_a_constant_mobility_crust(self):
+        import copy
+        nodes = sphere.from_lonlat([0., 4., 4., 0.], [0., 0., 4., 4.])
+        constant = ContinentMesh(nodes, [[0, 1, 2], [0, 2, 3]], [28., 28., 38., 38.])
+        margin = copy.deepcopy(constant)
+        constant.spread(10.)
+        margin.spread(10., gravity_exponent=3.)
+        self.assertLess(np.linalg.norm(margin.thickness - [28., 28., 38., 38.]),
+                        np.linalg.norm(constant.thickness - [28., 28., 38., 38.]))
 
     def test_large_diffusion_step_does_not_transfer_volume_between_components(self):
         shape = sphere.union(polygon([0, 5, 5, 0], [0, 0, 5, 5]),

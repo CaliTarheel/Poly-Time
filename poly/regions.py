@@ -330,6 +330,9 @@ class RegionWorld:
                 gained[nearest].append((piece, 'junction'))
         for p in plates:
             self._update_crust(p, lost[p], gained[p], entry, dt)
+        if self.geology is not None:
+            from poly.geology import separate_bodies
+            separate_bodies(self, entry)
         self.crust = _merge_bands(self.crust)
         self._spread(dt)  # thick crust flows outward under its own weight
         self._erode(dt, entry)  # and is worn down where it stands high
@@ -656,7 +659,7 @@ class RegionWorld:
                 continue
             pole = sphere.unit(np.cross(r[within], nxt[within]))  # a zero-length edge has no pole
             outward = sphere.unit(mids[within] * np.cos(probe_angle) - pole * np.sin(probe_angle))  # right of the ring
-            lon, lat = sphere.to_lonlat(sphere.rotate(outward, self.frame(piece.plate).T))
+            lon, lat = sphere.to_lonlat(outward)  # coast and ocean are already in the same local frame
             fronts = np.asarray(spherely.contains(sea, spherely.points(lon, lat)))
             coast += float(lengths[within][fronts].sum())
         if coast <= 0.:
@@ -691,7 +694,7 @@ class RegionWorld:
     def _spread(self, dt):
         for c in self.crust:
             if c.kind == 'continent' and getattr(c, 'mesh', None) is not None:
-                c.mesh.spread(dt)
+                c.mesh.spread(dt, gravity_exponent=3. if self.geology is not None else 0.)
 
     def _erode(self, dt, entry):
         """Wear the highlands down; sediment settles on the piece's lowlands or goes to the sea."""
@@ -700,7 +703,7 @@ class RegionWorld:
                 continue
             area = c.area_km2()
             sea_level = self.geology['sea_level_km'] if self.geology is not None else 0.
-            removed, settled, to_sea = c.mesh.erode(dt, area, sea_level)
+            removed, settled, to_sea = c.mesh.erode(dt, area, sea_level, bounded_deposition=self.geology is not None)
             if removed > 0.:
                 entry['eroded_km3'] += removed
                 entry['sediment_to_sea_km3'] += to_sea
@@ -1152,7 +1155,7 @@ class RegionWorld:
             events += self._sutures(rotations_per_myr)
         else:
             from poly import geology
-            geology.advance(self, rotations_per_myr, dt)
+            geology.advance(self, rotations_per_myr, dt, entry)
             geology.validate(self)
         return events
 

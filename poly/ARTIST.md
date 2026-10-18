@@ -8,7 +8,9 @@ has been achieved. It depends on the reviewed stack through PR #16.
 
 Use the repository's numerical dependencies, including the native geometry codec's
 recorded spherely version. The implementation was exercised with Python 3.12.14,
-NumPy 2.3.5, SciPy 1.17.0 and spherely 0.1.1.
+NumPy 2.3.5, SciPy 1.17.0, spherely 0.1.1 and Shapely 2.2.0. Install the standalone
+dependencies with `python -m pip install -r poly/requirements.txt`. Shapely 2.1 or later
+supplies the constrained triangulation; its version and GEOS version enter the run receipt.
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m poly.artist_run start \
@@ -17,6 +19,9 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m poly.artist_run start \
   --dt .5 --snapshot 5 --width 1600 --spacing 150 --samples 20000
 
 python -m poly.artist_run resume --output runs/artist-01 --duration 100
+
+python -m poly.artist_run render --checkpoint runs/artist-01/states/state-000050.000.json \
+  --output map-50Myr.png --width 8192
 ```
 
 Open `runs/artist-01/replay.html` locally. It embeds the actual saved maps, with a draggable
@@ -24,6 +29,9 @@ globe, flat projection, time slider, playback, boundary overlay and inherited be
 The maps and timeline do not require a server or external JavaScript libraries. A target of
 1,000 Myr is an instruction to the runner; inspect `manifest.json` for the duration actually
 accepted. A failed integration preserves its checkpoint and records the error.
+Every displayed epoch also keeps a native checkpoint under `states/`, so its mechanical
+fields can be inspected or rendered again at a higher resolution. Rendering does not advance
+the simulation or increase its physical resolution.
 
 `checkpoint.json` contains the accepted native spherical geometries, moving frames,
 continental fields, boundary state, material ledger and artist history. `history.json` records
@@ -35,6 +43,11 @@ The duration argument counts complete outer integration intervals. On resuming a
 inside an interval, its unfinished part counts as the first interval. The manifest records the
 resulting exact target time. Force and rift decisions retain the original timestep cadence;
 changing the snapshot interval does not change integration decisions.
+The artist integrator can halve a rejected timestep up to six times when finite spatial
+coverage or per-step area closure exceeds its existing acceptance budget. Rejections are
+recorded on the accepted ledger entry. Budgets stay unchanged; volume errors, cumulative
+budget exhaustion and other failures stop the run. This is numerical refinement, not
+evidence of timestep convergence.
 
 ## What the implementation does
 
@@ -44,12 +57,20 @@ are initial conditions, not fabricated simulated prehistory. The default contine
 65% of the sphere. An equal-area quadrature calibrates water to 55% emerged land, and the
 equivalent global water depth is then fixed. Sea level is solved after each accepted mechanical
 step; erosion uses the previous accepted water level. Output does not update the model.
+If an equal-area water quadrature point falls on a tiny numerical slit, the actual native
+geometry is audited against the existing coverage budget before seeking nearby valid
+surface samples. The displaced point count and maximum offset are recorded. The underlying
+crust and rendered gap mask are not filled or hidden. Large coverage defects still fail.
 
 Each continental province has an identity, formation time and a rotation into its material
 reference frame. Ownership transfers reframe those coordinates, so fine relief moves with
 the same rock rather than swimming over it in world coordinates. Reference rotations and
 contact belts survive checkpoints. Collision belts remain as inherited weaknesses after
 activity ceases. In this profile, closing 100 km does not automatically fuse two entire plates.
+Disconnected continental masses are separate material bodies even when a plate owns several
+of them. Their local fields and total volume are retained, so a small terrane is not tested
+against the area of every continent on its plate. Partition remapping and any geometry cleanup
+are recorded in the ledger.
 
 Resolved relief comes from the continental thickness mesh and oceanic age-depth relation.
 Domain-warped procedural detail amplifies that relief in material coordinates. It is an output
@@ -59,11 +80,23 @@ The continental field's ordinary interior spacing is approximately 200 km. Bound
 and force quadrature are separate settings.
 
 Remeshing preserves native polygon coverage, including holes and disconnected components.
+Boundary fragments use constrained triangulation in a gnomonic plane, where great-circle
+edges are straight. This avoids fragile hand-written ear clipping. Native spherical polygons
+remain authoritative, and the final coverage check still compares the mesh with their area.
 Eight spherical charts cover continents that exceed one tangent plane, with shared seam
 nodes stitched back into one field. Degenerate roundoff fragments cannot destroy the main
 field or acquire invented area. Backward Euler transport conserves true node-area volume
 within each disconnected continent, and erosion uses that same area measure. Captured
 failed-run geometries exercise these cases.
+The artist profile uses a yielding approximation for spreading: conductance is proportional
+to `0.001 + (max(mean_edge_thickness - 35 km, 0) / 10 km)^3`. Thick belts relax quickly, while
+ordinary cratons and thin margins move slowly. Volume is retained and relief is not clamped
+to a chosen maximum. These effective mobility parameters require calibration. The lateral-escape coast probe uses the same local frame as the ocean it tests.
+Artist sediment deposition fills available lowland accommodation up to 200 m above the
+current water level, within 500 km of an erosion source. Surplus goes to the existing explicit
+sea-export ledger. This prevents a tiny surviving receiver from becoming an arbitrarily high
+sediment spike. Offshore export is accounted material, but an evolving offshore sediment
+surface is still absent.
 
 ## What remains before accepting a billion-year world
 
