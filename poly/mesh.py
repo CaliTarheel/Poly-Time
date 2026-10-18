@@ -257,6 +257,38 @@ class ContinentMesh:
             if weight.sum() < 1e-12:
                 weight = np.ones(len(self.nodes))
         total = float((weight * areas).sum())
+        if volume_km3 < 0.:
+            candidate = self.thickness + volume_km3 * weight / total
+            if np.all(candidate >= 0.):
+                self.thickness = candidate
+                return
+            # A remap may interpolate more rock than its target inventory. Withdraw
+            # that excess from the preferred region only while it has real rock;
+            # a thin coastal cell must never fund a negative crust column.
+            capacity = areas * self.thickness
+            requested = -volume_km3
+            if requested > float(capacity.sum()):
+                raise ValueError('Continental withdrawal exceeds the available rock volume.')
+            if requested == float(capacity.sum()):
+                self.thickness = np.zeros_like(self.thickness)
+                return
+            left = capacity.copy()
+            remaining = requested
+            while remaining > max(1e-10, requested * 1e-12):
+                preference = areas * weight * (left > 0.)
+                if preference.sum() == 0.:
+                    # Gaussian underflow can leave only distant material. This is
+                    # an inventory correction, so broaden its support explicitly.
+                    preference = areas * (left > 0.)
+                take = np.minimum(remaining * preference / preference.sum(), left)
+                amount = float(take.sum())
+                if amount <= 0.:
+                    raise ValueError('Continental withdrawal could not resolve its remaining volume.')
+                left -= take
+                remaining -= amount
+            fraction = np.divide(left, capacity, out=np.zeros_like(left), where=capacity > 0.)
+            self.thickness = self.thickness * fraction
+            return
         if total > 0.:
             self.thickness = self.thickness + volume_km3 * weight / total
 

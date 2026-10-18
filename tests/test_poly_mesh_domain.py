@@ -273,6 +273,30 @@ class MeshDomainTests(unittest.TestCase):
         self.assert_domain(cut, recut)
         self.assertAlmostEqual(recut.volume_km3(sphere.area_km2(cut)) / target, 1., places=12)
 
+    def test_captured_thin_margin_withdrawal_preserves_volume_and_nonnegative_columns(self):
+        payload = json.loads((Path(__file__).parent / 'fixtures/poly_remap_withdrawal.json').read_text())
+        mesh = ContinentMesh(payload['nodes'], payload['triangles'], payload['thickness'])
+        before = mesh.volume_km3(payload['polygon_km2'])
+        mesh.add_volume(payload['volume_km3'], payload['polygon_km2'],
+                        near=payload['near'], reach_km=payload['reach_km'])
+        self.assertTrue(np.isfinite(mesh.thickness).all())
+        self.assertGreaterEqual(float(mesh.thickness.min()), 0.)
+        self.assertTrue(np.all(mesh.thickness <= payload['thickness']))
+        target = before + payload['volume_km3']
+        self.assertAlmostEqual(mesh.volume_km3(payload['polygon_km2']) / target, 1., places=12)
+
+    def test_withdrawal_cannot_remove_more_than_the_real_inventory(self):
+        nodes = sphere.from_lonlat([0., 4., 0.], [0., 0., 4.])
+        mesh = ContinentMesh(nodes, [[0, 1, 2]], [1., 2., 3.])
+        area = mesh.area_km2()
+        inventory = mesh.volume_km3(area)
+        original = mesh.thickness.copy()
+        with self.assertRaisesRegex(ValueError, 'exceeds the available'):
+            mesh.add_volume(-2. * inventory, area)
+        np.testing.assert_array_equal(mesh.thickness, original)
+        mesh.add_volume(-inventory, area)
+        np.testing.assert_array_equal(mesh.thickness, 0.)
+
 
 if __name__ == '__main__':
     unittest.main()

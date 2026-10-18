@@ -131,6 +131,11 @@ nodes stitched back into one field. Degenerate roundoff fragments cannot destroy
 field or acquire invented area. Backward Euler transport conserves true node-area volume
 within each disconnected continent, and erosion uses that same area measure. Captured
 failed-run geometries exercise these cases.
+When remapping interpolates more rock than the target inventory, its volume correction
+withdraws from the preferred coastal region only while those cells contain material.
+Depleted cells stop contributing, and the remaining correction draws on the other
+available rock. This retains the target volume without negative crust columns. Safe
+corrections keep the prior arithmetic, so this safeguard changes only overshooting cases.
 Chart selection uses the same stable duplicate-cleaned rings as triangulation. Using a raw
 ring's point-weighted centre before removing duplicates could select a chart that its cleaned
 ring could not use, dropping the main component. A captured 27.8 million km2 continent tests
@@ -229,3 +234,6 @@ calibrations, separate from a force-driven planetary qualification.
 A captured coastal field tests regional support, volume conservation and repeated projection.
 Separate component volumes stay separate, and a uniform 250 km thickness remains 250 km,
 demonstrating that the projection is a resolution choice rather than a hidden relief ceiling.
+A captured 1.251 Myr CI remap tests a 65,107 km3 withdrawal from a thin margin that formerly
+produced a -6.13 km crust column. The corrected withdrawal remains nonnegative and closes
+the requested inventory; a separate check rejects withdrawal beyond the available rock.
