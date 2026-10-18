@@ -1,4 +1,5 @@
 """The polygon core: sphere geometry, the boundary network and the closed crust ledger."""
+import json
 import math
 import tempfile
 import unittest
@@ -31,6 +32,16 @@ class SphereTests(unittest.TestCase):
             self.assertAlmostEqual(sphere.area_km2(rebuilt) / sphere.area_km2(shape), 1., places=10)
         matrix = sphere.rotation(sphere.unit([1., 2., 3.]) * .7)
         self.assertAlmostEqual(sphere.area_km2(sphere.rotate_geography(holed, matrix)) / sphere.area_km2(holed), 1., places=10)
+
+    def test_captured_long_run_rotation_does_not_remove_the_wrong_side_of_a_fold(self):
+        from poly.checkpoint import _unshape
+        data = json.loads((Path(__file__).parent / 'fixtures/poly_rotation_fold.json').read_text())
+        original = _unshape(data['shape'])
+        moved = sphere.rotate_geography(original, np.asarray(data['matrix']), tolerance=data['tolerance'])
+        # The former relative repair check admitted a 149 km2 shell change and
+        # stopped this run with 176 km2 of total area drift. Native slit cleanup
+        # remains visible, below the unchanged 100 km2 rotation floor.
+        self.assertLess(abs(sphere.area_km2(moved) - sphere.area_km2(original)), 30.)
 
     def test_clipping_conserves_area_even_for_a_thin_strip(self):
         lon = np.degrees(np.linspace(0., 3000. / sphere.RADIUS_KM, 50))

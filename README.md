@@ -15,6 +15,21 @@ and interpretation of the diagnostics. The root `server.py`, `run_simulation.py`
 and production guards below belong to the inherited Super-Light-Time engine;
 they do not launch the `poly/` engine.
 
+## Artist history prototype
+
+An opt-in profile adds independent continental masses, measured 55% starting land,
+a fixed water inventory, persistent material coordinates and contact belts, and a
+portable globe/map replay. Native states are retained for each displayed epoch.
+
+```sh
+python -m pip install -r poly/requirements.txt
+python -m poly.artist_run start --output runs/artist-01 --duration 1000
+```
+
+The duration is a requested target; read the run's manifest for the accepted result.
+This profile is undergoing long-run qualification. See [artist evolution](poly/ARTIST.md)
+for restart, high-resolution rendering, numerical checks and unfinished processes.
+
 ## Inherited Super-Light-Time source
 
 The guarded production source of an exploratory tectonic and terrain evolution simulator, derived from Asein Lite. Its model covers plate motion, ocean and continental material, collision stacks, subduction, arcs, and relief, with a local browser interface for inspecting history.

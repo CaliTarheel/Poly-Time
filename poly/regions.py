@@ -140,6 +140,7 @@ class RegionWorld:
     # or emplaced by an invented geological rule; this is a cumulative inventory, in km3.
     retired_arc_km3: object = field(default_factory=lambda: np.zeros(2))
     plate_policy: PlatePolicy = field(default_factory=PlatePolicy)
+    geology: object = None  # optional artist evolution state; absent in historical worlds
 
     # ------------------------------------------------------------------ views
     def plates(self) -> list:
@@ -216,6 +217,9 @@ class RegionWorld:
         for s in getattr(self, 'sutures', []):
             if s['plate'] in self.regions:
                 yield sphere.rotate(s['points'], self.frame(s['plate'])), s['time_myr']
+        if self.geology is not None:
+            from poly.geology import weak_lines
+            yield from weak_lines(self)
 
     def areas(self) -> dict:
         result = {}
@@ -324,8 +328,22 @@ class RegionWorld:
             for piece in pieces:
                 nearest = min(plates, key=lambda p: spherely.distance(piece, moved[p]))
                 gained[nearest].append((piece, 'junction'))
+        docks = [] if self.geology is not None else None
         for p in plates:
-            self._update_crust(p, lost[p], gained[p], entry, dt)
+            self._update_crust(p, lost[p], gained[p], entry, dt, docks=docks)
+        if docks is not None:
+            # A terrane can touch a third plate as well as its receiving trench.
+            # Resolve every original owner's loss mask before changing ownership;
+            # otherwise whole-body docking carries its unresolved third overlap
+            # into the receiver, or a later receiver cuts it with an obsolete mask.
+            for piece, owner, to in docks:
+                if (piece.plate == owner and piece.area_km2() >= DETAIL_KM2
+                        and any(c is piece for c in self.crust)):
+                    self._dock(piece, owner, to, [c for c in self.crust if c.plate != owner], entry)
+            self.crust = [c for c in self.crust if c.area_km2() >= TINY_KM2]
+        if self.geology is not None:
+            from poly.coarsen import consolidate
+            consolidate(self, entry)
         self.crust = _merge_bands(self.crust)
         self._spread(dt)  # thick crust flows outward under its own weight
         self._erode(dt, entry)  # and is worn down where it stands high
@@ -456,7 +474,7 @@ class RegionWorld:
             rotations_per_myr.setdefault(plate, rotations_per_myr.get(ancestor, np.zeros(3)))
         return rotations_per_myr
 
-    def _update_crust(self, plate, losses, gains, entry, dt):
+    def _update_crust(self, plate, losses, gains, entry, dt, docks=None):
         back = self.frame(plate).T
         mine = [c for c in self.crust if c.plate == plate]
         others = [c for c in self.crust if c.plate != plate]
@@ -470,6 +488,7 @@ class RegionWorld:
         if local_by_kind:
             all_local = sphere.union(*local_by_kind.values())
             for piece in mine:
+                docking_to = None
                 whole = sphere.intersection(piece.shape, all_local)
                 if sphere.area_km2(whole) < TINY_KM2:
                     continue
@@ -478,8 +497,13 @@ class RegionWorld:
                     to = next((over for (kind, over), local in local_by_kind.items()
                                if kind == 'trench' and over in self.regions
                                and sphere.area_km2(sphere.intersection(whole, local)) >= DETAIL_KM2), None)
-                    if to is not None and self._dock(piece, plate, to, others, entry):
-                        continue
+                    if to is not None:
+                        if docks is None:
+                            if self._dock(piece, plate, to, others, entry):
+                                continue
+                        else:
+                            docking_to = to
+                            docks.append((piece, plate, to))
                 continental = 0.
                 before_km2 = piece.area_km2()
                 before_km3 = piece.volume_km3() if piece.kind == 'continent' else 0.
@@ -492,7 +516,7 @@ class RegionWorld:
                     entry['lost'][category] += area
                     if piece.kind == 'continent':
                         continental += area
-                    if category == 'continent_at_trench':
+                    if category == 'continent_at_trench' and docking_to is None:
                         # Where the continent went down, arrival by arrival, not the middle of them all.
                         for shape in by_kind[(kind, over)]:
                             part = sphere.intersection(whole, sphere.rotate_geography(shape, back))
@@ -506,20 +530,33 @@ class RegionWorld:
                     left = piece.area_km2()
                     if left >= TINY_KM2:
                         if piece.mesh is not None:
-                            recut = piece.mesh.recut(piece.shape, left, before_km3)
-                            if recut is not None:
-                                piece.mesh = recut
+                            piece.mesh = piece.mesh.recut(piece.shape, left, before_km3)
                         piece.thickness_km = before_km3 / left
                     else:
                         self._bequeath(piece, before_km3, mine)
                     entry['thickened_km3'] += continental * before_km3 / max(before_km2, TINY_KM2)
-                    self._escape(piece, continental, mine, entry)
+                    small_lost = None
+                    if self.geology is not None and piece.mesh is None:
+                        small_lost = np.vstack([r for poly in sphere.polygons(whole) for r in poly])
+                    self._escape(piece, continental, mine, entry, lost_points=small_lost)
         for shape, category in gains:
             area = sphere.area_km2(shape)
             if area < TINY_KM2:
                 continue
             entry['gained'][category] += area
-            mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back), self.time_myr + .5 * dt))
+            local = sphere.rotate_geography(shape, back)
+            if self.geology is not None and category in ('ridge', 'sliver', 'junction', 'trench_opening'):
+                # The first opening of a new rift still inherits a provisional
+                # transform label. Material must stretch in that real gap too;
+                # otherwise one deep-ocean slit is born before it is retyped.
+                from poly.geology import extend_rift
+                local = extend_rift(self, mine, local, entry)
+            remaining_area = sphere.area_km2(local)
+            if remaining_area >= TINY_KM2:
+                mine.append(Crust(plate, 'ocean', local, self.time_myr + .5 * dt))
+            elif self.geology is not None:
+                entry['lost']['sliver'] += remaining_area
+                entry['numerical_area_removed_km2'] += remaining_area
         self.crust = others + [c for c in mine if sphere.area_km2(c.shape) >= TINY_KM2]
 
     def _bequeath(self, piece, volume, mine):
@@ -547,13 +584,19 @@ class RegionWorld:
         if area < DETAIL_KM2:
             return False
         carry = self.frame(to).T @ self.frame(plate)
+        from poly.geology import transfer_features
+        transfer_features(self, plate, to, sphere.rotate_geography(piece.shape, self.frame(plate)),
+                          self.frame(plate), self.frame(to))
         shape = sphere.rotate_geography(piece.shape, carry)
         theirs = [c for c in others if c.plate == to]
+        receiver = None
         for c in [c for c in theirs if c.kind == 'continent']:
             part = sphere.intersection(shape, c.shape)
             a = sphere.area_km2(part)
             if a < TINY_KM2:
                 continue
+            if receiver is None or a > receiver[2]:
+                receiver = (c, part, a)
             share = volume * a / area
             if getattr(c, 'mesh', None) is not None:
                 near = np.vstack([r for poly in sphere.polygons(part) for r in poly])
@@ -564,6 +607,16 @@ class RegionWorld:
             shape = sphere.difference(shape, part)
         left = sphere.area_km2(shape)
         if left < DETAIL_KM2:
+            if self.geology is not None and receiver is not None and left > 0.:
+                # The unresolved footprint goes, but its remaining rock joins
+                # the same collision receiver rather than disappearing.
+                heir, contact, _ = receiver
+                remainder = volume * left / area
+                if heir.mesh is not None:
+                    near = np.vstack([r for poly in sphere.polygons(contact) for r in poly])
+                    heir.mesh.add_volume(remainder, heir.area_km2(), near=near)
+                heir.thickness_km += remainder / heir.area_km2()
+                entry['thickened_km3'] += remainder
             entry['lost']['continent_at_trench'] += left  # a crumb: gone
             piece.shape = sphere.EMPTY  # all of it stacked: the caller drops the empty piece
             return True
@@ -575,12 +628,13 @@ class RegionWorld:
             if a >= TINY_KM2:
                 c.shape = sphere.difference(c.shape, part)
                 overridden += a
+        from poly.geology import carry as carry_geology
+        piece.geology = carry_geology(piece.geology, carry)
         piece.plate, piece.shape = to, shape
         piece.thickness_km = docked_km3 / left
         if getattr(piece, 'mesh', None) is not None:
             rotated = piece.mesh.rotated(carry)
-            recut = rotated.recut(shape, left, docked_km3) if left < .999 * area else None
-            piece.mesh = recut if recut is not None else rotated
+            piece.mesh = rotated.recut(shape, left, docked_km3) if left < .999 * area else rotated
         # Books: the terrane leaves one plate and joins the other (a loss and a gain of the same
         # continent), and the ocean it covers on the plate it joins is gone.
         entry['gained']['accreted'] += left
@@ -612,7 +666,7 @@ class RegionWorld:
             heir.thickness_km += volume / heir.area_km2()
         return volume
 
-    def _escape(self, piece, shortened_km2, mine, entry):
+    def _escape(self, piece, shortened_km2, mine, entry, lost_points=None):
         """Push the piece's coast out over its plate's ocean within reach of the collision, by
         ESCAPE_FRACTION of the area shortened; the crust there spreads out (same volume).
 
@@ -623,8 +677,8 @@ class RegionWorld:
             return
         piece.escape_km2 = getattr(piece, 'escape_km2', 0.) + ESCAPE_FRACTION * shortened_km2
         mesh = getattr(piece, 'mesh', None)
-        lost = getattr(mesh, 'lost_nodes', None)
-        if mesh is None or lost is None or not len(lost):
+        lost = getattr(mesh, 'lost_nodes', None) if lost_points is None else lost_points
+        if lost is None or not len(lost) or (mesh is None and self.geology is None):
             return
         ocean = [c for c in mine if c.kind == 'ocean' and c is not piece]
         if not ocean:
@@ -650,7 +704,7 @@ class RegionWorld:
                 continue
             pole = sphere.unit(np.cross(r[within], nxt[within]))  # a zero-length edge has no pole
             outward = sphere.unit(mids[within] * np.cos(probe_angle) - pole * np.sin(probe_angle))  # right of the ring
-            lon, lat = sphere.to_lonlat(sphere.rotate(outward, self.frame(piece.plate).T))
+            lon, lat = sphere.to_lonlat(outward)  # coast and ocean are already in the same local frame
             fronts = np.asarray(spherely.contains(sea, spherely.points(lon, lat)))
             coast += float(lengths[within][fronts].sum())
         if coast <= 0.:
@@ -676,9 +730,8 @@ class RegionWorld:
                 c.shape = sphere.difference(c.shape, band)
         piece.shape = sphere.union(piece.shape, band)
         grown = piece.area_km2()
-        recut = mesh.recut(piece.shape, grown, volume)
-        if recut is not None:
-            piece.mesh = recut
+        piece.mesh = (mesh.recut(piece.shape, grown, volume) if mesh is not None
+                      else ContinentMesh.build(piece.shape, volume / grown))
         piece.thickness_km = volume / grown
         piece.escape_km2 = max(piece.escape_km2 - area, 0.)
         entry['gained']['escape'] += area
@@ -687,19 +740,32 @@ class RegionWorld:
     def _spread(self, dt):
         for c in self.crust:
             if c.kind == 'continent' and getattr(c, 'mesh', None) is not None:
-                c.mesh.spread(dt)
+                c.mesh.spread(dt, gravity_exponent=3. if self.geology is not None else 0.)
 
     def _erode(self, dt, entry):
         """Wear the highlands down; sediment settles on the piece's lowlands or goes to the sea."""
         for c in self.crust:
-            if c.kind != 'continent' or getattr(c, 'mesh', None) is None:
+            if c.kind != 'continent':
                 continue
             area = c.area_km2()
-            removed, settled, to_sea = c.mesh.erode(dt, area)
+            sea_level = self.geology['sea_level_km'] if self.geology is not None else 0.
+            if c.mesh is None:
+                if self.geology is None:
+                    continue
+                # A uniform small island has no internal lowland receiver. Its
+                # eroded rock enters the explicit sea-export ledger, just as a
+                # resolved body whose entire surface stands above the lowlands.
+                from poly.mesh import erosion_cut_km
+                cut = float(erosion_cut_km(c.thickness_km, dt, sea_level))
+                removed = to_sea = cut * area
+                c.thickness_km -= cut
+            else:
+                removed, settled, to_sea = c.mesh.erode(dt, area, sea_level, bounded_deposition=self.geology is not None)
             if removed > 0.:
                 entry['eroded_km3'] += removed
                 entry['sediment_to_sea_km3'] += to_sea
-                c.thickness_km = c.mesh.volume_km3(area) / area
+                if c.mesh is not None:
+                    c.thickness_km = c.mesh.volume_km3(area) / area
 
     def _mesh_continents(self):
         """Give every continental piece without a mesh one (a world built or loaded without them)."""
@@ -708,7 +774,8 @@ class RegionWorld:
                 c.mesh = ContinentMesh.build(c.shape, c.thickness_km)
 
     def _continent_km3(self) -> float:
-        return sum(c.volume_km3() for c in self.crust if c.kind == 'continent')
+        from poly.coarsen import volume_km3
+        return sum(c.volume_km3() for c in self.crust if c.kind == 'continent') + volume_km3(self)
 
     def _regroup(self, entry=None, boundary_index=None) -> list:
         """Plates that came apart become separate plates; slivers and vanished plates go to neighbours."""
@@ -772,6 +839,9 @@ class RegionWorld:
         self.sutures = transfer_sutures(getattr(self, 'sutures', []), plate, to, piece,
                                         self.frame(plate), self.frame(to),
                                         whole=sphere.area_km2(remaining) < TINY_KM2)
+        from poly.geology import transfer_features, carry as carry_geology
+        transfer_features(self, plate, to, piece, self.frame(plate), self.frame(to),
+                          whole=sphere.area_km2(remaining) < TINY_KM2)
         if boundary_index is not None:
             self._transfer_index(boundary_index, plate, to, piece, remaining)
         doubled = sphere.intersection(piece, self.regions.get(to, sphere.EMPTY))
@@ -798,6 +868,7 @@ class RegionWorld:
             c.shape = sphere.difference(c.shape, local)
             shape = part if np.allclose(carry, np.eye(3)) else sphere.rotate_geography(part, carry)
             given = Crust(to, c.kind, shape, c.born_myr, c.thickness_km)
+            given.geology = carry_geology(c.geology, carry)
             owed = getattr(c, 'escape_km2', 0.)
             if owed and whole_km3 > 0.:
                 share = owed * part_km2 / (part_km2 + max(c.area_km2(), 0.))
@@ -1118,6 +1189,9 @@ class RegionWorld:
             opening, sliding = segment_motion(b.points, rotations_per_myr[b.left], rotations_per_myr[b.right])
             ratio = np.abs(opening) / np.maximum(sliding, 1e-12)
             for k, kind in enumerate(b.kinds):
+                if kind == 'collision' and self.geology is not None and opening[k] > 0.:
+                    b.kinds[k], b.overriding[k], b.closed_km[k] = 'ridge', None, 0.
+                    continue
                 if kind in ('trench', 'collision'):
                     continue
                 threshold = TRANSFORM_RATIO * (1. + MARGIN if kind == 'transform' else 1. - MARGIN)
@@ -1136,7 +1210,12 @@ class RegionWorld:
             events += self._arcs(b, opening, dt, entry)
         for point, area, plate in entry['continent_arrived']:
             events += self._collide(point, area, plate)
-        events += self._sutures(rotations_per_myr)
+        if self.geology is None:
+            events += self._sutures(rotations_per_myr)
+        else:
+            from poly import geology
+            geology.advance(self, rotations_per_myr, dt, entry)
+            geology.validate(self)
         return events
 
     def _arcs(self, b, opening, dt, entry) -> list:
@@ -1341,6 +1420,8 @@ class RegionWorld:
             self.crust = [c for c in self.crust if c is arc or c not in arcs]
         else:
             arc = Crust(plate, 'continent', shape, self.time_myr, thickness)
+            from poly.geology import initialize_piece
+            initialize_piece(self, arc)
             self.crust.append(arc)
         entry['gained']['arc'] += built
         entry['lost']['arc'] += built
@@ -1356,7 +1437,7 @@ class RegionWorld:
         return None
 
     def rift(self, cut) -> dict:
-        """Split `cut.plate` along the great circle normal to `cut.pole`; the + side becomes a new plate.
+        """Split along the selected shared fracture; its left side becomes a new plate.
 
         The new plate starts in its parent's frame (so it moves with it until told otherwise) and takes
         the crust on its side; boundaries keep their state, renamed by side. The cut itself is a new
@@ -1366,7 +1447,9 @@ class RegionWorld:
         centre, pole = sphere.unit(cut.centre), sphere.unit(cut.pole)
         u = np.cross(pole, centre)
         t = np.linspace(0., 2. * np.pi, 72, endpoint=False)
-        half = sphere.polygon(np.outer(np.cos(t), centre) + np.outer(np.sin(t), u))  # the + side
+        path = getattr(cut, 'path', None)
+        half = sphere.polygon(path if path is not None else
+                              np.outer(np.cos(t), centre) + np.outer(np.sin(t), u))
         piece = sphere.intersection(self.regions[plate], half)
         new = max(list(self.regions) + list(self.frames) + list(self.parents)) + 1
         self.frames[new] = self.frame(plate).copy()
@@ -1374,10 +1457,14 @@ class RegionWorld:
         self.names[new] = '%s (rift)' % self.names.get(plate, 'Plate %d' % plate)
         area = sphere.area_km2(piece)
         self._give(plate, piece, new)
-        self.boundaries = self._derive(self._index(_split_by_side(self.boundaries, plate, new, pole)), {})
+        self.boundaries = self._derive(self._index(_split_by_side(
+            self.boundaries, plate, new, pole, half=half if path is not None else None)), {})
         return dict(kind='rift', plate=plate, new=new, area_km2=area, length_km=cut.length_km,
                     tension_n_per_m=cut.tension_n_per_m, strength_n_per_m=cut.strength_n_per_m,
-                    continent_fraction=cut.continent_fraction)
+                    continent_fraction=cut.continent_fraction,
+                    path_type='great_circle' if path is None else 'strength_routed',
+                    maximum_path_offset_km=0. if path is None else float(
+                        np.abs(np.arcsin(np.clip(path @ pole, -1., 1.))).max() * sphere.RADIUS_KM))
 
     def _sutures(self, rotations_per_myr) -> list:
         """Weld the plates on either side of every collision that has closed SUTURE_KM.
@@ -1564,14 +1651,18 @@ def _relabel(boundaries, into):
     return result
 
 
-def _split_by_side(boundaries, plate, new, pole):
+def _split_by_side(boundaries, plate, new, pole, half=None):
     """The boundaries with `plate`'s segments on the + side of `pole` given to `new`."""
     result = []
     for b in boundaries:
         if plate not in (b.left, b.right):
             result.append(b)
             continue
-        side = b.mids() @ pole > 0.
+        if half is None:
+            side = b.mids() @ pole > 0.
+        else:
+            lon, lat = sphere.to_lonlat(b.mids())
+            side = np.asarray(spherely.contains(half, spherely.points(lon, lat)))
         start = 0
         for k in range(1, len(side) + 1):
             if k < len(side) and side[k] == side[start]:

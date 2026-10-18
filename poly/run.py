@@ -16,8 +16,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+import shapely
 
-from poly import dynamics, sphere
+from poly import dynamics, geology, sphere
+from poly.acceptance import GeometryBudgetError
 from poly.build import cap_world, voronoi_world
 from poly.checkpoint import CheckpointError, atomic_json, load_checkpoint, save_checkpoint
 from poly.regions import from_network
@@ -26,7 +28,8 @@ from poly.regions import from_network
 def provenance():
     root = Path(__file__).resolve().parent
     return {"python": platform.python_version(), "platform": platform.platform(),
-            "packages": {name: importlib.metadata.version(name) for name in ("numpy", "scipy", "spherely")},
+            "packages": {name: importlib.metadata.version(name) for name in ("numpy", "scipy", "spherely", "shapely")},
+            "geos": shapely.geos_version_string,
             "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.glob("*.py"))}}
 
 
@@ -53,9 +56,13 @@ def diagnostics(world):
         for side, terms in budgets.items():
             for term, amount in entry.get(side, {}).items():
                 terms[term] = terms.get(term, 0.) + float(amount)
+    from poly.coarsen import volume_km3
     return {"time_myr": world.time_myr, "plate_count": len(world.regions),
             "plate_area_km2": {str(p): sphere.area_km2(g) for p, g in world.regions.items()},
-            "crust_area_km2": world.areas(), "continent_volume_km3": sum(c.volume_km3() for c in world.crust if c.kind == "continent"),
+            "crust_area_km2": world.areas(), "continent_volume_km3": world._continent_km3(),
+            "resolved_continent_volume_km3": sum(c.volume_km3() for c in world.crust if c.kind == "continent"),
+            "unresolved_continent_volume_km3": volume_km3(world),
+            "maximum_continental_thickness_km": geology.maximum_thickness(world),
             "boundary_length_km": boundary_km, "ocean_area_by_age_myr_km2": ages,
             "pending_escape_km2": sum(getattr(c, "escape_km2", 0.) for c in world.crust),
             "pending_arc_km3": pending_arc.tolist(),
@@ -99,14 +106,28 @@ resume inside a force-driven interval without repeating its rift decision.
             if rifting is not None:
                 rotations = balance.solve(world)
                 candidates = [c for p in world.plates() for c in dynamics.cuts(balance, world, rotations, p, rifting)]
-                best = max(candidates, key=lambda c: c.ratio, default=None)
+                best = dynamics.choose_cut(balance, world, rotations, candidates, rifting)
                 if best is not None and best.ratio > 1.:
                     events.append(world.rift(best))
         rotations = balance.solve(world) if balance is not None else world._complete(config["rotations_per_myr"])
         speeds = {p: float(np.linalg.norm(w)) * sphere.RADIUS_KM for p, w in rotations.items()}
         fastest = max(speeds.values(), default=0.)
         sub = min(remaining, config["parameters"]["step_limit_km"] / max(fastest, 1e-9))
-        entry = world.step(rotations, sub)
+        rejected = []
+        while True:
+            try:
+                entry = world.step(rotations, sub)
+                break
+            except GeometryBudgetError as exc:
+                # RegionWorld.step is atomic. Refine finite spatial defects without changing
+                # any budget, repeating the rift decision, or retrying volume/cumulative errors.
+                if getattr(world, 'geology', None) is None or len(rejected) >= 6:
+                    raise
+                rejected.append(dict(substep_myr=sub, metric=exc.metric,
+                                     defect_km2=exc.value, budget_km2=exc.limit))
+                sub *= .5
+        if rejected:
+            entry['geometry_rejections'] = rejected
         entry["events"] = events + entry["events"]
         entry["speed_km_myr"] = speeds
         entry["substep_myr"] = sub

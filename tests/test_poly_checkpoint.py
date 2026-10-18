@@ -10,7 +10,8 @@ from unittest import mock
 import numpy as np
 import spherely
 
-from poly import dynamics, sphere
+from poly import dynamics, sphere, geology
+from poly.acceptance import GeometryBudgetError
 from poly.build import cap_world
 from poly.checkpoint import CheckpointError, load_checkpoint, save_checkpoint, world_to_data
 from poly.mesh import ContinentMesh
@@ -203,6 +204,42 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "rejected step"):
                 advance(world, config, phase, 1, lambda w, p: save_checkpoint(w, self.path))
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_artist_retries_a_spatial_defect_and_preserves_the_interval_phase(self):
+        from poly.regions import RegionWorld
+        world, rotations = fixture()
+        geology.activate(world)
+        baseline = copy.deepcopy(world)
+        config = dict(dt_myr=.2, motion='prescribed', rotations_per_myr=rotations,
+                      parameters=asdict(dynamics.Parameters()), rifting=None)
+        phase = dict(completed_intervals=0, remaining_myr=0.)
+        original = RegionWorld.step
+        attempts = []
+        def trial(current, rotations, dt):
+            attempts.append(dt)
+            if len(attempts) == 1:
+                raise GeometryBudgetError('plate_overlap_km2', 1000., 510.)
+            return original(current, rotations, dt)
+        with mock.patch.object(RegionWorld, 'step', autospec=True, side_effect=trial):
+            advance(world, config, phase, 1, lambda *args: None)
+        self.assertEqual(attempts, [.2, .1, .1])
+        self.assertEqual(phase, dict(completed_intervals=1, remaining_myr=0.))
+        self.assertEqual(world.ledger[0]['geometry_rejections'][0]['metric'], 'plate_overlap_km2')
+        half = dict(config, dt_myr=.1)
+        advance(baseline, half, dict(completed_intervals=0, remaining_myr=0.), 2, lambda *args: None)
+        world.ledger[0].pop('geometry_rejections')
+        self.assertEqual(world_to_data(world), world_to_data(baseline))
+
+    def test_artist_does_not_retry_a_material_budget_failure(self):
+        from poly.regions import RegionWorld
+        world, rotations = fixture()
+        geology.activate(world)
+        config = dict(dt_myr=.2, motion='prescribed', rotations_per_myr=rotations,
+                      parameters=asdict(dynamics.Parameters()), rifting=None)
+        with mock.patch.object(RegionWorld, 'step', side_effect=ValueError('continent_balance_error_km3')) as step:
+            with self.assertRaisesRegex(ValueError, 'continent_balance_error_km3'):
+                advance(world, config, dict(completed_intervals=0, remaining_myr=0.), 1, lambda *args: None)
+        self.assertEqual(step.call_count, 1)
 
 
 if __name__ == "__main__":

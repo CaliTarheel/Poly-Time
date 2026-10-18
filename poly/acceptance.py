@@ -31,6 +31,13 @@ ABSOLUTE_VOLUME_RELATIVE = 1e-3
 VOLUME_FLOOR_KM3 = 1.
 
 
+class GeometryBudgetError(ValueError):
+    """A finite spatial or per-step area defect eligible for timestep refinement."""
+    def __init__(self, metric, value, limit):
+        self.metric, self.value, self.limit = metric, float(value), float(limit)
+        super().__init__('%s: %.6g km2 (budget %.6g).' % (metric, value, limit))
+
+
 def _bounded(value, limit, name, units):
     if not math.isfinite(value) or abs(value) > limit:
         raise ValueError('%s: %.6g %s (budget %.6g).' % (name, value, units, limit))
@@ -43,6 +50,8 @@ def _nonnegative(value, name):
 
 def geometry(world, full, entry):
     """Measure real coverage, not just sums that let gaps cancel overlaps."""
+    from poly.geology import maximum_thickness
+    entry['maximum_continental_thickness_km'] = maximum_thickness(world)
     covered = sphere.union(*world.regions.values())
     union_area = sphere.area_km2(covered)
     entry['plate_gap_km2'] = sphere.area_km2(sphere.difference(full, covered))
@@ -84,16 +93,20 @@ def geometry(world, full, entry):
     entry['crust_vs_plate_error_km2'] = max((d['area_error_km2'] for d in defects.values()), default=0.)
     for key in ('plate_gap_km2', 'plate_overlap_km2', 'crust_gap_km2', 'crust_outside_km2',
                 'crust_overlap_km2', 'crust_vs_plate_error_km2'):
+        if math.isfinite(entry[key]) and abs(entry[key]) > GEOMETRY_KM2:
+            raise GeometryBudgetError(key, entry[key], GEOMETRY_KM2)
         _bounded(entry[key], GEOMETRY_KM2, key, 'km2')
 
 
 def budgets(world, entry):
-    """Close area and realized continental-volume books across accepted steps.
+    """Close area and continental-material volume books across accepted steps.
 
     Arc banks are pending magma, not continental crust. Only ``arc_km3`` actually
     emplaced into crust is a source; erosion deposited on the same continent is
     internal redistribution. ``sediment_to_sea_km3`` is the current model's sink.
     Future sources/sinks (e.g. LIPs) must explicitly extend this accounting.
+    Artist coarsening retains previously realized rock in an explicit passive
+    inventory; moving it between that inventory and a resolved body is internal.
     """
     previous = world.ledger[-1] if world.ledger else {}
     for label in ('gained', 'lost'):
@@ -114,6 +127,9 @@ def budgets(world, entry):
             ('absolute_rebuild_drift_km2', ABSOLUTE_DRIFT_KM2),
             ('numerical_area_repair_km2', REPAIR_STEP_KM2),
             ('cumulative_numerical_area_repair_km2', REPAIR_TOTAL_KM2)):
+        if (key in ('balance_error_km2', 'rebuild_drift_km2')
+                and math.isfinite(entry[key]) and abs(entry[key]) > limit):
+            raise GeometryBudgetError(key, entry[key], limit)
         _bounded(entry[key], limit, key, 'km2')
     source, sink = entry['arc_km3'], entry['sediment_to_sea_km3']
     _nonnegative(source, 'Continental source')

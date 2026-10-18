@@ -1,0 +1,176 @@
+name: Poly artist qualification
+
+on:
+  push:
+    branches: [codex/poly-artist-evolution]
+    paths:
+      - 'poly/**'
+      - 'tests/test_poly_*.py'
+      - 'tests/fixtures/poly*.json'
+      - '.github/workflows/poly-artist.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poly-artist-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  OPENBLAS_NUM_THREADS: '1'
+  OMP_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install the standalone numerical environment
+        run: python -m pip install -r poly/requirements.txt numpy==2.3.5 scipy==1.17.0 shapely==2.2.0
+      - name: Test the spherical core, indexed sampler and artist history
+        run: |
+          mkdir -p runs/tests
+          python -m pip freeze > runs/tests/environment.txt
+          set -o pipefail
+          python -m unittest discover -s tests -p 'test_poly_*.py' -q 2>&1 | tee runs/tests/tests.log
+      - name: Keep the test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: poly-artist-tests
+          path: runs/tests/
+          if-no-files-found: warn
+          retention-days: 1
+
+  initial-map:
+    if: github.event_name == 'workflow_dispatch'
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install the standalone numerical environment
+        run: python -m pip install -r poly/requirements.txt numpy==2.3.5 scipy==1.17.0 shapely==2.2.0
+      - name: Initialize 55 percent emerged land
+        run: |
+          python -m poly.artist_run start --output runs/initial --duration 0 \
+            --seed 1 --plates 8 --land .55 --continents .65 \
+            --dt 2 --snapshot 10 --width 720 --spacing 250 --samples 5000
+      - name: Render the actual initial map at 8192 pixels
+        timeout-minutes: 25
+        run: |
+          python -m poly.artist_run render --checkpoint runs/initial/checkpoint.json \
+            --output runs/initial/initial-8192.png --width 8192
+      - name: Keep the initial map and native state
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: poly-artist-initial
+          path: runs/initial/
+          if-no-files-found: warn
+          retention-days: 1
+
+  evolution:
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install the standalone numerical environment
+        run: python -m pip install -r poly/requirements.txt numpy==2.3.5 scipy==1.17.0 shapely==2.2.0
+      - name: Attempt a continuous 1000 Myr history
+        timeout-minutes: 240
+        shell: bash
+        run: |
+          mkdir -p runs/records
+          python -m pip freeze > runs/records/environment.txt
+          set +e
+          timeout --signal=INT --kill-after=90s 230m \
+            python -m poly.artist_run start --output runs/artist --duration 1000 \
+            --seed 1 --plates 8 --land .55 --continents .65 \
+            --dt 2 --snapshot 10 --width 720 --spacing 250 --samples 5000 \
+            2>&1 | tee runs/records/evolution.log
+          result=${PIPESTATUS[0]}
+          python - "$result" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          path = Path('runs/artist/manifest.json')
+          if path.exists():
+              data = json.loads(path.read_text())
+              code = int(sys.argv[1])
+              if code == 124:
+                  data['status'] = 'time_budget_reached'
+                  data['error'] = 'CI stopped after 230 minutes; checkpoint is the last accepted state.'
+              elif code and data.get('status') == 'running':
+                  data['status'] = 'interrupted'
+                  data['error'] = f'Runner exited with code {code}; checkpoint is the last accepted state.'
+              path.write_text(json.dumps(data, indent=2) + '\n')
+              print(json.dumps(data, indent=2))
+          PY
+          exit "$result"
+      - name: Summarize the actual duration
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          path = Path('runs/artist/manifest.json')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              if path.exists():
+                  data = json.loads(path.read_text())
+                  out.write('## Poly artist qualification\n\n')
+                  out.write(f"Status: **{data['status']}**. Accepted: **{data['time_myr']:.6f} Myr**. ")
+                  out.write(f"Target: **{data['target_myr']:.0f} Myr**.\n\n")
+                  if data.get('error'):
+                      out.write(data['error'] + '\n\n')
+                  out.write('The artifact retains actual snapshots, replay, native states, source receipt and budgets. ')
+                  out.write('The requested duration is not evidence that it was reached.\n')
+              else:
+                  out.write('Initialization failed; inspect the retained logs.\n')
+          PY
+      - name: Preserve the native history before the high-resolution export
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: poly-artist-history
+          path: |
+            runs/artist/
+            runs/records/
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 1
+      - name: Render the last accepted state at 8192 pixels
+        if: ${{ always() && hashFiles('runs/artist/checkpoint.json') != '' }}
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          python -m poly.artist_run render --checkpoint runs/artist/checkpoint.json \
+            --output runs/records/last-accepted-8192.png --width 8192
+      - name: Keep the high-resolution export separately
+        if: ${{ always() && hashFiles('runs/records/last-accepted-8192.png') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: poly-artist-final-map
+          path: runs/records/last-accepted-8192.png
+          retention-days: 1
