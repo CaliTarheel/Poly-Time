@@ -56,9 +56,12 @@ def diagnostics(world):
         for side, terms in budgets.items():
             for term, amount in entry.get(side, {}).items():
                 terms[term] = terms.get(term, 0.) + float(amount)
+    from poly.coarsen import volume_km3
     return {"time_myr": world.time_myr, "plate_count": len(world.regions),
             "plate_area_km2": {str(p): sphere.area_km2(g) for p, g in world.regions.items()},
-            "crust_area_km2": world.areas(), "continent_volume_km3": sum(c.volume_km3() for c in world.crust if c.kind == "continent"),
+            "crust_area_km2": world.areas(), "continent_volume_km3": world._continent_km3(),
+            "resolved_continent_volume_km3": sum(c.volume_km3() for c in world.crust if c.kind == "continent"),
+            "unresolved_continent_volume_km3": volume_km3(world),
             "maximum_continental_thickness_km": geology.maximum_thickness(world),
             "boundary_length_km": boundary_km, "ocean_area_by_age_myr_km2": ages,
             "pending_escape_km2": sum(getattr(c, "escape_km2", 0.) for c in world.crust),

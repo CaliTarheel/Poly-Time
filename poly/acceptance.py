@@ -99,12 +99,14 @@ def geometry(world, full, entry):
 
 
 def budgets(world, entry):
-    """Close area and realized continental-volume books across accepted steps.
+    """Close area and continental-material volume books across accepted steps.
 
     Arc banks are pending magma, not continental crust. Only ``arc_km3`` actually
     emplaced into crust is a source; erosion deposited on the same continent is
     internal redistribution. ``sediment_to_sea_km3`` is the current model's sink.
     Future sources/sinks (e.g. LIPs) must explicitly extend this accounting.
+    Artist coarsening retains previously realized rock in an explicit passive
+    inventory; moving it between that inventory and a resolved body is internal.
     """
     previous = world.ledger[-1] if world.ledger else {}
     for label in ('gained', 'lost'):

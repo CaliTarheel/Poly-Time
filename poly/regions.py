@@ -331,9 +331,8 @@ class RegionWorld:
         for p in plates:
             self._update_crust(p, lost[p], gained[p], entry, dt)
         if self.geology is not None:
-            from poly.geology import separate_bodies, relax_small_bodies
-            separate_bodies(self, entry)
-            relax_small_bodies(self, dt, entry)
+            from poly.coarsen import consolidate
+            consolidate(self, entry)
         self.crust = _merge_bands(self.crust)
         self._spread(dt)  # thick crust flows outward under its own weight
         self._erode(dt, entry)  # and is worn down where it stands high
@@ -755,7 +754,8 @@ class RegionWorld:
                 c.mesh = ContinentMesh.build(c.shape, c.thickness_km)
 
     def _continent_km3(self) -> float:
-        return sum(c.volume_km3() for c in self.crust if c.kind == 'continent')
+        from poly.coarsen import volume_km3
+        return sum(c.volume_km3() for c in self.crust if c.kind == 'continent') + volume_km3(self)
 
     def _regroup(self, entry=None, boundary_index=None) -> list:
         """Plates that came apart become separate plates; slivers and vanished plates go to neighbours."""

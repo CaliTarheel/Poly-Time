@@ -76,10 +76,13 @@ reference frame. Ownership transfers reframe those coordinates, so fine relief m
 the same rock rather than swimming over it in world coordinates. Reference rotations and
 contact belts survive checkpoints. Collision belts remain as inherited weaknesses after
 activity ceases. In this profile, closing 100 km does not automatically fuse two entire plates.
-Disconnected continental masses are separate material bodies even when a plate owns several
-of them. Their local fields and total volume are retained, so a small terrane is not tested
+Resolved disconnected continental masses are separate material bodies even when a plate owns
+several of them. Their local fields and total volume are retained, so a terrane is not tested
 against the area of every continent on its plate. Partition remapping and any geometry cleanup
-are recorded in the ledger.
+are recorded in the ledger. The artist profile uses the existing 20,000 km2 continental mesh
+threshold (a disc about 160 km across) as the minimum independent continental body. This is
+an artist-model resolution choice, separate from the unchanged 250,000 km2 minimum plate area.
+It does not remove meaningful microplates.
 
 Resolved relief comes from the continental thickness mesh and oceanic age-depth relation.
 Domain-warped procedural detail amplifies that relief in material coordinates. It is an output
@@ -110,21 +113,27 @@ the current water level, within 500 km of an erosion source. Submarine transport
 sea-export ledger. This prevents a tiny surviving receiver from becoming an arbitrarily high
 sediment spike. Offshore export is accounted material, but an evolving offshore sediment
 surface is still absent.
-Uniform continental bodies below the mesh size receive the same erosion law and book their
-exported sediment. When a shortening body loses its mesh, the actual removed outline still
-locates its lateral escape over its own ocean; losing the mesh does not disable those processes.
-This closes a path that trapped rock in very small remnants, but does not establish that all
-collision relief is calibrated.
-After all plates resolve their losses, an unresolved body sharing a real boundary with a
-larger continental body can accrete onto that body. Its uniform cell exchanges crust with nearby
-receiver cells through an implicit finite-volume contact solve, using the existing cubic yielding
-mobility and 300 km reach. Volume and the original province coordinates are retained. A one-metre
-contact tolerance recognizes shared edges after frame conversion; this rule does not diffuse rock
-across an ocean gap. Isolated bodies still require erosion and lateral escape. This reduced contact
-flow approximation needs calibration alongside ordinary spreading.
+After every plate has resolved its losses, sub-resolution continental bodies are coarsened.
+Their rock joins the nearest resolved continental field within the existing 300 km material
+reach, distributed through that field's local area weights. This is numerical homogenization,
+not physical transport across a small ocean gap. Source province, material reference, transferred
+volume and receiver are retained in the step ledger; individual sub-resolution texture is lost.
+An isolated body's rock remains in a passive inventory with its source province and a location
+in its moving plate frame. It is emplaced when a resolved receiver comes within reach. The inventory
+is checkpointed, follows splits and handovers, and is included in continental-volume conservation.
+It has no independent relief, force, erosion or deformation solve while unresolved.
+The old surface footprint remains on the same plate as age-unknown marine cover, merged into
+one mask per plate. No gap, ridge, new magma or fabricated seafloor age is introduced. Coarsened
+area and volume, deposition and outstanding inventory are reported explicitly. Coarsening runs
+again after cleanup, plate regrouping and arc emplacement, before solving water level. Water is
+calibrated after initial coarsening, so the starting emerged fraction remains 55%.
+This rule prevents rock from being squeezed into shrinking numerical specks. It deliberately
+omits small islands as mechanical bodies; it does not establish that resolved collision relief
+or the 300 km homogenization reach is calibrated.
 
 The diagnostics and every accepted ledger entry include the maximum continental thickness
-over all mesh nodes and uniform bodies. Snapshot metrics also report the corresponding maximum
+over all resolved mesh nodes and any historical uniform bodies. Passive unresolved material
+has no defined surface height. Snapshot metrics also report the corresponding maximum
 resolved height. The older `maximum_height_km` remains a maximum of equal-area samples of the
 amplified surface; those samples can miss a narrow high island. Inspect the native-field maximum
 when qualifying relief. No thickness or height is clipped to make a map pass.
@@ -169,3 +178,7 @@ The captured 95.176 Myr rotation failure is a regression fixture: reconstruction
 vertex must preserve the signed area of the separated loops, rather than accepting the removal
 of a finite fold under a plate-sized relative allowance. The original spatial and cumulative
 acceptance budgets remain unchanged.
+Planetary coarsening checks conserve total rock, preserve surface coverage, retain isolated
+material instead of sending it to a distant continent, and carry source reference coordinates
+through plate handover and exact checkpoint restart. Diagnostics separate resolved continental
+volume from passive unresolved volume while the acceptance ledger closes their sum.

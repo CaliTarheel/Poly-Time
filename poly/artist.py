@@ -136,7 +136,6 @@ def make_world(seed=1, plates=10, land_fraction=.55, continent_fraction=.65, spa
             world.crust.append(Crust(plate, 'continent', continent))
     geology.activate(world, seed)
     geology.separate_bodies(world)
-    scenario.initialize_contacts(world, rotations)
     coasts = np.vstack([densify(r, 30., closed=True) for rings in sphere.polygons(land) for r in rings])
     coast_tree = cKDTree(coasts)
     rng = np.random.default_rng(seed + 2749)
@@ -158,6 +157,9 @@ def make_world(seed=1, plates=10, land_fraction=.55, continent_fraction=.65, spa
             centre = spherely.centroid(piece.shape)
             point = sphere.from_lonlat(float(spherely.get_x(centre)), float(spherely.get_y(centre)))
             piece.thickness_km = float(thickness(point[None])[0])
+    from poly.coarsen import consolidate
+    consolidate(world)
+    scenario.initialize_contacts(world, rotations)
     initialize_water(world, land_fraction)
     return world, rotations
 
@@ -261,6 +263,7 @@ def update_water(world, count=32768, diagnostics=None):
 
 
 def metrics(world, count=32768):
+    from poly.coarsen import MINIMUM_KM2, volume_km3
     points = equal_area_points(count)
     sampled = sample(world, points)
     valid = np.isfinite(sampled.elevation_km)
@@ -273,6 +276,8 @@ def metrics(world, count=32768):
                 minimum_height_km=float(height[valid].min()),
                 maximum_continental_thickness_km=peak_thickness,
                 maximum_resolved_height_km=ISOSTASY * (peak_thickness - REFERENCE_KM) - sampled.sea_level_km,
+                minimum_continental_body_km2=MINIMUM_KM2,
+                unresolved_continent_volume_km3=volume_km3(world),
                 unresolved_fraction=float((~valid).mean()), plate_count=len(world.plates()),
                 collision_belts=sum(f['kind'] == 'collision' for f in world.geology['features']),
                 rift_belts=sum(f['kind'] == 'rift' for f in world.geology['features']))

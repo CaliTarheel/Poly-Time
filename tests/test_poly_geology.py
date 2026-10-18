@@ -21,7 +21,7 @@ def world_with_continent():
 
 
 class GeologicalHistoryTests(unittest.TestCase):
-    def test_small_body_colliding_with_larger_continent_accretes_with_its_rock(self):
+    def test_subresolution_collision_body_joins_regional_crust_before_it_can_spike(self):
         from tests.test_poly_evolve import disc, EAST
         world = regions.from_network(cap_world(cap_omega=EAST)[0])
         island = sphere.polygon(disc((39., 0.), .4))
@@ -35,47 +35,17 @@ class GeologicalHistoryTests(unittest.TestCase):
             boundary.kinds = ['collision'] * len(boundary.kinds)
             boundary.overriding = [None] * len(boundary.kinds)
         before = world._continent_km3()
-        accreted = False
+        coarsened = 0
         for _ in range(8):
             entry = world.step({1: EAST, 2: np.zeros(3)}, 1.)
-            if any(event['kind'] == 'accreted' for event in entry['events']):
-                accreted = True
-                break
-        self.assertTrue(accreted)
+            coarsened += entry['coarsened_bodies']
+            self.assertLess(geology.maximum_thickness(world), 80.)
+        self.assertGreater(coarsened, 0)
         self.assertFalse(any(c.kind == 'continent' and c.plate == 1 for c in world.crust))
         exported = sum(e['sediment_to_sea_km3'] for e in world.ledger)
         added = sum(e['arc_km3'] for e in world.ledger)
         self.assertAlmostEqual((world._continent_km3() + exported - added) / before, 1., delta=1e-4)
         self.assertLess(geology.maximum_thickness(world), 80.)
-
-    def test_contact_flow_conserves_rock_and_keeps_field_values_within_their_initial_bounds(self):
-        from poly.mesh import ContinentMesh
-        small = sphere.polygon(sphere.from_lonlat([-.2, 0., 0., -.2], [-.2, -.2, .2, .2]))
-        large = sphere.polygon(sphere.from_lonlat([0., 5., 5., 0.], [-.2, -.2, .2, .2]))
-        piece = Crust(1, 'continent', small, thickness_km=1000.)
-        receiver = Crust(1, 'continent', large, thickness_km=40., mesh=ContinentMesh.build(large, 40.))
-        before = piece.volume_km3() + receiver.volume_km3()
-        moved = geology._relax_uniform_contact(piece, receiver, sphere.from_lonlat([0., 0.], [-.1, .1]), 40., 1.)
-        self.assertGreater(moved, 0.)
-        self.assertLess(piece.thickness_km, 1000.)
-        self.assertGreaterEqual(piece.thickness_km, 40.)
-        self.assertTrue(np.all((receiver.mesh.thickness >= 40.) & (receiver.mesh.thickness <= 1000.)))
-        self.assertAlmostEqual((piece.volume_km3() + receiver.volume_km3()) / before, 1., places=12)
-
-    def test_contact_flow_does_not_cross_an_ocean_gap(self):
-        from poly.mesh import ContinentMesh
-        world = world_with_continent()
-        large = next(c for c in world.crust if c.kind == 'continent')
-        large.mesh = ContinentMesh.build(large.shape, large.thickness_km)
-        island = Crust(1, 'continent', sphere.polygon(sphere.disc(sphere.from_lonlat(10., 0.), 10.)),
-                       thickness_km=200.)
-        world.crust.append(island)
-        before = [c.volume_km3() for c in world.crust]
-        entry = dict(events=[], gained={k: 0. for k in regions.GAINS},
-                     lost={k: 0. for k in regions.LOSSES}, thickened_km3=0.)
-        geology.relax_small_bodies(world, 100., entry)
-        self.assertEqual([c.volume_km3() for c in world.crust], before)
-        self.assertNotIn('contact_flow_km3', entry)
 
     def test_extrema_include_small_scalar_bodies_between_preview_samples(self):
         world = world_with_continent()

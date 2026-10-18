@@ -71,6 +71,7 @@ def _execute(output, world, metadata, duration):
                                  'Continental extension uses a conservative finite-band approximation',
                                  'No separate evolving sediment layer or internal material deformation',
                                  'Sub-mesh relief is procedural amplification',
+                                 'Continental bodies below 20,000 km2 are coarsened into regional crust or passive inventory',
                                  'Duration reached is recorded; a target is not validation'])
 
     def commit(current, progress):

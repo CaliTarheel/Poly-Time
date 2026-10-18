@@ -37,7 +37,7 @@ ERODE_PER_MYR = .2
 LOWLAND_KM = .2
 DEPOSIT_REACH_KM = 500.
 REACH_KM = 300.     # shortening thickens the crust within about this of where it happened
-MINIMUM_KM2 = 2e4   # a piece smaller than this (a 140 km disc) keeps one thickness, no mesh
+MINIMUM_KM2 = 2e4   # ~160 km disc: scalar historically; artist bodies coarsen below this area
 LOST_KM = 1.        # a node this far outside the piece's new outline was on the ground lost
 # S2 clipping can retain disconnected fragments below a square metre. Their native geometry
 # remains in the crust polygon and its volume; they cannot support a useful continental mesh.
