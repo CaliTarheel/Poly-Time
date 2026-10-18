@@ -15,7 +15,7 @@ import spherely
 from poly import sphere
 from poly.mesh import MINIMUM_KM2, REACH_KM, SPACING_KM
 
-MINIMUM_FIELD_KM2 = SPACING_KM ** 2 / 4.
+MINIMUM_FIELD_KM2 = SPACING_KM ** 2 / 100.  # microscopic support below 1% of a nominal cell
 
 
 def lump_field(field, polygon_km2):

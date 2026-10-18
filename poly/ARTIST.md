@@ -84,8 +84,9 @@ threshold (a disc about 160 km across) as the minimum independent continental bo
 an artist-model resolution choice, separate from the unchanged 250,000 km2 minimum plate area.
 It does not remove meaningful microplates.
 Clipped mesh vertices can also have microscopic control areas inside a large continent. The
-artist profile ties those cells to regional field patches with at least 10,000 km2 support
-(one quarter of the ordinary 200 km spacing squared). Nearest resolved nodes are selected by
+artist profile ties those cells to regional field patches with at least 400 km2 support
+(1% of the ordinary 200 km spacing squared). This targets microscopic clipping cells while
+retaining legitimate coastal shelf gradients. Nearest resolved nodes are selected by
 mesh-edge distance, so disconnected coasts cannot exchange rock. A component with no resolved
 node keeps one volume-weighted value. Each patch retains the sum of its real node-area volumes;
 no artificial nodal mass or thickness ceiling is introduced. Grouping is deterministic and
