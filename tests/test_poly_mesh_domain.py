@@ -125,6 +125,24 @@ class MeshDomainTests(unittest.TestCase):
         points = sphere.from_lonlat(lon.ravel(), lat.ravel())
         np.testing.assert_allclose(mesh.sample(points), mesh._sample_fallback(points), atol=1e-8, rtol=0.)
 
+    def test_index_exclusion_preserves_spherical_tolerance_at_each_edge(self):
+        nodes = sphere.from_lonlat([0., 10., 0.], [0., 0., 10.])
+        mesh = ContinentMesh(nodes, [[0, 1, 2]], [10., 40., 90.])
+        weights = []
+        for edge in range(3):
+            for offset in (-1e-6, -1e-9, -1e-11, 0., 1e-11):
+                row = np.zeros(3)
+                row[edge] = offset
+                row[(edge + 1) % 3] = .37
+                row[(edge + 2) % 3] = .63
+                weights.append(row)
+        points = sphere.unit(np.asarray(weights) @ nodes)
+        for rotation in (np.eye(3), sphere.rotation(np.array([1., 2., 3.]) * 1.7)):
+            carried = mesh.rotated(rotation)
+            query = sphere.rotate(points, rotation)
+            np.testing.assert_allclose(carried.sample(query), carried._sample_fallback(query),
+                                       atol=1e-8, rtol=0.)
+
     def test_old_zero_width_face_cannot_make_the_resolved_field_singular(self):
         nodes = np.array([[1., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
         mesh = ContinentMesh(nodes, [[0, 1, 2], [0, 2, 3]], [40., 900., 50., 60.])

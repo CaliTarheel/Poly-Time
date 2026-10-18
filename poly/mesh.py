@@ -127,20 +127,24 @@ class ContinentMesh:
     def sample(self, points):
         """Locate faces in a planar index when one spherical chart suffices.
 
-        The index changes only point location, never interpolation or the material domain.
-        Wide domains, edge-roundoff points and extrapolation retain the spherical fallback.
+        Index exclusion avoids a full face walk for exterior coast/hole points.
+        A conservative near-edge query retains the original spherical tolerance.
+        Interpolation and nearest-boundary extrapolation remain unchanged.
         """
         points = np.asarray(points, float).reshape(-1, 3)
         result = np.full(len(points), np.nan)
         if not len(points):
             return result
+        indexed = False
         centre, e1, e2 = _frame(self.nodes)
         if np.isfinite(centre).all() and np.min(self.nodes @ centre) > .2:
             triangles = _usable_triangles(self.nodes, self.triangles)
             if len(triangles):
+                indexed = True
                 xy = _project(self.nodes, centre, e1, e2)
                 tree = shapely.STRtree(shapely.polygons(xy[triangles]))
-                eligible = np.flatnonzero(points @ centre > .2)
+                inverse = np.linalg.inv(self.nodes[triangles])
+                eligible = np.flatnonzero(points @ centre > .1)
                 if len(eligible):
                     query_xy = _project(points[eligible], centre, e1, e2)
                     pairs = tree.query(shapely.points(query_xy), predicate='covered_by')
@@ -149,16 +153,32 @@ class ContinentMesh:
                         face_ids = pairs[1, first]
                         selected = triangles[face_ids]
                         rows = eligible[query]
-                        inverse = np.linalg.inv(self.nodes[triangles])
                         weights = np.einsum('pi,pij->pj', points[rows], inverse[face_ids])
                         weights = np.maximum(weights, 0.)
                         result[rows] = np.sum(weights * self.thickness[selected], axis=1) / weights.sum(axis=1)
+                    # Planar coverage is exact; the old spherical locator accepts weights
+                    # down to -1e-10. Query a wider locator-only box and apply that same
+                    # original test before deciding a point is truly exterior.
+                    near = np.flatnonzero(np.isnan(result[eligible]))
+                    if len(near):
+                        q = query_xy[near]
+                        pairs = tree.query(shapely.box(q[:, 0] - 1e-8, q[:, 1] - 1e-8,
+                                                      q[:, 0] + 1e-8, q[:, 1] + 1e-8))
+                        if pairs.shape[1]:
+                            rows = eligible[near[pairs[0]]]
+                            weights = np.einsum('pi,pij->pj', points[rows], inverse[pairs[1]])
+                            hit = np.all(weights >= -1e-10, axis=1) & (weights.sum(axis=1) > 0.)
+                            query, first = np.unique(pairs[0, hit], return_index=True)
+                            face_ids = pairs[1, hit][first]
+                            rows = eligible[near[query]]
+                            weights = np.maximum(weights[hit][first], 0.)
+                            result[rows] = np.sum(weights * self.thickness[triangles[face_ids]], axis=1) / weights.sum(axis=1)
         missing = np.flatnonzero(np.isnan(result))
         if len(missing):
-            result[missing] = self._sample_fallback(points[missing])
+            result[missing] = self._sample_fallback(points[missing], locate_faces=not indexed)
         return result
 
-    def _sample_fallback(self, points):
+    def _sample_fallback(self, points, locate_faces=True):
         """Interpolate within a containing face, without blending across coastlines or holes.
 
         New ground outside the old mesh (during recutting) takes the nearest boundary edge's
@@ -171,33 +191,34 @@ class ContinentMesh:
         triangles = _usable_triangles(self.nodes, self.triangles)
         if not len(triangles):
             raise ValueError('Continental mesh has no numerically resolved sampling faces.')
-        inverse = np.linalg.inv(self.nodes[triangles])
-        centres = sphere.unit(self.nodes[triangles].sum(axis=1))
-        nearest = cKDTree(centres)
-        # The nearby faces normally suffice on a regular mesh. Fall back to an exhaustive
-        # containment search for long, thin boundary faces; nearest-centre is never the rule
-        # deciding which continent or side of an inlet supplies a value.
-        count = min(8, len(triangles))
-        for start in range(0, len(points), 4096):
-            batch = points[start:start + 4096]
-            candidates = np.asarray(nearest.query(batch, k=count)[1]).reshape(len(batch), count)
-            weights = np.einsum('pi,pkij->pkj', batch, inverse[candidates])
-            inside = np.all(weights >= -1e-10, axis=2) & (weights.sum(axis=2) > 0.)
-            rows = np.flatnonzero(inside.any(axis=1))
-            columns = np.argmax(inside[rows], axis=1)
-            w = np.maximum(weights[rows, columns], 0.)
-            tri = triangles[candidates[rows, columns]]
-            result[start + rows] = (w * self.thickness[tri]).sum(axis=1) / w.sum(axis=1)
-        for tri, transform in zip(triangles, inverse):
-            missing = np.flatnonzero(np.isnan(result))
-            if not len(missing):
-                break
-            # Positive cone coordinates locate a point in a minor spherical triangle. Their
-            # normalized values are barycentric coordinates in the face's gnomonic plane.
-            weights = points[missing] @ transform
-            hit = np.all(weights >= -1e-10, axis=1) & (weights.sum(axis=1) > 0.)
-            w = np.maximum(weights[hit], 0.)
-            result[missing[hit]] = (w @ self.thickness[tri]) / w.sum(axis=1)
+        if locate_faces:
+            inverse = np.linalg.inv(self.nodes[triangles])
+            centres = sphere.unit(self.nodes[triangles].sum(axis=1))
+            nearest = cKDTree(centres)
+            # The nearby faces normally suffice on a regular mesh. Fall back to an exhaustive
+            # containment search for long, thin boundary faces; nearest-centre is never the rule
+            # deciding which continent or side of an inlet supplies a value.
+            count = min(8, len(triangles))
+            for start in range(0, len(points), 4096):
+                batch = points[start:start + 4096]
+                candidates = np.asarray(nearest.query(batch, k=count)[1]).reshape(len(batch), count)
+                weights = np.einsum('pi,pkij->pkj', batch, inverse[candidates])
+                inside = np.all(weights >= -1e-10, axis=2) & (weights.sum(axis=2) > 0.)
+                rows = np.flatnonzero(inside.any(axis=1))
+                columns = np.argmax(inside[rows], axis=1)
+                w = np.maximum(weights[rows, columns], 0.)
+                tri = triangles[candidates[rows, columns]]
+                result[start + rows] = (w * self.thickness[tri]).sum(axis=1) / w.sum(axis=1)
+            for tri, transform in zip(triangles, inverse):
+                missing = np.flatnonzero(np.isnan(result))
+                if not len(missing):
+                    break
+                # Positive cone coordinates locate a point in a minor spherical triangle. Their
+                # normalized values are barycentric coordinates in the face's gnomonic plane.
+                weights = points[missing] @ transform
+                hit = np.all(weights >= -1e-10, axis=1) & (weights.sum(axis=1) > 0.)
+                w = np.maximum(weights[hit], 0.)
+                result[missing[hit]] = (w @ self.thickness[tri]) / w.sum(axis=1)
         missing = np.flatnonzero(np.isnan(result))
         if len(missing):
             edges = _edges(triangles)
