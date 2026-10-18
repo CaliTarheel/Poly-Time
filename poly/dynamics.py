@@ -151,6 +151,7 @@ class Cut:
     tension_n_per_m: float    # mean pull across the cut (positive: being pulled apart)
     strength_n_per_m: float   # mean strength along it
     continent_fraction: float
+    path: np.ndarray | None = None  # optional shared curved boundary in world coordinates
 
     @property
     def ratio(self) -> float:
@@ -322,6 +323,17 @@ def cuts(balance, world, rotations, plate, rifting=None):
     return result
 
 
+def choose_cut(balance, world, rotations, candidates, rifting):
+    """Refine supercritical artist candidates before applying a fracture."""
+    best = max(candidates, key=lambda c: c.ratio, default=None)
+    if best is None or best.ratio <= 1. or getattr(world, 'geology', None) is None:
+        return best
+    from poly.fracture import routed_cut
+    seeds = sorted((c for c in candidates if c.ratio > 1.), key=lambda c: -c.ratio)[:3]
+    routed = [routed_cut(balance, world, rotations, c, rifting) for c in seeds]
+    return max((c for c in routed if c is not None), key=lambda c: c.ratio, default=None)
+
+
 def _centre(geography):
     c = spherely.centroid(geography)
     x, y = spherely.get_x(c), spherely.get_y(c)
@@ -367,7 +379,7 @@ def run(world, steps, parameters=None, dt=1., report=None, rifting=None):
         if rifting is not None:
             rotations = balance.solve(world)
             found = [c for plate in world.plates() for c in cuts(balance, world, rotations, plate, rifting)]
-            best = max(found, key=lambda c: c.ratio, default=None)
+            best = choose_cut(balance, world, rotations, found, rifting)
             if best is not None and best.ratio > 1.:
                 rifted.append(world.rift(best))
         while remaining > 1e-9:

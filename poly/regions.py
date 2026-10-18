@@ -545,7 +545,10 @@ class RegionWorld:
                 continue
             entry['gained'][category] += area
             local = sphere.rotate_geography(shape, back)
-            if self.geology is not None and category == 'ridge':
+            if self.geology is not None and category in ('ridge', 'sliver', 'junction', 'trench_opening'):
+                # The first opening of a new rift still inherits a provisional
+                # transform label. Material must stretch in that real gap too;
+                # otherwise one deep-ocean slit is born before it is retyped.
                 from poly.geology import extend_rift
                 local = extend_rift(self, mine, local, entry)
             remaining_area = sphere.area_km2(local)
@@ -1434,7 +1437,7 @@ class RegionWorld:
         return None
 
     def rift(self, cut) -> dict:
-        """Split `cut.plate` along the great circle normal to `cut.pole`; the + side becomes a new plate.
+        """Split along the selected shared fracture; its left side becomes a new plate.
 
         The new plate starts in its parent's frame (so it moves with it until told otherwise) and takes
         the crust on its side; boundaries keep their state, renamed by side. The cut itself is a new
@@ -1444,7 +1447,9 @@ class RegionWorld:
         centre, pole = sphere.unit(cut.centre), sphere.unit(cut.pole)
         u = np.cross(pole, centre)
         t = np.linspace(0., 2. * np.pi, 72, endpoint=False)
-        half = sphere.polygon(np.outer(np.cos(t), centre) + np.outer(np.sin(t), u))  # the + side
+        path = getattr(cut, 'path', None)
+        half = sphere.polygon(path if path is not None else
+                              np.outer(np.cos(t), centre) + np.outer(np.sin(t), u))
         piece = sphere.intersection(self.regions[plate], half)
         new = max(list(self.regions) + list(self.frames) + list(self.parents)) + 1
         self.frames[new] = self.frame(plate).copy()
@@ -1452,10 +1457,14 @@ class RegionWorld:
         self.names[new] = '%s (rift)' % self.names.get(plate, 'Plate %d' % plate)
         area = sphere.area_km2(piece)
         self._give(plate, piece, new)
-        self.boundaries = self._derive(self._index(_split_by_side(self.boundaries, plate, new, pole)), {})
+        self.boundaries = self._derive(self._index(_split_by_side(
+            self.boundaries, plate, new, pole, half=half if path is not None else None)), {})
         return dict(kind='rift', plate=plate, new=new, area_km2=area, length_km=cut.length_km,
                     tension_n_per_m=cut.tension_n_per_m, strength_n_per_m=cut.strength_n_per_m,
-                    continent_fraction=cut.continent_fraction)
+                    continent_fraction=cut.continent_fraction,
+                    path_type='great_circle' if path is None else 'strength_routed',
+                    maximum_path_offset_km=0. if path is None else float(
+                        np.abs(np.arcsin(np.clip(path @ pole, -1., 1.))).max() * sphere.RADIUS_KM))
 
     def _sutures(self, rotations_per_myr) -> list:
         """Weld the plates on either side of every collision that has closed SUTURE_KM.
@@ -1642,14 +1651,18 @@ def _relabel(boundaries, into):
     return result
 
 
-def _split_by_side(boundaries, plate, new, pole):
+def _split_by_side(boundaries, plate, new, pole, half=None):
     """The boundaries with `plate`'s segments on the + side of `pole` given to `new`."""
     result = []
     for b in boundaries:
         if plate not in (b.left, b.right):
             result.append(b)
             continue
-        side = b.mids() @ pole > 0.
+        if half is None:
+            side = b.mids() @ pole > 0.
+        else:
+            lon, lat = sphere.to_lonlat(b.mids())
+            side = np.asarray(spherely.contains(half, spherely.points(lon, lat)))
         start = 0
         for k in range(1, len(side) + 1):
             if k < len(side) and side[k] == side[start]:

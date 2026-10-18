@@ -106,7 +106,7 @@ resume inside a force-driven interval without repeating its rift decision.
             if rifting is not None:
                 rotations = balance.solve(world)
                 candidates = [c for p in world.plates() for c in dynamics.cuts(balance, world, rotations, p, rifting)]
-                best = max(candidates, key=lambda c: c.ratio, default=None)
+                best = dynamics.choose_cut(balance, world, rotations, candidates, rifting)
                 if best is not None and best.ratio > 1.:
                     events.append(world.rift(best))
         rotations = balance.solve(world) if balance is not None else world._complete(config["rotations_per_myr"])

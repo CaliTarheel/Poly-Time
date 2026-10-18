@@ -14,7 +14,7 @@ from poly.topology import segment_motion
 from poly.transfer import segment_distances, transfer_sutures
 
 VERSION = 1
-RIFT_HALF_WIDTH_KM = 100.
+RIFT_HALF_WIDTH_KM = 200.
 BREAKUP_THICKNESS_KM = 12.
 
 
@@ -151,14 +151,34 @@ def extend_rift(world, pieces, gain, entry):
     import spherely
     from scipy.spatial import cKDTree
     from poly.mesh import ContinentMesh
+    from poly.build import densify
     remaining = gain
     for piece in pieces:
         if (piece.kind != 'continent' or piece.mesh is None
                 or sphere.area_km2(remaining) < sphere.DETAIL_KM2
                 or spherely.distance(piece.shape, remaining) > 1000.):
             continue
-        rings = [r for domain in sphere.polygons(piece.shape) for r in domain]
-        coast = sphere.union(*[sphere.strip(np.vstack((r, r[:1])), RIFT_HALF_WIDTH_KM) for r in rings])
+        bands = []
+        for domain in sphere.polygons(piece.shape):
+            for ring in domain:
+                ring = densify(ring, 100., closed=True)
+                mids = sphere.unit(ring + np.roll(ring, -1, axis=0))
+                lon, lat = sphere.to_lonlat(mids)
+                near = np.asarray(spherely.distance(remaining, spherely.points(lon, lat))) <= RIFT_HALF_WIDTH_KM * 1000.
+                active = np.zeros(len(ring), bool)
+                active[near] = piece.mesh.sample(mids[near]) > BREAKUP_THICKNESS_KM
+                if active.all():
+                    bands.append(sphere.strip(np.vstack((ring, ring[:1])), RIFT_HALF_WIDTH_KM))
+                else:
+                    for start in np.flatnonzero(active & ~np.roll(active, 1)):
+                        count = 1
+                        while active[(start + count) % len(ring)]:
+                            count += 1
+                        run = ring[(start + np.arange(count + 1)) % len(ring)]
+                        bands.append(sphere.strip(run, RIFT_HALF_WIDTH_KM))
+        if not bands:
+            continue
+        coast = sphere.union(*bands)
         candidate = sphere.intersection(remaining, coast)
         if sphere.area_km2(candidate) < sphere.DETAIL_KM2:
             continue
@@ -170,9 +190,6 @@ def extend_rift(world, pieces, gain, entry):
             continue
         candidate = sphere.intersection(candidate, sphere.union(*domains))
         outline = np.vstack([r for domain in sphere.polygons(candidate) for r in domain])
-        edge_thickness = piece.mesh.sample(outline)
-        if float(np.mean(edge_thickness)) <= BREAKUP_THICKNESS_KM:
-            continue
         area = sphere.area_km2(candidate)
         if area < sphere.DETAIL_KM2:
             continue
@@ -187,7 +204,10 @@ def extend_rift(world, pieces, gain, entry):
         initial = float(areas @ seed)
         if initial > volume:
             distance = cKDTree(outline).query(field.nodes)[0] * sphere.RADIUS_KM
-            weight = np.exp(-.5 * (distance / RIFT_HALF_WIDTH_KM) ** 2)
+            # Compact support keeps remote cratons unchanged. Only the finite
+            # margin band funds the new footprint, with a smooth shoulder.
+            radius = distance / RIFT_HALF_WIDTH_KM
+            weight = np.where(radius < 1., (1. - radius ** 2) ** 2, 0.)
             def inventory(strain):
                 return float(areas @ (seed / (1. + strain * weight)))
             lower, upper = 0., 1.

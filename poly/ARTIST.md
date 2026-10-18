@@ -91,6 +91,27 @@ rotations; increasing map resolution does not create additional resolved tectoni
 The continental field's ordinary interior spacing is approximately 200 km. Boundary spacing
 and force quadrature are separate settings.
 
+Artist fracture candidates start with the existing great-circle loading screen. Up to three
+supercritical candidates are routed within a 350 km corridor using resolved crustal thickness
+as an effective resistance proxy and inherited collision/suture belts as weaknesses. A temporary
+100 km by 50 km search lattice and 200 km smoothing scale choose a regional path; that lattice
+is not the planet's material representation. A homogeneous resistance field receives no
+decorative wiggles. This is a bounded path search, not a global stress or fracture solution.
+The actual curved spherical polygon partitions the parent. Both children share that same
+boundary, and existing segment state is assigned using its actual sides. Loading is fitted
+again using the curved partition, segment lengths and local normals; a path cannot inherit a
+supercritical straight cut's old score. The source field, effective resistance, search corridor
+and smoothing scales need calibration.
+
+Every real opening gap beside continental rock can stretch that material, including the first
+opening while a new boundary still has a provisional transform label. Previously that first
+gap became an age-zero ocean slit before the boundary was retyped as a ridge; later continental
+stretching could not undo the already-emplaced slit. The artist profile now stretches a finite
+200 km margin band first. A compact smooth thinning kernel leaves remote cratons unchanged and
+funds the new footprint from that band's existing volume. Each coastal section stops extending
+when its resolved edge thickness reaches 12 km, allowing local ocean birth; a thick section of
+the same coast no longer keeps a thin section extending through a whole-coast average.
+
 Remeshing preserves native polygon coverage, including holes and disconnected components.
 Boundary fragments use constrained triangulation in a gnomonic plane, where great-circle
 edges are straight. This avoids fragile hand-written ear clipping. Native spherical polygons
@@ -147,7 +168,7 @@ when qualifying relief. No thickness or height is clipped to make a map pass.
 
 ## What remains before accepting a billion-year world
 
-- Continental opening stretches a band about 100 km wide on each side, conserving the
+- Continental opening stretches a band about 200 km wide on each side, conserving the
   existing rock volume. New ocean crust forms after the sampled edge thins to about 12 km;
   the previously stretched continental margins remain. This is a reduced extension rule,
   not a resolved fault network or lithospheric thermal model.
@@ -189,3 +210,9 @@ Planetary coarsening checks conserve total rock, preserve surface coverage, reta
 material instead of sending it to a distant continent, and carry source reference coordinates
 through plate handover and exact checkpoint restart. Diagnostics separate resolved continental
 volume from passive unresolved volume while the acceptance ledger closes their sum.
+Fracture checks follow a curved inherited weakness, rescore its actual geometry, preserve
+coverage and source references through the curved split, and keep the first provisional rift
+gap continental. A mixed-thickness coast tests local breakup, and a homogeneous resistance
+field tests that routing does not manufacture noise. Controlled prescribed-opening runs
+compare the previous and new rules with identical initial rock and motions; these are process
+calibrations, separate from a force-driven planetary qualification.
