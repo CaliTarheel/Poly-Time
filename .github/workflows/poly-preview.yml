@@ -1,0 +1,64 @@
+name: Poly artist visual review
+
+on:
+  push:
+    branches: [codex/poly-artist-evolution]
+    paths: ['.github/workflows/poly-preview.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Install the recorded numerical packages
+        run: python -m pip install -r poly/requirements.txt numpy==2.3.5 scipy==1.17.0 shapely==2.2.0
+      - name: Evolve a 20 Myr inspection history
+        timeout-minutes: 30
+        run: |
+          python -m poly.artist_run start --output runs/visual --duration 20 \
+            --seed 1 --plates 8 --land .55 --continents .65 \
+            --dt 2 --snapshot 10 --width 720 --spacing 250 --samples 5000
+      - name: Expose small actual-model previews for review
+        if: ${{ always() && hashFiles('runs/visual/history.json') != '' }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+          from poly import artist
+          from poly.checkpoint import load_checkpoint
+          output = Path('runs/visual')
+          history = json.loads((output / 'history.json').read_text())
+          for entry in (history[0], history[-1]):
+              if 'checkpoint' not in entry:
+                  continue
+              world, _ = load_checkpoint(output / entry['checkpoint'])
+              image = output / ('review-%010.3f.png' % world.time_myr)
+              artist.draw(world, image, width=480)
+              print('POLY_PREVIEW_BEGIN ' + str(world.time_myr))
+              print(base64.b64encode(image.read_bytes()).decode())
+              print('POLY_PREVIEW_END')
+          PY
+      - name: Keep the complete short history
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: poly-artist-20myr-review
+          path: runs/visual/
+          if-no-files-found: warn
+          retention-days: 1
