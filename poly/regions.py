@@ -331,8 +331,9 @@ class RegionWorld:
         for p in plates:
             self._update_crust(p, lost[p], gained[p], entry, dt)
         if self.geology is not None:
-            from poly.geology import separate_bodies
+            from poly.geology import separate_bodies, relax_small_bodies
             separate_bodies(self, entry)
+            relax_small_bodies(self, dt, entry)
         self.crust = _merge_bands(self.crust)
         self._spread(dt)  # thick crust flows outward under its own weight
         self._erode(dt, entry)  # and is worn down where it stands high
@@ -569,11 +570,14 @@ class RegionWorld:
                           self.frame(plate), self.frame(to))
         shape = sphere.rotate_geography(piece.shape, carry)
         theirs = [c for c in others if c.plate == to]
+        receiver = None
         for c in [c for c in theirs if c.kind == 'continent']:
             part = sphere.intersection(shape, c.shape)
             a = sphere.area_km2(part)
             if a < TINY_KM2:
                 continue
+            if receiver is None or a > receiver[2]:
+                receiver = (c, part, a)
             share = volume * a / area
             if getattr(c, 'mesh', None) is not None:
                 near = np.vstack([r for poly in sphere.polygons(part) for r in poly])
@@ -584,6 +588,16 @@ class RegionWorld:
             shape = sphere.difference(shape, part)
         left = sphere.area_km2(shape)
         if left < DETAIL_KM2:
+            if self.geology is not None and receiver is not None and left > 0.:
+                # The unresolved footprint goes, but its remaining rock joins
+                # the same collision receiver rather than disappearing.
+                heir, contact, _ = receiver
+                remainder = volume * left / area
+                if heir.mesh is not None:
+                    near = np.vstack([r for poly in sphere.polygons(contact) for r in poly])
+                    heir.mesh.add_volume(remainder, heir.area_km2(), near=near)
+                heir.thickness_km += remainder / heir.area_km2()
+                entry['thickened_km3'] += remainder
             entry['lost']['continent_at_trench'] += left  # a crumb: gone
             piece.shape = sphere.EMPTY  # all of it stacked: the caller drops the empty piece
             return True

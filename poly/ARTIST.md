@@ -111,6 +111,13 @@ exported sediment. When a shortening body loses its mesh, the actual removed out
 locates its lateral escape over its own ocean; losing the mesh does not disable those processes.
 This closes a path that trapped rock in very small remnants, but does not establish that all
 collision relief is calibrated.
+After all plates resolve their losses, an unresolved body sharing a real boundary with a
+larger continental body can accrete onto that body. Its uniform cell exchanges crust with nearby
+receiver cells through an implicit finite-volume contact solve, using the existing cubic yielding
+mobility and 300 km reach. Volume and the original province coordinates are retained. A one-metre
+contact tolerance recognizes shared edges after frame conversion; this rule does not diffuse rock
+across an ocean gap. Isolated bodies still require erosion and lateral escape. This reduced contact
+flow approximation needs calibration alongside ordinary spreading.
 
 The diagnostics and every accepted ledger entry include the maximum continental thickness
 over all mesh nodes and uniform bodies. Snapshot metrics also report the corresponding maximum

@@ -68,6 +68,103 @@ def maximum_thickness(world):
                 for c in world.crust if c.kind == 'continent'), default=0.)
 
 
+def _small_contact(world, piece):
+    """The larger body sharing the most actual coast with a uniform remnant."""
+    import spherely
+    from poly.build import densify
+    rings = [densify(r, 25., closed=True) for poly in sphere.polygons(piece.shape) for r in poly]
+    rings = [r for r in rings if len(r) >= 3]
+    if not rings:
+        return None
+    mids = np.vstack([sphere.unit(r + np.roll(r, -1, axis=0)) for r in rings])
+    lengths = np.concatenate([sphere.arc_km(r, np.roll(r, -1, axis=0)) for r in rings])
+    world_mids = sphere.rotate(mids, world.frame(piece.plate))
+    area, local = piece.area_km2(), {}
+    best = None
+    for candidate in world.crust:
+        if candidate is piece or candidate.kind != 'continent' or candidate.area_km2() <= area:
+            continue
+        plate = candidate.plate
+        if plate not in local:
+            xyz = sphere.rotate(world_mids, world.frame(plate).T)
+            lon, lat = sphere.to_lonlat(xyz)
+            local[plate] = xyz, spherely.points(lon, lat)
+        xyz, points = local[plate]
+        # A one-metre geometric tolerance recognizes the shared edge after
+        # frame conversion; separated islands do not exchange rock across sea.
+        hit = np.asarray(spherely.distance(candidate.shape, points)) <= 1.
+        length = float(lengths[hit].sum())
+        if length > 1e-3 and (best is None or length > best[0]):
+            best = length, candidate, xyz[hit]
+    return best
+
+
+def _relax_uniform_contact(piece, receiver, contact, length_km, dt):
+    """Implicit finite-volume flow between a small cell and nearby crust.
+
+    The star-shaped coupling conserves volume and has the same yielding
+    mobility and 300 km reach as continental spreading. It connects fields
+    across a material boundary without merging their province coordinates.
+    """
+    from scipy.spatial import cKDTree
+    from poly.mesh import REACH_KM, REFERENCE_KM, SPREADING_KM2_PER_MYR
+    area = piece.area_km2()
+    if receiver.mesh is None:
+        weights = np.ones(1)
+        areas = np.array([receiver.area_km2()])
+        thickness = np.array([receiver.thickness_km])
+    else:
+        field = receiver.mesh
+        distance = cKDTree(contact).query(field.nodes, k=1)[0] * sphere.RADIUS_KM
+        weights = np.exp(-.5 * (distance / (REACH_KM / 2.)) ** 2)
+        weights[distance > REACH_KM] = 0.
+        areas = field.node_areas_km2() * receiver.area_km2() / field.area_km2()
+        thickness = field.thickness.copy()
+    old = float(piece.thickness_km)
+    excess = np.maximum((old + thickness) / 2. - REFERENCE_KM, 0.)
+    mobility = 1e-3 + (excess / 10.) ** 3
+    coupling = (dt * SPREADING_KM2_PER_MYR / REACH_KM ** 2 * length_km / np.sqrt(area)
+                * weights * areas * mobility)
+    ratio = np.divide(coupling, areas + coupling, out=np.zeros_like(coupling), where=areas > 0.)
+    mass = areas * ratio
+    shared = (area * old + float(mass @ thickness)) / (area + float(mass.sum()))
+    changed = thickness + ratio * (shared - thickness)
+    # Close the floating-point residual on the scalar cell. This is an
+    # internal exchange, not a source/sink or a chosen thickness ceiling.
+    piece.thickness_km = old - float(areas @ (changed - thickness)) / area
+    if receiver.mesh is None:
+        receiver.thickness_km = float(changed[0])
+    else:
+        receiver.mesh.thickness = changed
+        receiver.thickness_km = receiver.mesh.volume_km3(receiver.area_km2()) / receiver.area_km2()
+    return abs(area * (piece.thickness_km - old))
+
+
+def relax_small_bodies(world, dt, entry):
+    """Accrete contacting unresolved bodies after every plate has resolved its losses.
+
+    Doing this during one plate's update would let a later plate cut away the
+    newly docked body with its obsolete loss mask, leaving a geometry gap.
+    """
+    from poly.mesh import MINIMUM_KM2
+    small = sorted((c for c in world.crust if c.kind == 'continent' and c.mesh is None
+                    and sphere.DETAIL_KM2 <= c.area_km2() < MINIMUM_KM2), key=lambda c: c.area_km2())
+    for piece in small:
+        found = _small_contact(world, piece)
+        if found is None:
+            continue
+        length, receiver, contact = found
+        if piece.plate != receiver.plate:
+            owner = piece.plate
+            others = [c for c in world.crust if c.plate != owner]
+            if not world._dock(piece, owner, receiver.plate, others, entry):
+                continue
+        if piece.mesh is not None or piece.area_km2() < sphere.DETAIL_KM2:
+            continue
+        moved = _relax_uniform_contact(piece, receiver, contact, length, dt)
+        entry['contact_flow_km3'] = entry.get('contact_flow_km3', 0.) + moved
+
+
 def separate_bodies(world, entry=None):
     """Disconnected continents are separate material bodies, including for terrane rules.
 

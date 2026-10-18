@@ -6,7 +6,7 @@ on:
     paths:
       - 'poly/**'
       - 'tests/test_poly_*.py'
-      - 'tests/fixtures/poly/**'
+      - 'tests/fixtures/poly*.json'
       - '.github/workflows/poly-artist.yml'
   workflow_dispatch:
 
