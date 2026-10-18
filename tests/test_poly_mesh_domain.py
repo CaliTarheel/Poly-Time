@@ -118,6 +118,13 @@ class MeshDomainTests(unittest.TestCase):
         np.testing.assert_allclose(mesh.rotated(rotation).sample(sphere.rotate(points, rotation)),
                                    mesh.sample(points), atol=1e-7)
 
+    def test_indexed_sampling_matches_spherical_containment_and_coast_extrapolation(self):
+        mesh = ContinentMesh.build(slit(), 35.)
+        mesh.thickness = np.linspace(35., 70., len(mesh.nodes))
+        lon, lat = np.meshgrid(np.linspace(-1., 11., 37), np.linspace(-1., 11., 31))
+        points = sphere.from_lonlat(lon.ravel(), lat.ravel())
+        np.testing.assert_allclose(mesh.sample(points), mesh._sample_fallback(points), atol=1e-8, rtol=0.)
+
     def test_old_zero_width_face_cannot_make_the_resolved_field_singular(self):
         nodes = np.array([[1., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
         mesh = ContinentMesh(nodes, [[0, 1, 2], [0, 2, 3]], [40., 900., 50., 60.])
@@ -172,6 +179,14 @@ class MeshDomainTests(unittest.TestCase):
         self.assertLess(mesh.thickness.max(), 70.)
         self.assertAlmostEqual((mesh.volume_km3(area) + exported) / before, 1., places=12)
         self.assertAlmostEqual((settled + exported) / removed, 1., places=12)
+
+    def test_submarine_sediment_does_not_rebuild_a_thinned_continental_basement(self):
+        nodes = sphere.from_lonlat([0., 1., 0., 0.], [0., 0., 1., -1e-8])
+        mesh = ContinentMesh(nodes, [[0, 1, 2], [1, 0, 3]], [70., 70., 70., 30.])
+        removed, settled, exported = mesh.erode(1., mesh.area_km2(), bounded_deposition=True)
+        self.assertEqual(settled, 0.)
+        self.assertEqual(exported, removed)
+        self.assertEqual(mesh.thickness[3], 30.)
 
     def test_thicker_crust_spreads_faster_without_a_height_clamp_or_volume_loss(self):
         import copy

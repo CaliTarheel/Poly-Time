@@ -68,7 +68,8 @@ def _execute(output, world, metadata, duration):
                     target_myr=(phase['completed_intervals'] + round(count)) * config['dt_myr'],
                     terrain='Material-attached output relief over resolved crustal thickness',
                     limitations=['Reduced plate mechanics; no resolved mantle convection',
-                                 'No finite-width continental extension or explicit sediment layer',
+                                 'Continental extension uses a conservative finite-band approximation',
+                                 'No separate evolving sediment layer or internal material deformation',
                                  'Sub-mesh relief is procedural amplification',
                                  'Duration reached is recorded; a target is not validation'])
 

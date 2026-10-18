@@ -14,6 +14,8 @@ from poly.topology import segment_motion
 from poly.transfer import segment_distances, transfer_sutures
 
 VERSION = 1
+RIFT_HALF_WIDTH_KM = 100.
+BREAKUP_THICKNESS_KM = 12.
 
 
 def enabled(world):
@@ -126,6 +128,79 @@ def separate_bodies(world, entry=None):
             entry['partition_field_remap_km3'] = entry.get('partition_field_remap_km3', 0.) + remapped - volume
         result.extend(children)
     world.crust = result
+
+
+def extend_rift(world, pieces, gain, entry):
+    """Stretch adjacent continental rock into a spreading gap before oceanization.
+
+    The added footprint comes from thinning the same material within a finite band.
+    It is not new continental magma. Once the edge is too thin, subsequent opening
+    creates ocean in the usual way; the previously stretched margins remain continental.
+    All arguments and fields are in the owning plate's local frame.
+    """
+    import spherely
+    from scipy.spatial import cKDTree
+    from poly.mesh import ContinentMesh
+    remaining = gain
+    for piece in pieces:
+        if (piece.kind != 'continent' or piece.mesh is None
+                or sphere.area_km2(remaining) < sphere.DETAIL_KM2
+                or spherely.distance(piece.shape, remaining) > 1000.):
+            continue
+        rings = [r for domain in sphere.polygons(piece.shape) for r in domain]
+        coast = sphere.union(*[sphere.strip(np.vstack((r, r[:1])), RIFT_HALF_WIDTH_KM) for r in rings])
+        candidate = sphere.intersection(remaining, coast)
+        if sphere.area_km2(candidate) < sphere.DETAIL_KM2:
+            continue
+        # Retain only patches actually touching this continental body, not remote
+        # oceanic ridge segments that merely share a boundary run with it.
+        domains, _ = sphere.parts(candidate)
+        domains = [g for g in domains if spherely.distance(piece.shape, g) <= 1000.]
+        if not domains:
+            continue
+        candidate = sphere.intersection(candidate, sphere.union(*domains))
+        outline = np.vstack([r for domain in sphere.polygons(candidate) for r in domain])
+        edge_thickness = piece.mesh.sample(outline)
+        if float(np.mean(edge_thickness)) <= BREAKUP_THICKNESS_KM:
+            continue
+        area = sphere.area_km2(candidate)
+        if area < sphere.DETAIL_KM2:
+            continue
+        volume = piece.volume_km3()
+        shape = sphere.union(piece.shape, candidate)
+        grown = sphere.area_km2(shape)
+        field = ContinentMesh.build(shape, 0., field=piece.mesh.sample)
+        if field is None:
+            continue
+        areas = field.node_areas_km2() * grown / field.area_km2()
+        seed = field.thickness.copy()
+        initial = float(areas @ seed)
+        if initial > volume:
+            distance = cKDTree(outline).query(field.nodes)[0] * sphere.RADIUS_KM
+            weight = np.exp(-.5 * (distance / RIFT_HALF_WIDTH_KM) ** 2)
+            def inventory(strain):
+                return float(areas @ (seed / (1. + strain * weight)))
+            lower, upper = 0., 1.
+            while inventory(upper) > volume and upper < 1e12:
+                upper *= 2.
+            if inventory(upper) > volume:
+                raise ValueError('The local rift band cannot fund its new continental area.')
+            for _ in range(60):
+                middle = .5 * (lower + upper)
+                if inventory(middle) > volume:
+                    lower = middle
+                else:
+                    upper = middle
+            field.thickness = seed / (1. + .5 * (lower + upper) * weight)
+        elif initial > 0.:
+            # Correct interpolation roundoff without creating or deleting rock.
+            field.thickness *= volume / initial
+        else:
+            raise ValueError('An extending continental field has no material.')
+        piece.shape, piece.mesh, piece.thickness_km = shape, field, volume / grown
+        remaining = sphere.difference(remaining, candidate)
+        entry['continental_extension_km2'] = entry.get('continental_extension_km2', 0.) + area
+    return remaining
 
 
 def transfer_features(world, plate, to, domain, source_frame, target_frame, whole=False):

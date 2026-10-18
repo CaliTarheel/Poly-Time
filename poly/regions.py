@@ -524,7 +524,16 @@ class RegionWorld:
             if area < TINY_KM2:
                 continue
             entry['gained'][category] += area
-            mine.append(Crust(plate, 'ocean', sphere.rotate_geography(shape, back), self.time_myr + .5 * dt))
+            local = sphere.rotate_geography(shape, back)
+            if self.geology is not None and category == 'ridge':
+                from poly.geology import extend_rift
+                local = extend_rift(self, mine, local, entry)
+            remaining_area = sphere.area_km2(local)
+            if remaining_area >= TINY_KM2:
+                mine.append(Crust(plate, 'ocean', local, self.time_myr + .5 * dt))
+            elif self.geology is not None:
+                entry['lost']['sliver'] += remaining_area
+                entry['numerical_area_removed_km2'] += remaining_area
         self.crust = others + [c for c in mine if sphere.area_km2(c.shape) >= TINY_KM2]
 
     def _bequeath(self, piece, volume, mine):

@@ -92,16 +92,18 @@ The artist profile uses a yielding approximation for spreading: conductance is p
 to `0.001 + (max(mean_edge_thickness - 35 km, 0) / 10 km)^3`. Thick belts relax quickly, while
 ordinary cratons and thin margins move slowly. Volume is retained and relief is not clamped
 to a chosen maximum. These effective mobility parameters require calibration. The lateral-escape coast probe uses the same local frame as the ocean it tests.
-Artist sediment deposition fills available lowland accommodation up to 200 m above the
-current water level, within 500 km of an erosion source. Surplus goes to the existing explicit
+Artist sediment deposition fills available onshore lowland accommodation up to 200 m above
+the current water level, within 500 km of an erosion source. Submarine transport and surplus go to the existing explicit
 sea-export ledger. This prevents a tiny surviving receiver from becoming an arbitrarily high
 sediment spike. Offshore export is accounted material, but an evolving offshore sediment
 surface is still absent.
 
 ## What remains before accepting a billion-year world
 
-- Finite-width rifting and passive-margin growth are not implemented. Rift history is recorded,
-  while new opening gaps still follow the existing ocean-creation rule.
+- Continental opening stretches a band about 100 km wide on each side, conserving the
+  existing rock volume. New ocean crust forms after the sampled edge thins to about 12 km;
+  the previously stretched continental margins remain. This is a reduced extension rule,
+  not a resolved fault network or lithospheric thermal model.
 - Basement and deposited sediment are not separate evolving fields. The existing erosion
   and sediment export accounting remains in use.
 - Material rotations track ownership changes. Continuous internal deformation and mixtures

@@ -21,6 +21,38 @@ def world_with_continent():
 
 
 class GeologicalHistoryTests(unittest.TestCase):
+    def test_rift_opening_stretches_existing_rock_and_preserves_the_interior(self):
+        from poly.mesh import ContinentMesh
+        world = world_with_continent()
+        piece = next(c for c in world.crust if c.kind == 'continent')
+        piece.mesh = ContinentMesh.build(piece.shape, piece.thickness_km)
+        grown = sphere.polygon(sphere.disc(sphere.from_lonlat(0., 0.), 550.))
+        gain = sphere.difference(grown, piece.shape)
+        volume, area = piece.volume_km3(), piece.area_km2()
+        entry = {}
+        remaining = geology.extend_rift(world, [piece], gain, entry)
+        self.assertGreater(entry['continental_extension_km2'], 0.)
+        self.assertLess(sphere.area_km2(remaining), sphere.area_km2(gain))
+        self.assertGreater(piece.area_km2(), area)
+        self.assertAlmostEqual(piece.volume_km3() / volume, 1., places=12)
+        self.assertAlmostEqual(piece.mesh.volume_km3(piece.area_km2()) / volume, 1., places=12)
+        self.assertLess(piece.mesh.thickness.min(), 40.)
+        centre = piece.mesh.sample(sphere.from_lonlat(0., 0.)[None])[0]
+        self.assertGreater(centre, 39.5)
+
+    def test_already_thin_rift_edge_leaves_subsequent_opening_for_ocean_birth(self):
+        from poly.mesh import ContinentMesh
+        world = world_with_continent()
+        piece = next(c for c in world.crust if c.kind == 'continent')
+        piece.thickness_km = 10.
+        piece.mesh = ContinentMesh.build(piece.shape, 10.)
+        grown = sphere.polygon(sphere.disc(sphere.from_lonlat(0., 0.), 550.))
+        gain = sphere.difference(grown, piece.shape)
+        original = piece.shape.__getstate__()
+        remaining = geology.extend_rift(world, [piece], gain, {})
+        self.assertEqual(piece.shape.__getstate__(), original)
+        self.assertEqual(remaining.__getstate__(), gain.__getstate__())
+
     def test_texture_coordinates_follow_rotation_and_transfer_to_another_plate(self):
         world = world_with_continent()
         piece = next(c for c in world.crust if c.kind == 'continent')

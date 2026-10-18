@@ -267,31 +267,48 @@ def draw(world, path, width=1600, boundaries=False):
     from PIL import Image, ImageDraw
     from poly.render import _tint, COLOURS
     height = width // 2
-    lon, lat = np.meshgrid(np.linspace(-180., 180., width, endpoint=False) + 180. / width,
-                           np.linspace(90., -90., height, endpoint=False) - 90. / height)
-    points = sphere.from_lonlat(lon.ravel(), lat.ravel())
-    sampled = sample(world, points)
-    z = sampled.height_above_water_km.reshape(height, width)
-    valid = np.isfinite(z)
-    land = (z >= 0.) & valid
-    water = (z < 0.) & valid
-    colours = np.full((height, width, 3), (225., 40., 160.))
+    longitudes = np.linspace(-180., 180., width, endpoint=False) + 180. / width
+    latitudes = np.linspace(90., -90., height, endpoint=False) - 90. / height
+    # Keep full-resolution height and final RGB only. S2 objects, strings and sampling
+    # temporaries are bounded by a stripe, so 8K exports do not allocate a whole globe
+    # of Python/native point objects at once. This changes output memory, not physics.
+    z = np.empty((height, width), np.float32)
+    stripe = max(1, min(64, 262144 // width))
+    invalid_count = 0
+    for start in range(0, height, stripe):
+        stop = min(start + stripe, height)
+        lon, lat = np.meshgrid(longitudes, latitudes[start:stop])
+        points = sphere.from_lonlat(lon.ravel(), lat.ravel())
+        sampled = sample(world, points)
+        block = sampled.height_above_water_km.reshape(stop - start, width)
+        invalid_count += int((~np.isfinite(block)).sum())
+        z[start:stop] = block
     land_palette = [(0., (169, 183, 133)), (.4, (172, 172, 115)), (1.2, (167, 146, 103)),
                     (2.5, (139, 121, 98)), (4., (182, 178, 166)), (6., (240, 240, 233))]
     ocean_palette = [(0., (115, 182, 190)), (.25, (68, 142, 160)), (1., (35, 101, 128)),
                      (3., (20, 65, 94)), (6., (12, 37, 63))]
-    colours[land] = _tint(z[land], land_palette)
-    colours[water] = _tint(-z[water], ocean_palette)
-    # Physical horizontal distances account for longitude convergence at high latitudes.
-    dx = 2. * np.pi * sphere.RADIUS_KM / width * np.maximum(np.cos(np.radians(lat)), .08)
+    pixels = np.empty((height, width, 3), np.uint8)
     dy = np.pi * sphere.RADIUS_KM / height
-    shading_height = np.where(valid, z, 0.)
-    east = (np.roll(shading_height, -1, axis=1) - np.roll(shading_height, 1, axis=1)) / (2. * dx)
-    north = -np.gradient(shading_height, axis=0) / dy
-    shade = np.clip(1. + 8. * (-.65 * east + .65 * north), .55, 1.3)
-    colours *= shade[..., None]
-    colours[~np.isfinite(z)] = (225, 40, 160)
-    picture = Image.fromarray(np.uint8(np.clip(colours, 0., 255.)))
+    for start in range(0, height, stripe):
+        stop = min(start + stripe, height)
+        block = z[start:stop]
+        valid = np.isfinite(block)
+        land, water = (block >= 0.) & valid, (block < 0.) & valid
+        colours = np.full((*block.shape, 3), (225., 40., 160.), np.float32)
+        colours[land] = _tint(block[land], land_palette)
+        colours[water] = _tint(-block[water], ocean_palette)
+        dx = 2. * np.pi * sphere.RADIUS_KM / width * np.maximum(np.cos(np.radians(latitudes[start:stop])), .08)
+        safe = np.where(valid, block, 0.)
+        east = (np.roll(safe, -1, axis=1) - np.roll(safe, 1, axis=1)) / (2. * dx[:, None])
+        rows = np.arange(start, stop)
+        before, after = np.maximum(rows - 1, 0), np.minimum(rows + 1, height - 1)
+        up, down = z[before], z[after]
+        north = (np.where(np.isfinite(up), up, 0.) - np.where(np.isfinite(down), down, 0.)) / ((after - before)[:, None] * dy)
+        shade = np.clip(1. + 8. * (-.65 * east + .65 * north), .55, 1.3)
+        colours *= shade[..., None]
+        colours[~valid] = (225., 40., 160.)
+        pixels[start:stop] = np.uint8(np.clip(colours, 0., 255.))
+    picture = Image.fromarray(pixels)
     if boundaries:
         pen = ImageDraw.Draw(picture)
         for points, kind in world.boundary_lines():
@@ -302,5 +319,5 @@ def draw(world, path, width=1600, boundaries=False):
                     pen.line([(x[k], y[k]), (x[k + 1], y[k + 1])], fill=COLOURS[kind], width=1)
     picture.save(path)
     measured = metrics(world)
-    measured['unresolved_map_pixels'] = int((~valid).sum())
+    measured['unresolved_map_pixels'] = invalid_count
     return measured

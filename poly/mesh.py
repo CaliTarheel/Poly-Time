@@ -125,6 +125,40 @@ class ContinentMesh:
         return ISOSTASY * (thickness - REFERENCE_KM)
 
     def sample(self, points):
+        """Locate faces in a planar index when one spherical chart suffices.
+
+        The index changes only point location, never interpolation or the material domain.
+        Wide domains, edge-roundoff points and extrapolation retain the spherical fallback.
+        """
+        points = np.asarray(points, float).reshape(-1, 3)
+        result = np.full(len(points), np.nan)
+        if not len(points):
+            return result
+        centre, e1, e2 = _frame(self.nodes)
+        if np.isfinite(centre).all() and np.min(self.nodes @ centre) > .2:
+            triangles = _usable_triangles(self.nodes, self.triangles)
+            if len(triangles):
+                xy = _project(self.nodes, centre, e1, e2)
+                tree = shapely.STRtree(shapely.polygons(xy[triangles]))
+                eligible = np.flatnonzero(points @ centre > .2)
+                if len(eligible):
+                    query_xy = _project(points[eligible], centre, e1, e2)
+                    pairs = tree.query(shapely.points(query_xy), predicate='covered_by')
+                    if pairs.shape[1]:
+                        query, first = np.unique(pairs[0], return_index=True)
+                        face_ids = pairs[1, first]
+                        selected = triangles[face_ids]
+                        rows = eligible[query]
+                        inverse = np.linalg.inv(self.nodes[triangles])
+                        weights = np.einsum('pi,pij->pj', points[rows], inverse[face_ids])
+                        weights = np.maximum(weights, 0.)
+                        result[rows] = np.sum(weights * self.thickness[selected], axis=1) / weights.sum(axis=1)
+        missing = np.flatnonzero(np.isnan(result))
+        if len(missing):
+            result[missing] = self._sample_fallback(points[missing])
+        return result
+
+    def _sample_fallback(self, points):
         """Interpolate within a containing face, without blending across coastlines or holes.
 
         New ground outside the old mesh (during recutting) takes the nearest boundary edge's
@@ -283,6 +317,8 @@ class ContinentMesh:
         if removed <= 0.:
             return 0., 0., 0.
         low = elevation <= LOWLAND_KM
+        if bounded_deposition:
+            low &= elevation >= 0.  # submarine sediment is exported, not added to felsic basement
         if not low.any():
             return removed, 0., removed
         d = cKDTree(self.nodes[high]).query(self.nodes[low], k=1)[0] * sphere.RADIUS_KM
